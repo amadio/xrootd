@@ -1,0 +1,117 @@
+name: Release
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - release
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  alma10:
+    name: Alma Linux 10
+    runs-on: ubuntu-24.04-arm
+    container: almalinux:10
+
+    steps:
+    - name: Install git
+      run: yum install -y git
+
+    - name: Clone repository
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Install RPM development tools
+      run: |
+        dnf install -y epel-release rpmdevtools dnf-plugins-core
+        dnf config-manager --set-enabled crb
+
+    - name: Install XRootD build dependencies
+      run: dnf builddep -y xrootd.spec
+
+    - name: Build RPMs
+      run: |
+        rpmdev-setuptree
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        git archive --prefix xrootd/ -o $(rpm -E '%{_sourcedir}')/xrootd.tar.gz HEAD
+        rpmbuild -bb --with git xrootd.spec
+
+    - name: Install RPMs
+      run: dnf install -y $(rpm -E '%{_rpmdir}')/*/*.rpm
+
+    - name: Run post-install tests
+      run: tests/post-install.sh
+
+    - name: Move RPMs to Artifact Directory
+      run: mkdir RPMS && mv $(rpm -E '%{_rpmdir}')/ RPMS$(rpm -E '%{dist}' | tr . /)
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: alma10
+        path: RPMS
+        retention-days: 14
+
+  debian:
+    name: Debian
+
+    strategy:
+      matrix:
+        version: [ 12 ]
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+
+    runs-on: ubuntu-24.04-arm
+    container: debian:${{ matrix.version }}
+
+    steps:
+    - name: Install development tools
+      run: |
+        apt update -qq
+        apt install -y build-essential devscripts git gpg
+
+    - name: Clone repository
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Install XRootD build dependencies
+      run: mk-build-deps --install --remove debian/control <<< yes
+
+    - name: Build DEBs
+      run: |
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        VERSION=$(./genversion.sh --sanitize)
+        dch --create --package xrootd -v "${VERSION}" -M "XRootD ${VERSION}"
+        debuild --no-tgz-check --no-sign -- binary-arch
+
+    - name: Install DEBs
+      run: apt install -y ../*.deb
+
+    - name: Run post-install tests
+      run: tests/post-install.sh
+
+    - name: Create DEB Artifact Directory
+      run: |
+        rm -rf debian
+        source /etc/os-release
+        mkdir -p debian/${VERSION_CODENAME}
+        mv ../*.* debian/${VERSION_CODENAME}
+
+    - name: Upload DEB Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: debian-${{ matrix.version }}
+        path: debian
+        retention-days: 14

@@ -732,6 +732,8 @@ namespace XrdCl
   //----------------------------------------------------------------------------
   void DefaultEnv::Finalize()
   {
+    XrdSysMutexHelper scopedLock( sInitMutex );
+
     if( sPostMaster )
     {
       sPostMaster->Stop();
@@ -864,29 +866,3 @@ namespace XrdCl
   }
 
 }
-
-//------------------------------------------------------------------------------
-// Static initialization and finalization
-//------------------------------------------------------------------------------
-int EnvInitializer::counter = 0;
-
-//------------------------------------------------------------------------------
-// The constructor will be invoked in every translation unit
-// that includes XrdClDefaultEnv.hh, but the DefaultEnv will
-// be initialized only in the first one
-//------------------------------------------------------------------------------
-EnvInitializer::EnvInitializer ()
-{
-  if( counter++ == 0 ) XrdCl::DefaultEnv::Initialize();
-}
-
-//------------------------------------------------------------------------------
-// The destructor will be invoked in every translation unit
-// that includes XrdClDefaultEnv.hh, but the DefaultEnv will
-// be finalized only once in the last one
-//------------------------------------------------------------------------------
-EnvInitializer::~EnvInitializer ()
-{
-  if( --counter == 0 ) XrdCl::DefaultEnv::Finalize();
-}
-

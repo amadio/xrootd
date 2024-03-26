@@ -24,7 +24,6 @@
 #include "XrdVersion.hh"
 
 class XrdOucPinLoader;
-struct EnvInitializer;
 
 namespace XrdCl
 {
@@ -45,8 +44,6 @@ namespace XrdCl
   //----------------------------------------------------------------------------
   class DefaultEnv: public Env
   {
-      friend struct ::EnvInitializer;
-
       //------------------------------------------------------------------------
       //! Constructor
       //------------------------------------------------------------------------
@@ -163,12 +160,12 @@ namespace XrdCl
       //------------------------------------------------------------------------
       //! Initialize the environment
       //------------------------------------------------------------------------
-      static void Initialize();
+      __attribute__((constructor)) static void Initialize();
 
       //------------------------------------------------------------------------
       //! Finalize the environment
       //------------------------------------------------------------------------
-      static void Finalize();
+      __attribute__((destructor)) static void Finalize();
 
 
       static void SetUpLog();
@@ -188,13 +185,5 @@ namespace XrdCl
   };
 
 }
-
-static struct EnvInitializer
-{
-    EnvInitializer();
-    ~EnvInitializer();
-    static int counter;
-} initializer;
-
 
 #endif // __XRD_CL_DEFAULT_ENV_HH__

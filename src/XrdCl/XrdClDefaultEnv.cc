@@ -732,12 +732,15 @@ namespace XrdCl
   //----------------------------------------------------------------------------
   void DefaultEnv::Finalize()
   {
-    if( sPostMaster )
+    XrdSysMutexHelper scopedLock( sInitMutex );
+    PostMaster* postMaster = AtomicGet(sPostMaster);
+    AtomicCAS(sPostMaster, sPostMaster, nullptr);
+
+    if( postMaster )
     {
-      sPostMaster->Stop();
-      sPostMaster->Finalize();
-      delete sPostMaster;
-      sPostMaster = 0;
+      postMaster->Stop();
+      postMaster->Finalize();
+      delete postMaster;
     }
 
     delete sTransportManager;

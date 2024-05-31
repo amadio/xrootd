@@ -49,6 +49,7 @@
 #include "XrdHttpChecksumHandler.hh"
 #include "XrdHttpReadRangeHandler.hh"
 #include "XrdNet/XrdNetPMark.hh"
+#include "XrdSciTokens/XrdSciTokensRedir.hh"
 
 #include <openssl/ssl.h>
 
@@ -225,6 +226,7 @@ private:
   static int xhttpsmode(XrdOucStream &Config);
   static int xtlsreuse(XrdOucStream &Config);
   static int xauth(XrdOucStream &Config);
+  static int xredirtoken(XrdOucStream &Config);
   
   static bool isRequiredXtractor; // If true treat secxtractor errors as fatal
   static XrdHttpSecXtractor *secxtractor;
@@ -460,5 +462,8 @@ protected:
   /// The static string version of m_staticheader_map.  After config parsing is done, this is
   /// computed and we won't need to reference m_staticheader_map in the response path.
   static std::unordered_map<std::string, std::string> m_staticheaders;
+
+  /// Redirect helper from SciTokens
+  static XrdSciTokensRedir *m_redir;
 };
 #endif

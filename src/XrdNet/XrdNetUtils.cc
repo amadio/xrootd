@@ -176,7 +176,7 @@ struct hpSpec
        bool        order46;
        bool        onlyUDP;
        char        ipMap[7];                // ::ffff: (length = 7)
-       char        ipAdr[MAXHOSTNAMELEN+15];
+       char        ipAdr[NI_MAXHOST];
 
               hpSpec(XrdNetUtils::AddrOpts opts)
                     : aiP4(0), aNum4(0), aNum6(0), aiP6(0), map426(false),

@@ -23,6 +23,13 @@ set(XrdAccSciTokens XrdAccSciTokens-${PLUGIN_VERSION})
 add_library(${XrdAccSciTokens} MODULE
   XrdSciTokensAccess.cc XrdSciTokensHelper.hh
   XrdSciTokensMon.cc    XrdSciTokensMon.hh
+                        XrdSciTokensRedir.hh
+                        XrdSciTokensHelper.hh
+
+  ../XrdMacaroons/XrdMacaroonsUtils.cc
+  ../XrdMacaroons/XrdMacaroonsUtils.hh
+  ../XrdMacaroons/XrdMacaroonsGenerate.cc
+  ../XrdMacaroons/XrdMacaroonsGenerate.hh
 )
 
 target_link_libraries(${XrdAccSciTokens}

@@ -105,12 +105,24 @@ Handler::~Handler()
 }
 
 
+// Generate and return an ID for use with the new macaroon
+//
+// Note: this also writes the creation of the ID (and the input
+// information) into the log for auditing purposes.
+//
+// @param resource      - the URL resource / path prefix the macaroon will authorize
+// @param entity        - the security principal that will receive the macaroon
+// @param activities    - the activities the macaroon will be authorized for
+// @param other_caveats - additional caveats that will restrict the macaroon
+// @param expiry        - the Unix timestamp when the token will expire
+//
+// @return              - the ID to embed into the macaroon.  The function will not fail
 std::string
 Handler::GenerateID(const std::string &resource,
                     const XrdSecEntity &entity,
                     const std::string &activities,
                     const std::vector<std::string> &other_caveats,
-                    const std::string &before)
+                    time_t expiry)
 {
     uuid_t uu;
     uuid_generate_random(uu);
@@ -143,7 +155,14 @@ if (m_log->getMsgMask() & LogMask::Debug)
         ss << "user_caveat=" << *iter << ", ";
     }
 
-    ss << "expires=" << before;
+    char utc_time_buf[21];
+    if (strftime(utc_time_buf, 21, "%FT%TZ", gmtime(&expiry)))
+    {
+        std::string utc_time_str(utc_time_buf);
+        ss << "expires=" << utc_time_str;
+    } else {
+        m_log->Emsg("MacaroonGen", "Failed to generate the human-readable expiry time");
+    }
 
     m_log->Emsg("MacaroonGen", ss.str().c_str());  // Mask::Debug
    }
@@ -151,17 +170,31 @@ if (m_log->getMsgMask() & LogMask::Debug)
 }
 
 
-std::string
+std::bitset<AOP_LastOp>
 Handler::GenerateActivities(const XrdHttpExtReq & req, const std::string &resource) const
 {
-    std::string result = "activity:READ_METADATA";
+    std::bitset<AOP_LastOp> result;
     // TODO - generate environment object that includes the Authorization header.
     XrdAccPrivs privs = m_chain ? m_chain->Access(&req.GetSecEntity(), resource.c_str(), AOP_Any, NULL) : XrdAccPriv_None;
-    if ((privs & XrdAccPriv_Create) == XrdAccPriv_Create) {result += ",UPLOAD";}
-    if (privs & XrdAccPriv_Read) {result += ",DOWNLOAD";}
-    if (privs & XrdAccPriv_Delete) {result += ",DELETE";}
-    if ((privs & XrdAccPriv_Chown) == XrdAccPriv_Chown) {result += ",MANAGE,UPDATE_METADATA";}
-    if (privs & XrdAccPriv_Readdir) {result += ",LIST";}
+    if ((privs & XrdAccPriv_Create) == XrdAccPriv_Create) {result.set(AOP_Create);}
+    if (privs & XrdAccPriv_Read) {result.set(AOP_Read);}
+    if (privs & XrdAccPriv_Delete) {result.set(AOP_Delete);}
+    if ((privs & XrdAccPriv_Chown) == XrdAccPriv_Chown) {result.set(AOP_Chown);}
+    if (privs & XrdAccPriv_Readdir) {result.set(AOP_Readdir);}
+    return result;
+}
+
+
+// Given a list of operations, returns a human-readable list of activities that are authorized
+std::string
+Handler::GenerateActivitiesStr(const std::bitset<AOP_LastOp> &opers) const
+{
+    std::string result = "READ_METADATA";
+    if (opers[AOP_Create]) {result += ",UPLOAD";}
+    if (opers[AOP_Read]) {result += ",DOWNLOAD";}
+    if (opers[AOP_Delete]) {result += ",DELETE";}
+    if (opers[AOP_Chown]) {result += ",MANAGE,UPDATE_METADATA";}
+    if (opers[AOP_Readdir]) {result += ",LIST";}
     return result;
 }
 
@@ -452,13 +485,16 @@ Handler::GenerateMacaroonResponse(XrdHttpExtReq &req, const std::string &resourc
     {
         validity = (validity > m_max_duration) ? m_max_duration : validity;
     }
-    now += validity;
+    auto expiry = now + validity;
 
-    char utc_time_buf[21];
-    if (!strftime(utc_time_buf, 21, "%FT%TZ", gmtime(&now)))
-    {
-        return req.SendSimpleResp(500, NULL, NULL, "Internal error constructing UTC time", 0);
+    std::bitset<AOP_LastOp> opers = GenerateActivities(req, resource);
+    std::string macaroon_id = GenerateID(resource, req.GetSecEntity(), GenerateActivitiesStr(opers), other_caveats, expiry);
+
+    auto macaroon_encoded = m_generator.Generate(macaroon_id, req.GetSecEntity().name, resource, opers, expiry, other_caveats);
+    if (macaroon_encoded.empty()) {
+        return req.SendSimpleResp(500, nullptr, nullptr, "Internal error when generating new macaroon", 0);
     }
+<<<<<<< HEAD
     std::string utc_time_str(utc_time_buf);
     std::stringstream ss;
     ss << "before:" << utc_time_str;
@@ -555,13 +591,15 @@ Handler::GenerateMacaroonResponse(XrdHttpExtReq &req, const std::string &resourc
         return req.SendSimpleResp(500, NULL, NULL, "Internal error serializing macaroon", 0);
     }
     macaroon_destroy(mac_with_date);
+=======
+>>>>>>> 439badd3c (Migrate XrdMacaroons to utilize the new generator class)
 
     json_object *response_obj = json_object_new_object();
     if (!response_obj)
     {
         return req.SendSimpleResp(500, NULL, NULL, "Unable to create new JSON response object.", 0);
     }
-    json_object *macaroon_obj = json_object_new_string_len(&macaroon_resp[0], strlen(&macaroon_resp[0]));
+    json_object *macaroon_obj = json_object_new_string_len(macaroon_encoded.c_str(), macaroon_encoded.length());
     if (!macaroon_obj)
     {
         return req.SendSimpleResp(500, NULL, NULL, "Unable to create a new JSON macaroon string.", 0);

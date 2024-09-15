@@ -30,6 +30,7 @@ add_library(${XrdAccSciTokens} MODULE
   ../XrdMacaroons/XrdMacaroonsUtils.hh
   ../XrdMacaroons/XrdMacaroonsGenerate.cc
   ../XrdMacaroons/XrdMacaroonsGenerate.hh
+  ../XrdMacaroons/XrdMacaroonsConfigure.cc
 )
 
 target_link_libraries(${XrdAccSciTokens}

@@ -461,23 +461,26 @@ XrdSecCredentials *XrdSecProtocolztn::readToken(XrdOucErrInfo *erp,
 //
    isbad = true;
 
-// Get the size of the file
+// Open the token file
 //
-   if (stat(path, &Stat))
+   if ((tokFD = open(path, O_RDONLY)) < 0)
       {if (errno != ENOENT) return readFail(erp, path, errno);
        isbad = false;
        return 0;
+      }
+
+// Get the size of the file
+//
+   if (fstat(tokFD, &Stat))
+      {int rc = errno;
+       close(tokFD);
+       return readFail(erp, path, rc);
       }
 
 // Make sure token is not too big
 //
    if (Stat.st_size > maxTSize) return readFail(erp, path, EMSGSIZE);
    buff = (char *)alloca(Stat.st_size+1);
-
-// Open the token file
-//
-   if ((tokFD = open(path, O_RDONLY)) < 0)
-      return readFail(erp, path, errno);
 
 // Read in the token
 //

@@ -243,6 +243,19 @@ jobs:
         tests/post-install.sh
         tests/check-headers.sh
 
+  debian:
+    name: Debian (32bit)
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Clone repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Build Debian docker container on i386
+      run: cd docker && ./xrd-docker buildx debian i386
+
   fedora:
     name: Fedora
     runs-on: ubuntu-latest

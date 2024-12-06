@@ -510,11 +510,16 @@ int XrdSecProtocolkrb5::Authenticate(XrdSecCredentials *cred,
           {char* cpName;
            int ec;
            isCP = true;
-           if ((ec = krb5_unparse_name(krb_context,
+           if (!Ticket || !Ticket->enc_part2)
+              {char mBuff[1024];
+               snprintf(mBuff, sizeof(mBuff),
+                       "[principal not available]");
+               cPrincipal = mBuff;
+           } else if ((ec = krb5_unparse_name(krb_context,
                           (krb5_const_principal)Ticket->enc_part2->client,
                           (char **)&cpName)))
               {char mBuff[1024];
-               snprintf(mBuff, sizeof(mBuff), 
+               snprintf(mBuff, sizeof(mBuff),
                        "[principal unparse failed; %s]", krb_etxt(ec));
                cPrincipal = mBuff;
               } else {

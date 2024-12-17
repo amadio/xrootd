@@ -129,8 +129,8 @@ function run() {
 	# Extract server port from configuration file to avoid duplication
 	XRD_PORT="$(cconfig -x xrootd -c "${CONF}" 2>&1 | grep xrd.port | tr -cd '0-9')"
 
-	# Use the actual hostname if we have one, otherwise fallback to localhost
-	HOST="root://${HOSTNAME:-localhost}:${XRD_PORT}/"
+	# Use localhost as hostname
+	HOST="root://localhost:${XRD_PORT}/"
 
 	export HOST XRD_PORT
 

@@ -202,6 +202,51 @@ jobs:
         tests/post-install.sh
         tests/check-headers.sh
 
+  debian:
+    name: Debian (32bit)
+    runs-on: ubuntu-24.04-arm
+    container: arm32v7/debian
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      CMAKE_ARGS: '-DINSTALL_PYTHON_BINDINGS=0;-DUSE_SYSTEM_ISAL=1;-DCMAKE_INSTALL_PREFIX=/usr'
+
+    steps:
+    - name: Install development tools
+      run: |
+        apt update -qq
+        apt install -y build-essential devscripts equivs git sudo
+
+    - name: Setup GitHub runner user within container
+      run: |
+        groupadd runner && useradd -g runner -m runner
+        chown -R runner:runner ${GITHUB_WORKSPACE}
+
+    - name: Clone repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install XRootD build dependencies
+      run: mk-build-deps --install --remove debian/control <<< yes
+
+    - name: Build and Test with CTest
+      run: sudo -E -u runner ctest -VV -S test.cmake
+
+    - name: Install with CMake
+      run: cmake --install build
+
+    - name: Install Python bindings
+      run: |
+        python3 -m pip install \
+          --target /usr/lib/python3/dist-packages \
+          --use-pep517 --verbose build/bindings/python
+
+    - name: Run post-install tests
+      run: |
+        tests/post-install.sh
+        tests/check-headers.sh
+
   fedora:
     name: Fedora
     runs-on: ubuntu-latest

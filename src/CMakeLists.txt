@@ -55,7 +55,7 @@ if( NOT XRDCL_ONLY )
 
   if( BUILD_HTTP )
     include( XrdHttp )
-    include( XrdTpc )
+    add_subdirectory( XrdTpc )
   endif()
 
   if( BUILD_MACAROONS )

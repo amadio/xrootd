@@ -280,10 +280,8 @@ int TPCHandler::RunCurlWithStreamsImpl(XrdHttpExtReq &req, State &state,
     MultiCurlHandler mch(handles, m_log);
     CURLM *multi_handle = mch.Get();
 
-#ifdef USE_PIPELINING
     curl_multi_setopt(multi_handle, CURLMOPT_PIPELINING, 1);
     curl_multi_setopt(multi_handle, CURLMOPT_MAX_HOST_CONNECTIONS, streams);
-#endif
 
     // Start response to client prior to the first call to curl_multi_perform
     int retval = req.StartChunkedResp(201, "Created", "Content-Type: text/plain");

@@ -35,7 +35,7 @@ if( SYSTEMD_FOUND )
   add_definitions( -DHAVE_SYSTEMD )
 endif()
 
-find_package( CURL )
+find_package( CURL 7.9.6 )
 
 find_package( OpenSSL 1.0.2 REQUIRED )
 add_definitions( -DHAVE_DH_PADDED )

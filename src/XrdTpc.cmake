@@ -54,7 +54,7 @@ if( BUILD_TPC )
 
   target_include_directories( ${LIB_XRD_TPC} PRIVATE ${CURL_INCLUDE_DIRS} )
 
-  if( MacOSX )
+  if( APPLE )
     set( TPC_LINK_FLAGS, "-Wl" )
   else()
     set( TPC_LINK_FLAGS, "-Wl,--version-script=${CMAKE_SOURCE_DIR}/src/XrdTpc/export-lib-symbols" )

@@ -1,0 +1,17 @@
+name: Feature Request
+description: Propose a new feature for XRootD.
+labels: "Feature"
+
+body:
+  - type: markdown
+    attributes:
+      value: Thank you for taking the time to fill out this feature request!
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Feature Description
+      description: |
+        Please describe what new functionality you would like to have in XRootD, and what problem it solves for you. Have you considered any alternatives or workarounds? Do you intend to work towards the implementation of this new feature? Which experiment/community is interested in this feature?
+    validations:
+      required: true

@@ -1,0 +1,26 @@
+name: Bug Report on documentation
+description: Tell us about issues in the XRootD documentation.
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+
+        Please file only documentation bugs here! For general questions, send a message to the mailing list at xrootd-l@slac.stanford.edu or open a new [discussion](https://github.com/xrootd/xrootd/discussions) on GitHub.
+
+  - type: textarea
+    id: source
+    attributes:
+      label: Specify which document you found a problem with
+      description: |
+        Include name, URL, and other relevant details that identify the documentation source.
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+    validations:
+      required: true

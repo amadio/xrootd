@@ -1,0 +1,48 @@
+name: Bug Report
+description: Tell us about your problem with XRootD.
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to fill out this bug report!
+
+        Please file only bugs here! For general questions about XRootD, send a message to the mailing list at xrootd-l@slac.stanford.edu or open a new [discussion](https://github.com/xrootd/xrootd/discussions) on GitHub.
+
+        **Security vulnerabilities** should go to https://github.com/xrootd/xrootd/security
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: |
+        Please describe the problem here.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Reproducer
+      label: How to reproduce the issue.
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: XRootD Version
+      description: |
+        Please post the output of `xrootd-config --version` or `xrdcp --version` here.
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      description: |
+        Please post the output of `uname -a` here.
+      placeholder: 'Alma Linux 9'
+    validations:
+      required: true

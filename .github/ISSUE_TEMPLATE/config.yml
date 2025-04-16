@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Ask a question about XRootD
+    url: https://github.com/xrootd/xrootd/discussions/new/choose
+    about: Use the Discussion forum on GitHub
+  - name: XRootD Online Documentation
+    url: https://xrootd.org/docs
+    about: Find instructions on how to install and configure XRootD

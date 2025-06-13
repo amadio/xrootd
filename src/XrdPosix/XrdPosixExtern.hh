@@ -41,7 +41,7 @@
 // Only 64-bit interfaces are directly supported. However, the preload library
 // supports the old 32-bit interfaces. To use this include you must specify
 
-// -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
+// -D_FILE_OFFSET_BITS=64
 
 // compilation options. This ensures LP64 compatibility which defines:
 //
@@ -49,10 +49,9 @@
 //  size_t -> unsigned long long
 //   off_t ->          long long
 
-#if (!defined(_LARGEFILE_SOURCE) || !defined(_LARGEFILE64_SOURCE) || \
-    _FILE_OFFSET_BITS!=64) && !defined(XRDPOSIXPRELOAD32)
+#if _FILE_OFFSET_BITS!=64 && !defined(XRDPOSIXPRELOAD32)
 #error Compilation options are incompatible with XrdPosixExtern.hh; \
-       Specify -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
+       Specify -D_FILE_OFFSET_BITS=64
 #endif
 
 // We pre-declare various structure t avoid compilation complaints. We cannot

@@ -34,9 +34,10 @@ jobs:
 
     strategy:
       matrix:
-        version: [ 11, 12 ]
+        os: [ 'ubuntu-24.04', 'ubuntu-24.04-arm' ]
+        version: [ 'bullseye', 'bookworm', 'trixie' ]
 
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     container: debian:${{ matrix.version }}
 
     steps:
@@ -69,6 +70,7 @@ jobs:
     - name: Move DEBs to Artifact Directory
       run: |
         source /etc/os-release
+        rm -rf debian/
         mkdir -p debian/${VERSION_CODENAME}
         mv ../*.* debian/${VERSION_CODENAME}
 
@@ -84,16 +86,15 @@ jobs:
 
     strategy:
       matrix:
-        version: [ "22.04", "24.04" ]
+        version: [ '22.04', '24.04', '22.04-arm', '24.04-arm']
 
-    runs-on: ubuntu-latest
-    container: ubuntu:${{ matrix.version }}
+    runs-on: ubuntu-${{ matrix.version }}
 
     steps:
     - name: Install development tools
       run: |
-        apt update -qq
-        apt install -y build-essential devscripts equivs git
+        sudo apt update -qq
+        sudo apt install -y build-essential devscripts equivs git
 
     - name: Clone repository
       uses: actions/checkout@v4
@@ -101,7 +102,7 @@ jobs:
         fetch-depth: 0
 
     - name: Install XRootD build dependencies
-      run: mk-build-deps --install --remove debian/control <<< yes
+      run: mk-build-deps --install --remove -s sudo debian/control <<< yes
 
     - name: Build DEBs
       run: |
@@ -111,7 +112,7 @@ jobs:
         debuild --no-tgz-check --no-sign -- binary-arch
 
     - name: Install DEBs
-      run: apt install -y ../*.deb
+      run: sudo apt install -y ../*.deb
 
     - name: Run post-install tests
       run: tests/post-install.sh

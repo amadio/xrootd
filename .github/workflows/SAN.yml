@@ -1,0 +1,59 @@
+name: SAN
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - sanitizers
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CDASH: ${{ vars.CDASH }}
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  sanitizers:
+    name: Sanitize
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        sanitizer:
+          - address
+          - leak
+          - thread
+          - undefined
+      fail-fast: false
+
+    env:
+      LD_LIBRARY_PATH: ${{ github.workspace }}/build/lib
+      CXXFLAGS: -fno-sanitize=vptr -fno-omit-frame-pointer
+      ASAN_OPTIONS: detect_leaks=0,detect_odr_violation=0
+
+    steps:
+    - name: Install dependencies
+      run: |
+        sudo ln -sf /usr/share/zoneinfo/UTC /etc/localtime
+        sudo apt update -q
+        sudo apt install -y build-essential devscripts equivs gcovr git
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install XRootD build dependencies
+      run: mk-build-deps --install --remove -s sudo debian/control <<< yes
+
+    - name: Build and Test with CTest
+      run: ctest -V --output-on-failure -C Debug -DSANITIZE=${{ matrix.sanitizer }} -S test.cmake

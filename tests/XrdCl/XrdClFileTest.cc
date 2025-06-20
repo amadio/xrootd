@@ -37,6 +37,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <fstream>
+#include <filesystem>
 
 using namespace XrdClTests;
 
@@ -187,7 +188,7 @@ void FileTest::ReadTest()
   std::string filePath = dataPath + "/cb4aacf1-6f28-42f2-b68a-90a73460f424.dat";
   std::string fileUrl = address + "/";
   fileUrl += filePath;
-  localDataPath = realpath(localDataPath.c_str(), NULL);
+  localDataPath = std::filesystem::absolute(localDataPath).string();
   // using the file protocol to access local files, so that we can use XRootD's own functions
   std::string localFileUrl = "file://localhost" + localDataPath + "/srv1" + filePath;
 

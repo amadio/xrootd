@@ -39,4 +39,7 @@ function test_posix() {
 	export XROOTD_VMP="${HOST#root://}:/xrootd/=/"
 
 	assert xrdposix-cat /xrootd/remote.txt
+	assert_failure xrdposix-cat /xrootd/does/not/exist.txt
+
+	assert false # fake failure to check logs being uploaded to CDash
 }

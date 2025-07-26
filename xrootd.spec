@@ -687,7 +687,9 @@ fi
 %doc src/XrdSciTokens/README.md
 
 %files -n xrdcl-http
+%{_libdir}/libXrdClCurl-5.so
 %{_libdir}/libXrdClHttp-5.so
+%config(noreplace) %{_sysconfdir}/%{name}/client.plugins.d/xrdcl-curl-plugin.conf
 %config(noreplace) %{_sysconfdir}/%{name}/client.plugins.d/xrdcl-http-plugin.conf
 
 %if %{with ceph}

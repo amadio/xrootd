@@ -575,32 +575,12 @@ void XrdSecsssKT::keyB2X(ktEnt *theKT, char *buff)
   
 void XrdSecsssKT::keyX2B(ktEnt *theKT, char *xKey)
 {
-//                              0   1   2   3   4   5   6   7
-   static const char xtab[] = {10, 10, 11, 12, 13, 14, 15, 15};
-   int n = strlen(xKey);
-   char *kp, kByte;
+   int len = XrdOucUtils::hex2bin(xKey, theKT->Data.Val, sizeof(theKT->Data.Val));
 
-// Make sure we don't overflow
-//
-   n = (n%2 ? (n+1)/2 : n/2);
-   if (n > ktEnt::maxKLen) n = ktEnt::maxKLen;
-   kp = theKT->Data.Val;
-   theKT->Data.Val[n-1] = 0;
+   if (len <= 0)
+     eMsg("sssKT", EINVAL, "Error decoding sss key text: ", xKey);
 
-// Now convert (we need this to be just consistent not necessarily correct)
-//
-   while(*xKey)
-        {if (*xKey <= '9') kByte  = (*xKey & 0x0f) << 4;
-            else kByte = xtab[*xKey & 0x07] << 4;
-         xKey++;
-         if (*xKey <= '9') kByte |= (*xKey & 0x0f);
-            else kByte |= xtab[*xKey & 0x07];
-         *kp++ = kByte; xKey++;
-        }
-
-// Return data via the structure
-//
-   theKT->Data.Len = n;
+   theKT->Data.Len = len > 0 ? len : 0;
 }
 
 /******************************************************************************/

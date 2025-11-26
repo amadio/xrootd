@@ -5,12 +5,14 @@ if(NOT ENABLE_SCITOKENS)
 endif()
 
 if(FORCE_ENABLED)
+  find_package(picojson REQUIRED)
   find_package(SciTokensCpp REQUIRED)
 else()
+  find_package(picojson)
   find_package(SciTokensCpp)
 endif()
 
-if(SciTokensCpp_FOUND)
+if(picojson_FOUND AND SciTokensCpp_FOUND)
   set(BUILD_SCITOKENS TRUE CACHE INTERNAL "")
 else()
   return()
@@ -27,6 +29,7 @@ target_link_libraries(${XrdAccSciTokens}
   PRIVATE
     XrdUtils
     XrdServer
+    picojson::picojson
     ${SCITOKENS_CPP_LIBRARIES}
     ${CMAKE_THREAD_LIBS_INIT}
     ${CMAKE_DL_LIBS}
@@ -34,8 +37,7 @@ target_link_libraries(${XrdAccSciTokens}
 
 target_include_directories(${XrdAccSciTokens}
   PRIVATE
-    ${CMAKE_SOURCE_DIR}/vendor/inih
-    ${CMAKE_SOURCE_DIR}/vendor/picojson
+    vendor/inih
     ${SCITOKENS_CPP_INCLUDE_DIR}
 )
 

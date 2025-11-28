@@ -577,13 +577,6 @@ void FileTest::VectorReadTest()
   EXPECT_EQ( info->GetSize(), 2560000u );
   delete info;
 
-  // readv with max size (i.e. 1024 elements x (2*MB-16) bytes per element)
-  info = nullptr;
-  ChunkList chunkList3;
-  constexpr size_t iov_max = 1024;
-  constexpr size_t ior_max = 2*1024*1024 - 16;
-  char *buffer3 = static_cast<char*>(malloc(0x80000000ul)); /* 2 GB */
-
   // The requested memory allocation size above (0x80000000) is larger
   // than the maximum allowed memory allocation size on a 32 bit Linux
   // system (0x7FFFFFFF). On these systems the allocation will fail
@@ -591,34 +584,39 @@ void FileTest::VectorReadTest()
   // fault when the test code tries to writ to the allocated memory.
   //
   // Skip the test in such cases instead.
+#if defined(__LP64__) || defined(_LP64)
+  // readv with max size (i.e. 1024 elements x (2*MB-16) bytes per element)
+  info = nullptr;
+  ChunkList chunkList3;
+  constexpr size_t iov_max = 1024;
+  constexpr size_t ior_max = 2*1024*1024 - 16;
 
-  if (buffer3) {
+  if (char *buffer3 = static_cast<char*>(malloc(0x80000000ul))) { /* 2 GB */
+    for(size_t i = 0; i < iov_max; ++i)
+      chunkList3.emplace_back(i*ior_max, ior_max);
 
-  for(size_t i = 0; i < iov_max; ++i)
-    chunkList3.emplace_back(i*ior_max, ior_max);
+    std::string file2GBlocal = localDataPath + dataPath + "/2GB.dat";
+    ASSERT_XRDST_OK(fLocal.Open(file2GBlocal, OpenFlags::Read));
+    ASSERT_XRDST_OK(fLocal.VectorRead(chunkList3, buffer3, info));
+    ASSERT_XRDST_OK(fLocal.Close());
 
-  std::string file2GBlocal = localDataPath + dataPath + "/2GB.dat";
-  ASSERT_XRDST_OK(fLocal.Open(file2GBlocal, OpenFlags::Read));
-  ASSERT_XRDST_OK(fLocal.VectorRead(chunkList3, buffer3, info));
-  ASSERT_XRDST_OK(fLocal.Close());
+    ASSERT_EQ(info->GetSize(), iov_max*ior_max);
+    crc = XrdClTests::Utils::ComputeCRC32(buffer3, iov_max*ior_max);
+    bzero(buffer3, 0x80000000ul); /* reset buffer to zero */
 
-  ASSERT_EQ(info->GetSize(), iov_max*ior_max);
-  crc = XrdClTests::Utils::ComputeCRC32(buffer3, iov_max*ior_max);
-  bzero(buffer3, 0x80000000ul); /* reset buffer to zero */
+    File f2GB;
+    std::string file2GBUrl = address + "/" + dataPath + "/2GB.dat";
+    ASSERT_XRDST_OK(f2GB.Open(file2GBUrl, OpenFlags::Read));
+    ASSERT_XRDST_OK(f2GB.VectorRead(chunkList3, buffer3, info));
+    ASSERT_XRDST_OK(f2GB.Close());
 
-  File f2GB;
-  std::string file2GBUrl = address + "/" + dataPath + "/2GB.dat";
-  ASSERT_XRDST_OK(f2GB.Open(file2GBUrl, OpenFlags::Read));
-  ASSERT_XRDST_OK(f2GB.VectorRead(chunkList3, buffer3, info));
-  ASSERT_XRDST_OK(f2GB.Close());
+    ASSERT_EQ(info->GetSize(), iov_max*ior_max);
+    EXPECT_EQ(XrdClTests::Utils::ComputeCRC32(buffer3, iov_max*ior_max), crc);
 
-  ASSERT_EQ(info->GetSize(), iov_max*ior_max);
-  EXPECT_EQ(XrdClTests::Utils::ComputeCRC32(buffer3, iov_max*ior_max), crc);
-
-  free(buffer3);
-  delete info;
-
+    free(buffer3);
+    delete info;
   }
+#endif
 
   // local vread2
   info = 0;

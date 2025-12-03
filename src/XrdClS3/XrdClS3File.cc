@@ -78,7 +78,7 @@ File::~File() noexcept {}
 
 XrdCl::XRootDStatus
 File::Close(XrdCl::ResponseHandler *handler,
-            timeout_t                timeout)
+            time_t                  timeout)
 {
     return m_wrapped_file->Close(new CloseResponseHandler(&m_is_opened, handler), timeout);
 }
@@ -138,7 +138,7 @@ File::GetFileHandle(const std::string &s3_url) {
     // Hack - we need to set a few properties on the file object before the open occurs.
     // However, the "real" (plugin) file object is not created until the open call.
     // This forces the plugin object to be created, so we can set the properties and Open later.
-    auto status = wrapped_file->Open(url.GetURL(), XrdCl::OpenFlags::Compress, XrdCl::Access::None, nullptr, File::timeout_t(0));
+    auto status = wrapped_file->Open(url.GetURL(), XrdCl::OpenFlags::Compress, XrdCl::Access::None, nullptr, time_t(0));
     if (!status.IsOK()) {
         return std::make_tuple(status, "", nullptr);
     }
@@ -158,7 +158,7 @@ File::Open(const std::string      &url,
            XrdCl::OpenFlags::Flags flags,
            XrdCl::Access::Mode     mode,
            XrdCl::ResponseHandler *handler,
-           timeout_t               timeout)
+           time_t                  timeout)
 {
     if (IsOpen()) {
         m_logger->Error(kLogXrdClS3, "URL %s already open", url.c_str());
@@ -178,7 +178,7 @@ File::PgRead(uint64_t                offset,
              uint32_t                size,
              void                   *buffer,
              XrdCl::ResponseHandler *handler,
-             timeout_t               timeout)
+             time_t                  timeout)
 {
     return m_wrapped_file->PgRead(offset, size, buffer, handler, timeout);
 }
@@ -188,7 +188,7 @@ File::Read(uint64_t                offset,
            uint32_t                size,
            void                   *buffer,
            XrdCl::ResponseHandler *handler,
-           timeout_t               timeout)
+           time_t                  timeout)
 {
 
     return m_wrapped_file->Read(offset, size, buffer, handler, timeout);
@@ -206,7 +206,7 @@ File::SetProperty(const std::string &name,
 XrdCl::XRootDStatus
 File::Stat(bool                    force,
            XrdCl::ResponseHandler *handler,
-           timeout_t               timeout)
+           time_t                  timeout)
 {
     return m_wrapped_file->Stat(force, handler, timeout);
 }
@@ -215,7 +215,7 @@ XrdCl::XRootDStatus
 File::VectorRead(const XrdCl::ChunkList &chunks,
                  void                   *buffer,
                  XrdCl::ResponseHandler *handler,
-                 timeout_t               timeout )
+                 time_t                  timeout )
 {
     return m_wrapped_file->VectorRead(chunks, buffer, handler, timeout);
 }
@@ -225,7 +225,7 @@ File::Write(uint64_t            offset,
             uint32_t                size,
             const void             *buffer,
             XrdCl::ResponseHandler *handler,
-            timeout_t               timeout)
+            time_t                  timeout)
 {
     return m_wrapped_file->Write(offset, size, buffer, handler, timeout);
 }
@@ -234,7 +234,7 @@ XrdCl::XRootDStatus
 File::Write(uint64_t             offset,
             XrdCl::Buffer          &&buffer,
             XrdCl::ResponseHandler  *handler,
-            timeout_t                timeout)
+            time_t                   timeout)
 {
     return m_wrapped_file->Write(offset, std::move(buffer), handler, timeout);
 }

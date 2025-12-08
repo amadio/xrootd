@@ -208,16 +208,23 @@ jobs:
     runs-on: ubuntu-latest
     container: fedora
 
+    strategy:
+      matrix:
+        compiler: [ 'gcc', 'clang' ]
+        build_type: [ 'Debug', 'Release' ]
+      fail-fast: false
+
     env:
       CMAKE_GENERATOR: Ninja
-      CMAKE_ARGS: "-DCMAKE_INSTALL_PREFIX=/usr;-DCMAKE_INSTALL_RPATH='$ORIGIN/../$LIB'"
+      CMAKE_ARGS: "-DCMAKE_INSTALL_PREFIX=/usr;-DCMAKE_INSTALL_RPATH='$ORIGIN/../$LIB';-DCMAKE_CXX_STANDARD=20"
+      CC: ${{ matrix.compiler }}
 
     steps:
     - name: Install dependencies
-      run: dnf install -y dnf-plugins-core git ninja-build rpmdevtools
+      run: dnf install -y dnf-plugins-core git ninja-build rpmdevtools ${{ matrix.compiler }}
 
     - name: Clone repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       with:
         fetch-depth: 0
 
@@ -228,7 +235,7 @@ jobs:
       run: dnf builddep -y --define 'with_ceph 1' xrootd.spec
 
     - name: Build and Test with CTest
-      run: sudo -E -u runner ctest -VV -S test.cmake
+      run: sudo -E -u runner env CC=${CC} CXX=${CC/g*/g++} ctest -VV -C ${{ matrix.build_type }} -S test.cmake
 
     - name: Install with CMake
       run: cmake --install build

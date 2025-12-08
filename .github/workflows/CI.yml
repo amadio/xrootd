@@ -317,3 +317,35 @@ jobs:
         export PYVERSION=$(python3 --version | grep -o 3...)
         export PYTHONPATH=/usr/local/lib/python${PYVERSION}/site-packages
         tests/post-install.sh
+
+  sanitizers:
+    name: Sanitize
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        sanitizer:
+          - address
+          - bounds
+      fail-fast: false
+
+    env:
+      CC: clang
+      CXX: clang++
+
+    steps:
+    - name: Install dependencies
+      run: |
+        sudo apt update -q
+        sudo apt install -y build-essential devscripts equivs git
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install XRootD build dependencies
+      run: mk-build-deps --install --remove -s sudo debian/control <<< yes
+
+    - name: Build and Test with CTest
+      run: ctest -VV -DSANITIZE=${{ matrix.sanitizer }} -S test.cmake

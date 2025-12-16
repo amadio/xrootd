@@ -111,23 +111,6 @@ namespace XrdCl
   };
 
   //----------------------------------------------------------------------------
-  // Helper class for creating null references for particular types
-  //
-  // @arg Response : type for which we need a null reference
-  //----------------------------------------------------------------------------
-  template<typename Response>
-  struct NullRef
-  {
-      static Response value;
-  };
-
-  //----------------------------------------------------------------------------
-  // Initialize the 'null-reference'
-  //----------------------------------------------------------------------------
-  template<typename Response>
-  Response NullRef<Response>::value;
-
-  //----------------------------------------------------------------------------
   //! Unpack response
   //!
   //! @param rsp : AnyObject holding response
@@ -151,7 +134,7 @@ namespace XrdCl
   template<typename Response>
   inline Response* GetResponse( XRootDStatus *status, AnyObject *rsp )
   {
-    if( !status->IsOK() ) return &NullRef<Response>::value;
+    if( !status->IsOK() ) return nullptr;
     return GetResponse<Response>( rsp );
   }
 
@@ -195,8 +178,12 @@ namespace XrdCl
         std::unique_ptr<XRootDStatus> delst( status );
         std::unique_ptr<AnyObject> delrsp( response );
         std::unique_ptr<HostList> delhl( hostList );
-        Response *res = GetResponse<Response>( status, response );
-        fun( *status, *res, *hostList );
+        if (Response *res = GetResponse<Response>( status, response ))
+          fun( *status, *res, *hostList );
+        else {
+          Response dummy;
+          fun( *status, dummy, *hostList );
+        }
       }
 
     private:
@@ -284,8 +271,12 @@ namespace XrdCl
       {
         std::unique_ptr<XRootDStatus> delst( status );
         std::unique_ptr<AnyObject> delrsp( response );
-        Response *resp = GetResponse<Response>( status, response );
-        task( *status, *resp );
+        if (Response *resp = GetResponse<Response>( status, response )) {
+          task( *status, *resp );
+        } else {
+          Response dummy;
+          task( *status, dummy );
+        }
       }
 
     private:
@@ -376,13 +367,15 @@ namespace XrdCl
         std::unique_ptr<StatInfo> delrsp;
         std::unique_ptr<HostList> delhl;
         StatInfo *info = nullptr;
-        if( status->IsOK() )
-        {
-          XRootDStatus st = f->Stat( false, info );
-          delrsp.reset( info );
+
+        if( !status->IsOK() ) {
+          StatInfo dummy{};
+          fun( *status, dummy, *hostList );
+          return;
         }
-        else
-          info = &NullRef<StatInfo>::value;
+
+        XRootDStatus st = f->Stat( false, info );
+        delrsp.reset( info );
         fun( *status, *info, *hostList );
       }
 
@@ -528,19 +521,16 @@ namespace XrdCl
       {
         std::unique_ptr<XRootDStatus> delst( status );
         std::unique_ptr<AnyObject> delrsp( response );
-        if( status->IsOK() )
-        {
-          Response *resp = GetResponse<Response>( response );
-          if( resp == &NullRef<Response>::value )
-            this->SetException( XRootDStatus( stError, errInternal ) );
-          else
-          {
+        if( status->IsOK() ) {
+          if(Response *resp = GetResponse<Response>( response )) {
             this->prms.set_value( std::move( *resp ) );
             this->fulfilled = true;
+          } else {
+            this->SetException( XRootDStatus( stError, errInternal ) );
           }
-        }
-        else
+        } else {
           this->SetException( *status );
+        }
       }
   };
 

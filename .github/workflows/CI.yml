@@ -237,6 +237,7 @@ jobs:
       matrix:
         os: [ '24.04', '24.04-arm' ]
         compiler: [ 'gcc', 'clang' ]
+      fail-fast: false
 
     runs-on: ubuntu-${{ matrix.os }}
 

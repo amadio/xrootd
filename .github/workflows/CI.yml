@@ -21,6 +21,7 @@ env:
   CDASH: ${{ vars.CDASH }}
   CMAKE_VERBOSE_MAKEFILE: true
   CTEST_OUTPUT_ON_FAILURE: true
+  CMAKE_BUILD_TYPE: RelWithDebInfo
 
 jobs:
   alpine:

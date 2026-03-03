@@ -127,35 +127,45 @@ int XrdPosixMap::mapCode(int rc)
 {
     switch(rc)
        {case XrdCl::errRetry:                return EAGAIN;       // Cl:001
+        case XrdCl::errUnknown:              return EPROTO;       // Cl:002
         case XrdCl::errInvalidOp:            return EOPNOTSUPP;   // Cl:003
-        case XrdCl::errConfig:               return ENOEXEC;      // Cl:006
+        case XrdCl::errPoll:                 return EBADFD;       // Cl:005
+        case XrdCl::errConfig:               return EINVAL;       // Cl:006
+        case XrdCl::errUnknownCommand:       return EOPNOTSUPP;   // Cl:008
         case XrdCl::errInvalidArgs:          return EINVAL;       // Cl:009
         case XrdCl::errInProgress:           return EINPROGRESS;  // Cl:010
         case XrdCl::errNotSupported:         return ENOTSUP;      // Cl:013
-        case XrdCl::errDataError:            return EDOM;         // Cl:014
+        case XrdCl::errDataError:            return EREMOTEIO;    // Cl:014
         case XrdCl::errNotImplemented:       return ENOSYS;       // Cl:015
         case XrdCl::errNoMoreReplicas:       return ENOSR;        // Cl:016
+        case XrdCl::errPipelineFailed:       return EINTR;        // Cl:017
         case XrdCl::errInvalidAddr:          return EHOSTUNREACH; // Cl:101
         case XrdCl::errSocketError:          return ENOTSOCK;     // Cl:102
         case XrdCl::errSocketTimeout:        return ETIMEDOUT;    // Cl:103
         case XrdCl::errSocketDisconnected:   return ENOTCONN;     // Cl:104
+        case XrdCl::errSocketOptError:       return EOPNOTSUPP;   // Cl:106
         case XrdCl::errStreamDisconnect:     return ECONNRESET;   // Cl:107
-        case XrdCl::errConnectionError:      return ECONNREFUSED; // Cl:108
+        case XrdCl::errConnectionError:      return ECONNABORTED; // Cl:108
         case XrdCl::errInvalidSession:       return ECHRNG;       // Cl:109
-        case XrdCl::errTlsError:             return ENETRESET;    // Cl:110
-        case XrdCl::errInvalidMessage:       return EPROTO;       // Cl:201
-        case XrdCl::errHandShakeFailed:      return EPROTO;       // Cl:202
-        case XrdCl::errLoginFailed:          return ECONNABORTED; // Cl:203
+        case XrdCl::errTlsError:             return ECONNRESET;   // Cl:110
+        case XrdCl::errInvalidMessage:       return EBADMSG;      // Cl:201
+        case XrdCl::errHandShakeFailed:      return EBADE;        // Cl:202
+        case XrdCl::errLoginFailed:          return ECONNREFUSED; // Cl:203
         case XrdCl::errAuthFailed:           return EAUTH;        // Cl:204
         case XrdCl::errQueryNotSupported:    return ENOTSUP;      // Cl:205
         case XrdCl::errOperationExpired:     return ETIME;        // Cl:206
         case XrdCl::errOperationInterrupted: return EINTR;        // Cl:207
+        case XrdCl::errThresholdExceeded:    return EBUSY;        // Cl:208
         case XrdCl::errNoMoreFreeSIDs:       return ENOSR;        // Cl:301
         case XrdCl::errInvalidRedirectURL:   return ESPIPE;       // Cl:302
         case XrdCl::errInvalidResponse:      return EBADMSG;      // Cl:303
         case XrdCl::errNotFound:             return EIDRM;        // Cl:304
         case XrdCl::errCheckSumError:        return EILSEQ;       // Cl:305
         case XrdCl::errRedirectLimit:        return ELOOP;        // Cl:306
+        case XrdCl::errCorruptedHeader:      return EBADMSG;      // Cl:307
+        case XrdCl::errRedirect:             return EREMCHG;      // Cl:401
+        case XrdCl::errLocalError:           return EIO;          // Cl:402
+
         default:                             break;
        }
    return ENOMSG;

@@ -2721,21 +2721,13 @@ int XrdXrootdProtocol::do_ReadV()
 // client to interpret it. Code originally developed by Leandro Franco, CERN.
 // The readv file system code originally added by Brian Bockelman, UNL.
 //
-   const int hdrSZ = sizeof(readahead_list);
-   struct XrdOucIOVec     rdVec[XrdProto::maxRvecsz+1];
-   struct readahead_list *raVec, respHdr;
-   long long totSZ;
-   XrdSfsXferSize rdVAmt, rdVXfr, xfrSZ = 0;
-   int rdVBeg, rdVBreak, rdVNow, rdVNum, rdVecNum;
-   int currFH, i, k, Quantum, Qleft, rdVecLen = Request.header.dlen;
-   int rvMon = Monitor.InOut();
-   int ioMon = (rvMon > 1);
-   char *buffp, vType = (ioMon ? XROOTD_MON_READU : XROOTD_MON_READV);
+   constexpr ssize_t hdrSZ = sizeof(readahead_list);
 
 // Compute number of elements in the read vector and make sure we have no
 // partial elements.
 //
-   rdVecNum = rdVecLen / sizeof(readahead_list);
+   int rdVecLen = Request.header.dlen;
+   int rdVecNum = rdVecLen / sizeof(readahead_list);
    if ( (rdVecNum <= 0) || (rdVecNum*hdrSZ != rdVecLen) )
       return Response.Send(kXR_ArgInvalid, "Read vector is invalid");
 
@@ -2754,24 +2746,27 @@ int XrdXrootdProtocol::do_ReadV()
 // read may be greater than the maximum transfer size. We also use this loop
 // to copy the read ahead list to our readv vector for later processing.
 //
-   raVec = (readahead_list *)argp->buff;
-   totSZ = rdVecLen; Quantum = maxReadv_ior;
+   ssize_t totSZ = rdVecLen;
+   struct XrdOucIOVec rdVec[XrdProto::maxRvecsz+1];
+   struct readahead_list *raVec = (readahead_list *)argp->buff;
+
+   int i;
    for (i = 0; i < rdVecNum; i++) 
        {totSZ += (rdVec[i].size = ntohl(raVec[i].rlen));
-        if (rdVec[i].size < 0)       return Response.Send(kXR_ArgInvalid,
-                                           "Readv length is negative");
-        if (rdVec[i].size > Quantum) return Response.Send(kXR_NoMemory,
-                                           "Single readv transfer is too large");
+        if (rdVec[i].size < 0)
+           return Response.Send(kXR_ArgInvalid, "Readv length is negative");
+        if (rdVec[i].size > maxReadv_ior)
+           return Response.Send(kXR_NoMemory, "Single readv transfer is too large");
         rdVec[i].offset = ntohll(raVec[i].offset);
         memcpy(&rdVec[i].info, raVec[i].fhandle, sizeof(int));
        }
 
 // Now add an extra dummy element to force flushing of the read vector.
 //
+   int rdVBreak = rdVecNum;
    rdVec[i].offset = -1;
    rdVec[i].size   =  0;
    rdVec[i].info   = -1;
-   rdVBreak = rdVecNum;
    rdVecNum++;
 
 // We limit the total size of the read to be 2GB for convenience
@@ -2780,14 +2775,14 @@ int XrdXrootdProtocol::do_ReadV()
       return Response.Send(kXR_NoMemory, "Total readv transfer is too large");
 
 // Calculate the transfer unit which will be the smaller of the maximum
-// transfer unit and the actual amount we need to transfer.
+// transfer unit (256KB) and the actual amount we need to transfer.
 //
    Quantum = totSZ < maxTransz ? totSZ : maxTransz;
 
 // Now obtain the right size buffer
 //
    if ((Quantum < halfBSize && Quantum > 1024) || Quantum > argp->bsize)
-      {if ((k = getBuff(1, Quantum)) <= 0) return k;}
+      {int k = getBuff(1, Quantum); if (k <= 0) return k;}
       else if (hcNow < hcNext) hcNow++;
 
 // Check that we really have at least one file open. This needs to be done 
@@ -2799,15 +2794,20 @@ int XrdXrootdProtocol::do_ReadV()
 // Preset the previous and current file handle to be the handle of the first
 // element and make sure the file is actually open.
 //
-   currFH = rdVec[0].info;
+   struct readahead_list respHdr;
+   int currFH = rdVec[0].info;
    memcpy(respHdr.fhandle, &currFH, sizeof(respHdr.fhandle));
    if (!(IO.File = FTab->Get(currFH))) return Response.Send(kXR_FileNotOpen,
                                       "readv does not refer to an open file");
 
 // Setup variables for running through the list.
 //
-   Qleft = Quantum; buffp = argp->buff; rvSeq++;
-   rdVBeg = rdVNow = 0; rdVXfr = rdVAmt = 0;
+   int Qleft = Quantum;
+   int rdVBeg = 0, rdVNow = 0;
+   int rvMon = Monitor.InOut(), ioMon = (rvMon > 1);
+   char vType = (ioMon ? XROOTD_MON_READU : XROOTD_MON_READV);
+   XrdSfsXferSize rdVAmt = 0, rdVXfr = 0, xfrSZ = 0;
+   char *buffp = argp->buff; rvSeq++;
 
 // Now run through the elements
 //
@@ -2815,12 +2815,12 @@ int XrdXrootdProtocol::do_ReadV()
        {if (rdVec[i].info != currFH)
            {xfrSZ = IO.File->XrdSfsp->readv(&rdVec[rdVNow], i-rdVNow);
             if (xfrSZ != rdVAmt) break;
-            rdVNum = i - rdVBeg; rdVXfr += rdVAmt;
+            int rdVNum = i - rdVBeg; rdVXfr += rdVAmt;
             IO.File->Stats.rvOps(rdVXfr, rdVNum);
             if (rvMon)
                {Monitor.Agent->Add_rv(IO.File->Stats.FileID, htonl(rdVXfr),
                                               htons(rdVNum), rvSeq, vType);
-                if (ioMon) for (k = rdVBeg; k < i; k++)
+                if (ioMon) for (int k = rdVBeg; k < i; k++)
                     Monitor.Agent->Add_rd(IO.File->Stats.FileID,
                             htonl(rdVec[k].size), htonll(rdVec[k].offset));
                }

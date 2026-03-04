@@ -237,12 +237,15 @@ jobs:
       matrix:
         os: [ '24.04', '24.04-arm' ]
         compiler: [ 'gcc', 'clang' ]
+        config: [ 'Debug', 'Release' ]
+      fail-fast: false
 
     runs-on: ubuntu-${{ matrix.os }}
 
     env:
       CC: ${{ matrix.compiler }}
       DEBIAN_FRONTEND: noninteractive
+      CMAKE_BUILD_TYPE: ${{ matrix.config }}
       CMAKE_ARGS: '-DINSTALL_PYTHON_BINDINGS=0;-DCMAKE_INSTALL_PREFIX=/usr'
 
     steps:

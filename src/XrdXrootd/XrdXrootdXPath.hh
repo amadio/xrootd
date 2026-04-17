@@ -30,6 +30,8 @@
 /* specific prior written permission of the institution or contributor.       */
 /******************************************************************************/
 
+#include "XrdOuc/XrdOucPrivateUtils.hh"
+
 #include <strings.h>
 #include <cstdlib>
 
@@ -75,8 +77,10 @@ inline char           *Path(int &PLen)
 inline int             Validate(const char *pd, const int pl=0)
                                {int plen = (pl ? pl : strlen(pd));
                                 XrdXrootdXPath *p = next;
-                                while(p && plen >= p->pathlen)
-                                     {if (!strncmp(pd, p->path, p->pathlen))
+                                std::string_view pdv(pd, plen);
+                                while(p)
+                                     {std::string_view pv(p->path, p->pathlen);
+                                      if (is_subdirectory(pv, pdv))
                                          return p->pathopt;
                                       p=p->next;
                                      }

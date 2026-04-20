@@ -305,6 +305,17 @@ static std::string PrepareURL(const std::string &input) {
     return input;
 }
 
+static bool IsAllowedScheme(const std::string& url)
+{
+  const std::string allowed_schemes[] = { "https://", "http://" };
+
+  for (const auto& s : allowed_schemes)
+    if (url.compare(0, s.size(), s) == 0)
+      return true;
+
+  return false;
+}
+
 /******************************************************************************/
 /*                T P C H a n d l e r : : P r o c e s s R e q                 */
 /******************************************************************************/
@@ -323,10 +334,21 @@ int TPCHandler::ProcessReq(XrdHttpExtReq &req) {
     header = XrdOucTUtils::caseInsensitiveFind(req.headers,"source");
     if (header != req.headers.end()) {
         std::string src = PrepareURL(header->second);
+        if (!IsAllowedScheme(src)) {
+            const char *error_src = "COPY rejected: disallowed scheme in source URL";
+            m_log.Emsg("ProcessReq", error_src, src.c_str());
+            return req.SendSimpleResp(400, NULL, NULL, error_src, 0);
+        }
         return ProcessPullReq(src, req);
     }
     header = XrdOucTUtils::caseInsensitiveFind(req.headers,"destination");
     if (header != req.headers.end()) {
+        const std::string& dst = header->second;
+        if (!IsAllowedScheme(dst)) {
+            const char *error_dst = "COPY rejected: disallowed scheme in destination URL";
+            m_log.Emsg("ProcessReq", error_dst, dst.c_str());
+            return req.SendSimpleResp(400, NULL, NULL, error_dst, 0);
+        }
         return ProcessPushReq(header->second, req);
     }
     m_log.Emsg("ProcessReq", "COPY verb requested but no source or destination specified.");

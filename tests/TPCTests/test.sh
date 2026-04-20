@@ -221,6 +221,41 @@ perform_http_tpc() {
     return 0
 }
 
+plain_http_tpc() {
+    local mode="$1"
+    local src="$2"
+    local token_src="$3"
+    local dst="$4"
+    local token_dst="$5"
+
+    local http_code
+
+    case "${mode}" in
+    pull)
+        http_code=$(${CURL} -X COPY -L -s -o >(cat >&2) -w "%{http_code}" \
+            --cacert "${BINARY_DIR}/tests/issuer/tlsca.pem" \
+            -H "Authorization: Bearer ${token_src}" \
+            -H "TransferHeaderAuthorization: Bearer ${token_dst}" \
+            -H "Source: ${src}" "${dst}")
+    ;;
+
+    push)
+        http_code=$(${CURL} -X COPY -L -s -o >(cat >&2) -w "%{http_code}" \
+            --cacert "${BINARY_DIR}/tests/issuer/tlsca.pem" \
+            -H "Authorization: Bearer ${token_dst}" \
+            -H "TransferHeaderAuthorization: Bearer ${token_src}" \
+            -H "Destination: ${dst}" "${src}")
+    ;;
+
+    *) echo "ERROR: Unsupported mode: $mode" >&2
+       return 1
+    ;;
+    esac
+
+    echo "$http_code"
+    return 0
+}
+
 download_file() {
     local src=$1
     local dest=$2
@@ -383,6 +418,11 @@ verify_checksum "crc32c" "${LCLDATADIR}/${src}_empty.ref" "${LCLDATADIR}/${src}_
 verify_checksum "adler32" "${LCLDATADIR}/${src}_empty.ref" "${LCLDATADIR}/${src}_to_${dst}_empty.dat_http_push" "${hosts[$dst_idx]}" "${RMTDATADIR}/${src}_to_${dst}_empty.ref_http_push"
 
 cleanup
+
+# Invalid source/destination in TPC URLs
+
+assert_eq "400" "$(plain_http_tpc pull "file:///etc/os-release" "$BEARER_TOKEN" "${hosts_http[0]}/${RMTDATADIR}/os-release" "$BEARER_TOKEN")" "Did not reject disallowed protocol"
+assert_eq "400" "$(plain_http_tpc push "${hosts_http[0]}" "$BEARER_TOKEN" "${hosts_http[0]/https/root}/${RMTDATADIR}/fake.root" "$BEARER_TOKEN")" "Did not reject disallowed protocol"
 
 echo "ALL TESTS PASSED"
 exit 0

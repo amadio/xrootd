@@ -16,12 +16,56 @@ on:
       - pyproject.toml
       - 'bindings/**'
   workflow_dispatch:
+  release:
+    types:
+      - published
+
+env:
+  PYTHON_PUBLISH_REPOSITORY_URL: https://test.pypi.org/legacy/
+  PYTHON_PUBLISH_PROJECT_URL: https://test.pypi.org/p/xrootd
+  # To publish to PyPI instead, change the values above to the PyPI
+  # endpoints and switch the publish job environment from testpypi to pypi.
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
 
 jobs:
+  sdist:
+    if: github.event_name == 'release'
+    name: Source distribution
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHON: python3
+
+    steps:
+    - name: Clone repository
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.13"
+
+    - name: Install Python build dependencies
+      run: ${PYTHON} -m pip install build
+
+    - name: Build source distribution tarball
+      run: |
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        ./genversion.sh >| VERSION
+        ${PYTHON} -m build --sdist
+
+    - name: Upload source distribution
+      uses: actions/upload-artifact@v7
+      with:
+        name: python-sdist
+        path: dist/*.tar.gz
+        retention-days: 14
+
   manylinux:
     name: Python ${{ matrix.version }} (Linux, ${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runs_on }}
@@ -157,3 +201,61 @@ jobs:
         name: python-${{ matrix.version }}-macos-${{ matrix.platform.arch }}
         path: wheelhouse
         retention-days: 14
+
+  bundle-dist:
+    if: github.event_name == 'release'
+    name: Bundle distributions
+    needs:
+      - sdist
+      - manylinux
+      - macos
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Download distributions
+      uses: actions/download-artifact@v7
+      with:
+        path: dist
+        pattern: python-*
+        merge-multiple: true
+
+    - name: Show distributions
+      run: ls -lh dist
+
+    - name: Upload bundled distributions
+      uses: actions/upload-artifact@v7
+      with:
+        name: python-dist
+        path: dist/*
+        retention-days: 14
+
+  publish-python:
+    if: github.event_name == 'release'
+    name: Publish Python distributions
+    needs:
+      - bundle-dist
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      # name: pypi
+      url: ${{ env.PYTHON_PUBLISH_PROJECT_URL }}
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - name: Download distributions
+      uses: actions/download-artifact@v7
+      with:
+        path: dist
+        name: python-dist
+
+    - name: Show distributions
+      run: ls -lh dist
+
+    - name: Publish package distributions
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        repository-url: ${{ env.PYTHON_PUBLISH_REPOSITORY_URL }}
+        packages-dir: dist/
+        skip-existing: true

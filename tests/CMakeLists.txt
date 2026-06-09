@@ -31,6 +31,8 @@ add_subdirectory(krb5)
 add_subdirectory(scitokens)
 add_subdirectory(tls)
 
+add_subdirectory(integration)
+
 add_subdirectory(XrdClHttpCommon)
 add_subdirectory(XrdClHttp)
 add_subdirectory(XrdClS3)

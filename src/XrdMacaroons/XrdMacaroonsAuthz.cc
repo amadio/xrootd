@@ -261,8 +261,11 @@ Authz::Access(const XrdSecEntity *Entity, const char *path,
         Entity->eaAPI->Add("request.name", username,true);
     }
 
-    // We passed verification - give the correct privilege.
-    return AddPriv(oper, XrdAccPriv_None);
+    // Macaroon caveats passed - but caveats only attenuate, never grant privileges.
+    // We still must pass XrdOfs checks if configured. Therefore, delegate to the authz chain
+    // to ensure that the underlying user's permissions bound what the macaroon can do.
+    // Without a chain, allow the operation.
+    return m_chain ? m_chain->Access(Entity, path, oper, env) : AddPriv(oper, XrdAccPriv_None);
 }
 
 bool Authz::Validate(const char   *token,

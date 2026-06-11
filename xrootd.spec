@@ -28,9 +28,14 @@ Source0:	%{name}.tar.gz
 
 %undefine __cmake_in_source_build
 
-BuildRequires:	cmake
+%if %{?rhel}%{!?rhel:0} == 8
+BuildRequires:	gcc-toolset-15
+%else
 BuildRequires:	gcc-c++
 BuildRequires:	gdb
+%endif
+
+BuildRequires:	cmake
 BuildRequires:	which
 BuildRequires:	make
 BuildRequires:	pkgconfig
@@ -60,7 +65,11 @@ BuildRequires:	scitokens-cpp-devel
 BuildRequires:  libxcrypt-devel
 
 %if %{with asan}
+%if %{?rhel}%{!?rhel:0} == 8
+BuildRequires:	gcc-toolset-15-libasan-devel
+%else
 BuildRequires:	libasan
+%endif
 %endif
 
 %if %{with ceph}
@@ -301,6 +310,10 @@ This package contains the API documentation of the XRootD libraries.
 
 %build
 
+%if %{?rhel}%{!?rhel:0} == 8
+source /opt/rh/gcc-toolset-15/enable
+%endif
+
 %if %{with clang}
 export CC=clang
 export CXX=clang++
@@ -339,6 +352,10 @@ doxygen Doxyfile
 %endif
 
 %install
+
+%if %{?rhel}%{!?rhel:0} == 8
+source /opt/rh/gcc-toolset-15/enable
+%endif
 
 %cmake_install
 

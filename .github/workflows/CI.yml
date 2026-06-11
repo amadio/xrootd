@@ -115,7 +115,7 @@ jobs:
       run: dnf builddep -y xrootd.spec
 
     - name: Build and Test with CTest
-      run: sudo -E -u runner ctest -VV -S test.cmake
+      run: scl enable gcc-toolset-15 'sudo -E -u runner ctest -VV -S test.cmake'
 
     - name: Install with CMake
       run: cmake --install build

@@ -173,6 +173,8 @@ function teardown() {
 		test -s "${PIDFILE}" || continue
 		PID="$(ps -o pid= "$(cat "${PIDFILE}")" || true)"
 		if test -n "${PID}"; then
+			kill -s PROF "${PID}"
+			sleep 3
 			kill -s TERM "${PID}"
 		fi
 	done

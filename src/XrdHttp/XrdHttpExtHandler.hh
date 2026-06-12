@@ -35,8 +35,13 @@
 
 #include <map>
 #include <string>
+#include <csignal>
 
 #include "XrdNet/XrdNetPMark.hh"
+
+#ifdef ENABLE_COVERAGE
+extern "C" void __gcov_dump(void);
+#endif
 
 class XrdLink;
 class XrdSecEntity;
@@ -107,7 +112,12 @@ public:
   //! Constructor
   //------------------------------------------------------------------------------
   
-  XrdHttpExtHandler() {}
+  XrdHttpExtHandler()
+  {
+#ifdef ENABLE_COVERAGE
+    (void) signal(SIGPROF, [](int) { __gcov_dump(); });
+#endif
+  }
   
   //------------------------------------------------------------------------------
   //! Destructor

@@ -17,6 +17,9 @@ createDirectiories() {
 stop() {
     for i in "${servernames[@]}"; do
         if [[ -d "${i}" ]]; then
+            kill -s PROF "$(cat "${i}"/cmsd.pid)"
+            kill -s PROF "$(cat "${i}"/xrootd.pid)"
+	    sleep 5
             kill -s TERM "$(cat "${i}"/cmsd.pid)"
             kill -s TERM "$(cat "${i}"/xrootd.pid)"
         fi

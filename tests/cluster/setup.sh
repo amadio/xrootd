@@ -165,6 +165,9 @@ start(){
 stop() {
 	for i in "${servernames[@]}"; do
 		if [[ -d "${i}" ]]; then
+			kill -s PROF $(cat ${i}/cmsd.pid)
+			kill -s PROF $(cat ${i}/xrootd.pid)
+			sleep 3
 			kill -s TERM $(cat ${i}/cmsd.pid)
 			kill -s TERM $(cat ${i}/xrootd.pid)
 			rm -rf "${i}"

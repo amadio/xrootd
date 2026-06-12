@@ -158,9 +158,9 @@ set(CMAKE_ARGS $ENV{CMAKE_ARGS} ${CMAKE_ARGS})
 
 if(COVERAGE)
   find_program(CTEST_COVERAGE_COMMAND NAMES gcov)
-  set(COVERAGE_FLAGS "--coverage -fprofile-update=atomic -DENABLE_COVERAGE")
-  list(PREPEND CMAKE_C_FLAGS "${COVERAGE_FLAGS}")
-  list(PREPEND CMAKE_CXX_FLAGS "${COVERAGE_FLAGS}")
+  set(COVERAGE_FLAGS "-O0 --coverage -fprofile-update=atomic -Wl,--dynamic-list-data -DENABLE_COVERAGE")
+  list(APPEND CMAKE_C_FLAGS "${COVERAGE_FLAGS}")
+  list(APPEND CMAKE_CXX_FLAGS "${COVERAGE_FLAGS}")
 endif()
 
 if(MEMCHECK)

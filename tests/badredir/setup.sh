@@ -30,6 +30,8 @@ teardown() {
 
     for srv in "${servernames[@]}"; do
         if [[ -f "${srv}/xrootd.pid" ]]; then
+            kill -PROF "$(cat "${srv}"/xrootd.pid)" || true
+	    sleep 5
             kill -TERM "$(cat "${srv}"/xrootd.pid)" || true
         fi
     done

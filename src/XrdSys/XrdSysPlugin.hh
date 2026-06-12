@@ -31,6 +31,11 @@
 /******************************************************************************/
   
 #include <cstring>
+#include <csignal>
+
+#if ENABLE_COVERAGE
+extern "C" void __gcov_dump(void);
+#endif
 
 struct XrdVersionInfo;
 
@@ -211,7 +216,12 @@ bool  VerCmp(XrdVersionInfo &vInf1, XrdVersionInfo &vInf2, bool noMsg=false);
                    XrdVersionInfo *vinf=0, int msgNum=-1)
                   : eDest(0), libName(lname),
                     libPath(path ? strdup(path) : 0), libHandle(0),
-                    myInfo(vinf), eBuff(ebuff), eBLen(eblen), msgCnt(msgNum) {}
+                    myInfo(vinf), eBuff(ebuff), eBLen(eblen), msgCnt(msgNum)
+      {
+#if ENABLE_COVERAGE
+        (void) signal(SIGPROF, [](int) { __gcov_dump(); });
+#endif
+      }
 
 //------------------------------------------------------------------------------
 //! Destructor

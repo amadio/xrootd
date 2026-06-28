@@ -121,7 +121,7 @@ if( NOT XRDCL_ONLY )
   add_subdirectory( XrdHttp )
   add_subdirectory( XrdHttpTapeApi )
   add_subdirectory( XrdHttpTpc )
-  add_subdirectory( XrdHttpPrometheus )
+  add_subdirectory( XrdHttpMetricsExporter )
 
   add_subdirectory( XrdMacaroons )
   add_subdirectory( XrdVoms )

@@ -43,6 +43,7 @@
 #include "XrdNet/XrdNetSecurity.hh"
 
 #include "XrdPss/XrdPss.hh"
+#include "XrdPss/XrdPssMetrics.hh"
 #include "XrdPss/XrdPssTrace.hh"
 #include "XrdPss/XrdPssUrlInfo.hh"
 #include "XrdPss/XrdPssUtils.hh"
@@ -364,6 +365,10 @@ int XrdPssSys::Configure(const char *cfn, XrdOucEnv *envP)
 // XrdOucPList *fP = XPList.First();
 // while(fP && !(fP->Flag() & XRDEXP_NOTRW)) fP = fP->Next();
 // if (!fP) . . .
+
+// Register the proxy metrics now that the proxy is configured.
+//
+   XrdPssRegisterMetrics();
 
 // All done
 //

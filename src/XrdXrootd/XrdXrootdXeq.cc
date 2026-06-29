@@ -1199,6 +1199,7 @@ int XrdXrootdProtocol::do_Login()
        char *tzVal = loginEnv.Get("xrd.tz");
        char *appXQ = loginEnv.Get("xrd.appname");
        char *aInfo = loginEnv.Get("xrd.info");
+       char *sName = loginEnv.Get("xrd.site");
        int   tzNum = (tzVal ? atoi(tzVal) : 0);
        if (cCode && *cCode && tzNum >= -12 && tzNum <= 14)
           {XrdNetAddrInfo::LocInfo locInfo;
@@ -1206,10 +1207,14 @@ int XrdXrootdProtocol::do_Login()
            locInfo.TimeZone = tzNum & 0xff;
            Link->setLocation(locInfo);
           }
-       if (Monitor.Ready() && (appXQ || aInfo))
-          {char apBuff[1024];
-           snprintf(apBuff, sizeof(apBuff), "&R=%s&x=%s&y=%s&I=%c",
-                    (rnumb ? rnumb : ""),
+       if (Monitor.Ready() && (appXQ || aInfo || sName))
+          {// The site (&S=) comes first, before the fields of variable
+           // length, so that a long record does not lose it. The site is
+           // cut to 63 characters, the limit of the server site name.
+           //
+           char apBuff[1024];
+           snprintf(apBuff, sizeof(apBuff), "&S=%.63s&R=%s&x=%s&y=%s&I=%c",
+                    (sName ? sName : ""), (rnumb ? rnumb : ""),
                     (appXQ ? appXQ : ""), (aInfo ? aInfo : ""),
                     (clientPV & XrdOucEI::uIPv4 ? '4' : '6'));
            Entity.moninfo = strdup(apBuff);
@@ -4348,8 +4353,16 @@ void XrdXrootdProtocol::MonAuth()
    const char *bP = Buff;
 
    if (Client == &Entity) bP = Entity.moninfo;
-      else {snprintf(Buff,sizeof(Buff),
-                    "&p=%s&n=%s&h=%s&o=%s&r=%s&g=%s&m=%s%s&I=%c",
+      else {// The login info starts with the site (&S=). Put it first,
+            // before the fields of variable length. Thus, the site stays
+            // in the record when Map() truncates the record.
+            //
+            const char *mInfo = (Entity.moninfo ? Entity.moninfo : "");
+            int hLen = 0;
+            if (!strncmp(mInfo, "&S=", 3)) hLen = 1 + strcspn(mInfo+1, "&");
+            snprintf(Buff,sizeof(Buff),
+                    "%.*s&p=%s&n=%s&h=%s&o=%s&r=%s&g=%s&m=%s%s&I=%c",
+                     hLen, mInfo,
                      Client->prot,
                     (Client->name ? Client->name : ""),
                     (Client->host ? Client->host : ""),
@@ -4357,7 +4370,7 @@ void XrdXrootdProtocol::MonAuth()
                     (Client->role ? Client->role : ""),
                     (Client->grps ? Client->grps : ""),
                     (Client->moninfo ? Client->moninfo : ""),
-                    (Entity.moninfo  ? Entity.moninfo  : ""),
+                     mInfo + hLen,
                     (clientPV & XrdOucEI::uIPv4 ? '4' : '6')
                    );
             Client->secMon = &Monitor;

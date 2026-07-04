@@ -1190,6 +1190,12 @@ int XrdXrootdProtocol::do_Login()
    Entity.addrInfo = Link->AddrInfo();
    Client = &Entity;
 
+// Format the numeric client address for monitoring (no DNS lookup)
+//
+   char ipBuff[64];
+   addrP->Format(ipBuff, sizeof(ipBuff), XrdNetAddrInfo::fmtAddr,
+                 XrdNetAddrInfo::prefipv4 | XrdNetAddrInfo::noPortRaw);
+
 // Check if we need to process a login environment
 //
    if (Request.login.dlen > 8)
@@ -1207,14 +1213,15 @@ int XrdXrootdProtocol::do_Login()
            locInfo.TimeZone = tzNum & 0xff;
            Link->setLocation(locInfo);
           }
-       if (Monitor.Ready() && (appXQ || aInfo || sName))
-          {// The site (&S=) comes first, before the fields of variable
-           // length, so that a long record does not lose it. The site is
-           // cut to 63 characters, the limit of the server site name.
+       if (Monitor.Ready())
+          {// The address (&a=) and the site (&S=) come first, before the
+           // fields of variable length, so that a long record does not lose
+           // them. The site is cut to 63 characters, the limit of the server
+           // site name.
            //
            char apBuff[1024];
-           snprintf(apBuff, sizeof(apBuff), "&S=%.63s&R=%s&x=%s&y=%s&I=%c",
-                    (sName ? sName : ""), (rnumb ? rnumb : ""),
+           snprintf(apBuff, sizeof(apBuff), "&a=%s&S=%.63s&R=%s&x=%s&y=%s&I=%c",
+                    ipBuff, (sName ? sName : ""), (rnumb ? rnumb : ""),
                     (appXQ ? appXQ : ""), (aInfo ? aInfo : ""),
                     (clientPV & XrdOucEI::uIPv4 ? '4' : '6'));
            Entity.moninfo = strdup(apBuff);
@@ -1228,6 +1235,12 @@ int XrdXrootdProtocol::do_Login()
           }
        if (appXQ) AppName = strdup(appXQ);
       }
+      else if (Monitor.Ready())
+              {char apBuff[80];
+               snprintf(apBuff, sizeof(apBuff), "&a=%s&I=%c", ipBuff,
+                        (clientPV & XrdOucEI::uIPv4 ? '4' : '6'));
+               Entity.moninfo = strdup(apBuff);
+              }
 
 // Allocate a monitoring object, if needed for this connection
 //
@@ -4353,13 +4366,17 @@ void XrdXrootdProtocol::MonAuth()
    const char *bP = Buff;
 
    if (Client == &Entity) bP = Entity.moninfo;
-      else {// The login info starts with the site (&S=). Put it first,
-            // before the fields of variable length. Thus, the site stays
-            // in the record when Map() truncates the record.
+      else {// The login info starts with the client address (&a=) and the
+            // site (&S=). Put them first, before the fields of variable
+            // length. Thus, they stay in the record when Map() truncates the
+            // record. Also, the first match for &a= is the server value, not
+            // a client name.
             //
             const char *mInfo = (Entity.moninfo ? Entity.moninfo : "");
             int hLen = 0;
-            if (!strncmp(mInfo, "&S=", 3)) hLen = 1 + strcspn(mInfo+1, "&");
+            if (!strncmp(mInfo, "&a=", 3)) hLen = 1 + strcspn(mInfo+1, "&");
+            if (!strncmp(mInfo+hLen, "&S=", 3))
+               hLen += 1 + strcspn(mInfo+hLen+1, "&");
             snprintf(Buff,sizeof(Buff),
                     "%.*s&p=%s&n=%s&h=%s&o=%s&r=%s&g=%s&m=%s%s&I=%c",
                      hLen, mInfo,

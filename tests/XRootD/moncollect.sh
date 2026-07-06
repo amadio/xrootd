@@ -112,7 +112,7 @@ function setup_moncollect() {
 	fi
 
 	# When python3 is available, start the mock OTLP receiver and point the
-	# collector at it (also enabling --spans so the traces export is exercised).
+	# collector at it (the traces export is exercised via --spans below).
 	OTLP_ARGS=""
 	if command -v python3 >/dev/null 2>&1; then
 		: > "${OTLP_OUT}"
@@ -123,7 +123,7 @@ function setup_moncollect() {
 		# --otlp-token exercises the bearer-auth path; the token is read from a
 		# file (@<path>) so the secret is not passed on the command line.
 		printf 'secrettoken123' > "${PWD}/${NAME}/otlp.token"
-		OTLP_ARGS="--otlp-url http://127.0.0.1:${OTLP_PORT} --spans \
+		OTLP_ARGS="--otlp-url http://127.0.0.1:${OTLP_PORT} \
 		           --otlp-token @${PWD}/${NAME}/otlp.token \
 		           --cache-dir ${OTLP_CACHE}"
 		sleep 1   # let it bind before the first export
@@ -137,10 +137,11 @@ function setup_moncollect() {
 	# test transfers, standing in for an experiment dataset name.
 	: > "${COLLECTOR_OUT}"
 	# --traces emits the per-I/O trace-stream records (the server sends them via
-	# the 'io' destination in moncollect.cfg) so the test can assert they carry
-	# trace correlation ids.
+	# the 'io' destination in moncollect.cfg); --spans turns concluded operations
+	# and each I/O op into OpenTelemetry span documents, so the test can assert
+	# both the correlation ids and the session -> file -> I/O span nesting.
 	xrdmoncollect -p "${COLLECTOR_PORT}" -o "${COLLECTOR_OUT}" \
-	              --flush-secs 1 --flush-count 1 --traces ${OTLP_ARGS} \
+	              --flush-secs 1 --flush-count 1 --traces --spans ${OTLP_ARGS} \
 	              --dataset '/(test-[A-Za-z0-9]+)/' \
 	              > "${PWD}/${NAME}/collector.log" 2>&1 < /dev/null &
 	echo $! > "${COLLECTOR_PID}"
@@ -215,15 +216,25 @@ function test_moncollect() {
 	assert grep -Fq '"file.extension":"ref"' "${COLLECTOR_OUT}"
 	assert grep -Eq '"xrootd.dataset":"test-[A-Za-z0-9]+"' "${COLLECTOR_OUT}"
 
-	# Trace-stream I/O records (--traces) must carry OTel correlation ids so a
-	# tracing backend can nest the per-I/O detail under the transfer span: a
+	# Trace-stream I/O records (--traces) must carry OTel correlation ids: a
 	# 32-hex traceId and a 16-hex spanId. Re-drive until a read record lands
 	# (the trace stream is buffered server-side and can lag the close).
 	drive_until '"event.name":"xrootd.read"' "trace-stream read record" \
 		"xrdcp -f '${HOST}/${TMPDIR}/ok.ref' '${TMPDIR}/ok.dat'"
-	read_doc=$(grep -E '"event.name":"xrootd.read"' "${COLLECTOR_OUT}" | head -n1)
+	# The read log (no "kind") carries the ids.
+	read_doc=$(grep -E '"event.name":"xrootd.read"' "${COLLECTOR_OUT}" \
+		| grep -Ev '"kind":' | head -n1)
 	assert grep -Eq '"traceId":"[0-9a-f]{32}"' <<<"${read_doc}"
 	assert grep -Eq '"spanId":"[0-9a-f]{16}"' <<<"${read_doc}"
+
+	# With --spans, each I/O op is also a child span nested under the file's
+	# transfer span (session -> file -> I/O): a span document (has "kind") that
+	# carries "xrootd.io.offset" must name the op and carry a 16-hex parentSpanId.
+	io_span=$(grep -E '"kind":"SPAN_KIND_SERVER"' "${COLLECTOR_OUT}" \
+		| grep -E '"xrootd.io.offset":' | head -n1)
+	assert test -n "${io_span}"
+	assert grep -Eq '"parentSpanId":"[0-9a-f]{16}"' <<<"${io_span}"
+	assert grep -Eq '"name":"(read|write|readv)"' <<<"${io_span}"
 
 	# OTLP export (when the mock receiver is running): the collector must POST an
 	# OTLP logs export to /v1/logs (resourceLogs envelope with typed KeyValue

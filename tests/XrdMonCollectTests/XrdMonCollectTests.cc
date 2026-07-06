@@ -432,8 +432,7 @@ TEST(XrdMonCollect, TStreamRecordsDecoded)
 
   // Every emitted trace record carries a well-formed traceId/spanId so tracing
   // backends can correlate it (32-hex trace id, 16-hex span id); the session.id
-  // attribute mirrors the traceId. File-scoped records share the file's transfer
-  // span, the disconnect its session span.
+  // attribute mirrors the traceId.
   for (const json* d : {&rd, &cl, &di})
      {ASSERT_TRUE(d->contains("traceId")) << *d;
       ASSERT_TRUE(d->contains("spanId"))  << *d;
@@ -441,19 +440,23 @@ TEST(XrdMonCollect, TStreamRecordsDecoded)
       EXPECT_EQ((*d)["spanId"].get<std::string>().size(),  16u);
       EXPECT_EQ((*d)["attributes"]["session.id"], (*d)["traceId"]);
      }
-  EXPECT_EQ(rd["spanId"], cl["spanId"]);     // same file -> same transfer span
-  EXPECT_NE(di["spanId"], cl["spanId"]);     // disconnect gets the session span
+  // The read is a true I/O op, so it gets its own span id (a child of the file's
+  // transfer span); the close is a marker that maps onto the file span itself,
+  // and the disconnect onto the session span.
+  EXPECT_NE(rd["spanId"], cl["spanId"]);
+  EXPECT_NE(di["spanId"], cl["spanId"]);
 }
 
-// A trace-stream I/O record must correlate with the file's transfer span: it
-// reuses the session traceId and the same spanId EmitClose emits, so the detail
-// logs nest under the transfer span in Tempo/Grafana. Cross-check the two docs
-// rather than recomputing the (internal) key.
+// A trace-stream I/O op must nest under the file's transfer span: with --spans
+// it emits its own child span whose parent is the transfer span EmitClose emits,
+// so Tempo renders session -> file -> I/O. Cross-check the emitted documents
+// rather than recomputing the (internal) keys.
 TEST_F(Transfer, TraceRecordsCorrelateWithTransferSpan)
 {
   std::vector<std::string> tdocs;
   XrdMonDecode traced([&](const std::string& d){ tdocs.push_back(d); },
                       nullptr, false, /*traces=*/true);
+  traced.SetEmitSpans(true);     // also emit companion span documents
   alt = &traced;                 // the feed helpers now target the traced decoder
 
   feedUserMap();                 // user dictid 7
@@ -468,21 +471,36 @@ TEST_F(Transfer, TraceRecordsCorrelateWithTransferSpan)
     auto pkt = packet('t', kStod, payload.b);
     traced.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size()); }
 
-  ASSERT_EQ(tdocs.size(), 1u);
-  json rd = json::parse(tdocs.back());
-  EXPECT_EQ(rd["attributes"]["event.name"], "xrootd.read");
-  ASSERT_TRUE(rd.contains("traceId"));
-  ASSERT_TRUE(rd.contains("spanId"));
-  EXPECT_EQ(rd["attributes"]["session.id"], rd["traceId"]);
+  // The read yields a log record and its companion span; classify by "kind".
+  ASSERT_EQ(tdocs.size(), 2u);
+  json rlog, rspan;
+  for (const std::string& s : tdocs)
+     {json d = json::parse(s);
+      if (d.contains("kind")) rspan = d; else rlog = d;
+     }
+  EXPECT_EQ(rlog["attributes"]["event.name"], "xrootd.read");
+  EXPECT_EQ(rlog["attributes"]["session.id"], rlog["traceId"]);
+  EXPECT_EQ(rspan["name"], "read");
+  EXPECT_EQ(rspan["kind"], "SPAN_KIND_SERVER");
+  // The log and its span share the same identity.
+  EXPECT_EQ(rlog["traceId"], rspan["traceId"]);
+  EXPECT_EQ(rlog["spanId"],  rspan["spanId"]);
 
-  // Feed the close and compare: same session trace, same (transfer) span.
+  // Feed the close: it emits the transfer log and its file-operation span.
   tdocs.clear();
   feedClose();
-  ASSERT_FALSE(tdocs.empty());
-  json xfer = json::parse(tdocs.back());
-  EXPECT_EQ(xfer["eventName"], "xrootd.transfer");
-  EXPECT_EQ(rd["traceId"], xfer["traceId"]);
-  EXPECT_EQ(rd["spanId"],  xfer["spanId"]);
+  json xlog, xspan;
+  for (const std::string& s : tdocs)
+     {json d = json::parse(s);
+      if (d.contains("kind")) xspan = d; else xlog = d;
+     }
+  ASSERT_EQ(xlog["eventName"], "xrootd.transfer");
+  EXPECT_EQ(xspan["spanId"], xlog["spanId"]);        // the file's transfer span
+
+  // The I/O span nests under the file's transfer span, same session trace.
+  EXPECT_EQ(rspan["parentSpanId"], xlog["spanId"]);
+  EXPECT_EQ(rspan["traceId"],      xlog["traceId"]);
+  EXPECT_NE(rspan["spanId"],       xlog["spanId"]);   // a distinct child span
 }
 
 TEST_F(Transfer, AggregatesIntoMetricsRegistry)

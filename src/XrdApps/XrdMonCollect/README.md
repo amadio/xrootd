@@ -337,18 +337,22 @@ Several opt-in streams add finer-grained events:
   backend. The same session identity is also emitted as the semconv
   `session.id` attribute, so log stores without a tracing UI (Loki structured
   metadata, OpenSearch) can group a session's documents directly.
-  **Off by default**; like the logs it can be high volume.
+  **Off by default**; like the logs it can be high volume. **Spans are what
+  create traces**: without `--spans` nothing is written to `/v1/traces`, so a
+  logs-only export — however many `traceId`s the logs carry — shows no traces in
+  Tempo/Grafana (logs correlate *to* traces, they do not create them).
 - `--traces` turns each `t` (I/O trace) record into a document
   (`attributes["event.name"]` = `xrootd.read`/`xrootd.write` with
   `xrootd.io.offset`, `xrootd.io.length` and the resolved `file.path`,
   `xrootd.open`, `xrootd.close`, `xrootd.disconnect`, and `xrootd.appid`). This
   is **high volume** (one record per I/O) — enable only when the detail is
   needed. Requires `io` in the server's monitor `dest` list and the path
-  dictionary (`d` stream) to resolve file names. Each file-scoped record
-  (`read`/`write`/`open`/`close`/`readv`) carries the same `traceId` (the client
-  session) and `spanId` (the file's transfer span) the corresponding `transfer`
-  document emits, so a tracing backend nests the per-I/O detail under the
-  transfer span; a `disconnect` record reuses the session span. The one
+  dictionary (`d` stream) to resolve file names. Every record carries the client
+  session `traceId`. A true I/O op (`read`/`write`/`readv`) gets its **own**
+  `spanId` and, with `--spans`, a companion child span parented on the file's
+  transfer span — so the trace waterfall reads **session → file → I/O**. File
+  markers (`open`/`close`) instead carry the file's transfer `spanId` (they are
+  already represented by that span), and a `disconnect` the session span. The one
   exception is `appid`, which carries no dictionary id and so cannot be
   correlated. The opening user is resolved from the file id, so the file's
   `open` (`f` stream) must have been seen — otherwise the record falls back to
@@ -821,7 +825,7 @@ xrdmoncollect -p <port> [-b <bindaddr>] [-o <file>] [--bulk <index>]
               [--forward <host:port>]
               [--tcp-port <p> [--tcp-token <t>]]
               [--shovel <host:port> [--shovel-token <t>] [--spool-max <sz>]]
-              [--flush-count <n>] [--flush-secs <n>] [--dump] [-v]
+              [--flush-count <n>] [--flush-secs <n>] [--debug] [-v]
 
   -c <file>        load options from an INI config file (see Configuration)
   -p <port>        UDP port to listen on (long form: --udp-port; required
@@ -873,10 +877,12 @@ xrdmoncollect -p <port> [-b <bindaddr>] [-o <file>] [--bulk <index>]
   --sessions       correlate per-session activity and emit a session document
                    per client disconnect (off by default)
   --spans          also emit OpenTelemetry span documents alongside the logs
-  --traces         emit a document per t-stream I/O record (high volume)
+                   (required for any traces to appear in Tempo/Grafana)
+  --traces         emit a document per t-stream I/O record (high volume); with
+                   --spans each read/write is a child span under the file span
   --gstream        emit a document per g-stream (plugin) record
   --redirects      emit a document per r-stream redirect record
-  --dump           also emit one JSON object per decoded record (debugging)
+  --debug          also emit one JSON object per decoded record (debugging)
   -v               print decoder statistics on exit (SIGINT/SIGTERM)
 ```
 

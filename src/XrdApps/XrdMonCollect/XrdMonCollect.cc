@@ -112,7 +112,7 @@ void usage(const char* prog)
      "Usage: %s -p <port> [-b <bindaddr>] [-o <file>] [--bulk <index>]\n"
      "          [--os-url <url> [--os-index <name>] [--os-user <u>]\n"
      "           [--os-pass <p>] [--os-insecure]]\n"
-     "          [--flush-count <n>] [--flush-secs <n>] [--dump] [-v]\n\n"
+     "          [--flush-count <n>] [--flush-secs <n>] [--debug] [-v]\n\n"
      "  -c <file>        load options from an INI config file (a [xrdmoncollect]\n"
      "                   section; default /etc/xrootd/xrdmoncollect.cfg if present;\n"
      "                   command-line options override file values)\n"
@@ -182,7 +182,7 @@ void usage(const char* prog)
      "  --traces         emit a document per t-stream I/O record (high volume)\n"
      "  --gstream        emit a document per g-stream (plugin) record\n"
      "  --redirects      emit a document per r-stream redirect record\n"
-     "  --dump           also emit one JSON object per decoded record\n"
+     "  --debug          also emit one JSON object per decoded record\n"
      "  -v               print decoder statistics on exit\n", prog);
 }
 
@@ -655,7 +655,7 @@ int main(int argc, char* argv[])
    const char* bindStr = nullptr;
    const char* outFile = nullptr;
    std::string bulkIdx;
-   bool        dump    = false;
+   bool        debug   = false;
    bool        verbose = false;
    bool        traces  = false;
    bool        gstream = false;
@@ -792,7 +792,7 @@ int main(int argc, char* argv[])
        traces      = cfg.GetBoolean(sec, "traces", traces);
        gstream     = cfg.GetBoolean(sec, "gstream", gstream);
        redirects   = cfg.GetBoolean(sec, "redirects", redirects);
-       dump        = cfg.GetBoolean(sec, "dump", dump);
+       debug       = cfg.GetBoolean(sec, "debug", debug);
        verbose     = cfg.GetBoolean(sec, "verbose", verbose);
       }
 
@@ -813,7 +813,7 @@ int main(int argc, char* argv[])
       OPT_SERVER_TTL, OPT_STATE_FILE, OPT_STATE_TTL,
       OPT_SCITAGS, OPT_SCITAGS_REFRESH, OPT_DATASET,
       OPT_NO_RESOLVE,
-      OPT_SESSIONS, OPT_SPANS, OPT_TRACES, OPT_GSTREAM, OPT_REDIRECTS, OPT_DUMP
+      OPT_SESSIONS, OPT_SPANS, OPT_TRACES, OPT_GSTREAM, OPT_REDIRECTS, OPT_DEBUG
    };
    static const struct option longOpts[] =
    {  {"config",          required_argument, nullptr, 'c'},
@@ -855,7 +855,7 @@ int main(int argc, char* argv[])
       {"traces",          no_argument,       nullptr, OPT_TRACES},
       {"gstream",         no_argument,       nullptr, OPT_GSTREAM},
       {"redirects",       no_argument,       nullptr, OPT_REDIRECTS},
-      {"dump",            no_argument,       nullptr, OPT_DUMP},
+      {"debug",           no_argument,       nullptr, OPT_DEBUG},
       {"help",            no_argument,       nullptr, 'h'},
       {nullptr, 0, nullptr, 0}
    };
@@ -924,7 +924,7 @@ int main(int argc, char* argv[])
          case OPT_TRACES:        traces       = true;                break;
          case OPT_GSTREAM:       gstream      = true;                break;
          case OPT_REDIRECTS:     redirects    = true;                break;
-         case OPT_DUMP:          dump         = true;                break;
+         case OPT_DEBUG:         debug        = true;                break;
          default: usage(argv[0]); return 2;   // '?': getopt already complained
         }
        }
@@ -975,7 +975,7 @@ int main(int argc, char* argv[])
        if (traces)           ignored("--traces");
        if (gstream)          ignored("--gstream");
        if (redirects)        ignored("--redirects");
-       if (dump)             ignored("--dump");
+       if (debug)            ignored("--debug");
 
        ShovelerOpts so;
        so.udpPort     = port;
@@ -1035,6 +1035,16 @@ int main(int argc, char* argv[])
        return 2;
 #endif
       }
+
+// Traces are spans, and spans are only produced with --spans. Exporting OTLP
+// without it sends logs (which carry a traceId but do not, by themselves, create
+// a trace) and nothing to /v1/traces, so Tempo/Grafana show no traces at all.
+// Warn rather than fail: a logs-only OTLP export is a legitimate setup.
+//
+   if (otlpEnabled && !spans)
+      fprintf(stderr, "%s: note: OTLP export without --spans emits logs only; "
+                      "no spans are sent to /v1/traces (Tempo will show no "
+                      "traces)\n", argv[0]);
 
 // The file/stdout sink is the fallback when no network sink is configured.
 // -o always enables a file in addition to any OpenSearch/OTLP/forward sink.
@@ -1188,7 +1198,7 @@ int main(int argc, char* argv[])
          };
 
    XrdMonDecode::RawSink rawSink;
-   if (dump) rawSink = [&](const std::string& r){fprintf(out, "%s\n", r.c_str());};
+   if (debug) rawSink = [&](const std::string& r){fprintf(out, "%s\n", r.c_str());};
 
 // When a metrics port is given, aggregate transfers into the registry and
 // serve it over HTTP. The decoder-level statistics are exposed too.
@@ -1222,7 +1232,7 @@ int main(int argc, char* argv[])
           {fprintf(stderr, "%s: %s\n", argv[0], e.c_str()); return 4;}
       }
 
-   XrdMonDecode decoder(docSink, rawSink, dump, traces, gstream, redirects, subsystem);
+   XrdMonDecode decoder(docSink, rawSink, debug, traces, gstream, redirects, subsystem);
    decoder.SetMaxBytes(maxMemory);
    decoder.SetMaxEntries(maxEntries);
    decoder.SetServerTTL(serverTtl);

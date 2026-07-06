@@ -14,7 +14,7 @@ xrdmoncollect - collect and correlate XRootD detailed monitoring streams
               [\fB--shovel\fR \fIhost:port\fR [\fB--shovel-token\fR \fItoken\fR] [\fB--spool-max\fR \fIsz\fR]]
               [\fB--flush-count\fR \fIn\fR] [\fB--flush-secs\fR \fIn\fR]
               [\fB--rcvbuf\fR \fIsz\fR] [\fB--queue-depth\fR \fIn\fR] [\fB--max-entries\fR \fIn\fR]
-              [\fB--sessions\fR] [\fB--spans\fR] [\fB--traces\fR] [\fB--gstream\fR] [\fB--redirects\fR] [\fB--dump\fR] [\fB-v\fR]
+              [\fB--sessions\fR] [\fB--spans\fR] [\fB--traces\fR] [\fB--gstream\fR] [\fB--redirects\fR] [\fB--debug\fR] [\fB-v\fR]
 
 .fi
 .br
@@ -368,10 +368,17 @@ and \fBtraceId\fR/\fBspanId\fR but carries the span fields (\fBname\fR, \fBkind\
 reconstructs the client session (login \(-> per-file operation). Off by default;
 like the logs it can be high volume. The session span is only meaningful together
 with \fB--sessions\fR.
+.IP
+Spans are what create traces: without \fB--spans\fR nothing is sent to
+\fB/v1/traces\fR, so a logs-only OTLP export (however many \fBtraceId\fRs the logs
+carry) shows no traces in Tempo/Grafana.
 .RE
 \fB--traces\fR
 .RS 5
-Emit a document per \fIt\fR-stream I/O record. This is high volume.
+Emit a document per \fIt\fR-stream I/O record (read, write, open, close, readv,
+disconnect). This is high volume. With \fB--spans\fR, each read/write/readv also
+becomes a child \fIspan\fR nested under the file's transfer span, so the trace
+waterfall reads session \(-> file \(-> I/O.
 .RE
 \fB--gstream\fR
 .RS 5
@@ -385,7 +392,7 @@ Emit a concluded-operation document per \fIr\fR-stream redirect record
 Redirects are counted
 in the aggregated metrics regardless of this flag.
 .RE
-\fB--dump\fR
+\fB--debug\fR
 .RS 5
 Also emit one JSON object per decoded record (raw, uncorrelated).
 .RE

@@ -229,6 +229,13 @@ std::string sessKey(const std::string& src, int32_t stod, uint32_t userID)
 {
    return src + "|" + std::to_string(stod) + "|" + std::to_string(userID);
 }
+// spanId of a file's transfer span, shared by EmitClose and the trace stream so
+// per-I/O detail records correlate under the same span the transfer emits.
+std::string fileSpanId(const std::string& src, int32_t stod, uint32_t fileID)
+{
+   return spanIdOf(src + "|" + std::to_string(stod) + "|f"
+                       + std::to_string(fileID));
+}
 // Unix seconds -> OTLP nanoseconds as a decimal string (OTLP encodes 64-bit
 // times as strings; a JSON number would lose the low digits). Empty for t<=0.
 //
@@ -1792,8 +1799,7 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
 // dictid); this file open->close is a span within it.
 //
    j["traceId"] = traceIdOf(sessKey(src, stod, openUser));
-   j["spanId"]  = spanIdOf(src + "|" + std::to_string(stod)
-                              + "|f" + std::to_string(fileID));
+   j["spanId"]  = fileSpanId(src, stod, fileID);
    a["session.id"] = j["traceId"];   // semconv: queryable session correlator
 
 // Fold this close into its session rollup (emitted in the 'session' document at
@@ -2023,12 +2029,15 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
         otelResource(j, src, stod, srv);
         json& a = j["attributes"];
         const char* ev = nullptr;   // event.name, set once the record type known
+        uint32_t fileID  = 0;       // file dictid of a file-scoped record
+        uint32_t discUser = 0;      // user dictid of a disconnect record
 
         auto lfnOf = [&](uint32_t id)
             {auto it = srv.paths.find(id);
              if (it != srv.paths.end())
                 {Touch(it->second.lru); setFile(a, it->second.val);}
              a["xrootd.file.id"] = id;
+             fileID = id;
             };
 
         if ((disc & 0x80) == 0)            // read/write I/O entry
@@ -2058,7 +2067,8 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
             case XROOTD_MON_DISC:
                  {ev = "xrootd.disconnect";
                   a["xrootd.session.duration"] = ri32(a1);
-                  otelIdentity(a, srv, rd32(a2));
+                  discUser = rd32(a2);
+                  otelIdentity(a, srv, discUser);
                  }
                  break;
             case XROOTD_MON_READV:
@@ -2071,6 +2081,31 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
                  }
                  break;
             default: continue;   // REDHOST and anything else: skip
+           }
+
+// Trace context: correlate the record with its client session so tracing
+// backends nest the I/O detail under the transfer/session span. A file-scoped
+// record reuses the file's transfer span (keyed like EmitClose); a disconnect
+// reuses the session span (keyed like EmitDisconnect). The opening user is
+// resolved from the file dictid; when the open was not seen (or user monitoring
+// is off) it degrades to the same session-less key EmitClose already uses. An
+// appid record carries no dictid, so it stays uncorrelated.
+//
+        if (fileID)
+           {uint32_t openUser = 0;
+            auto fit = srv.files.find(fileID);
+            if (fit != srv.files.end()) openUser = fit->second.user;
+            std::string tid = traceIdOf(sessKey(src, stod, openUser));
+            j["traceId"] = tid;
+            j["spanId"]  = fileSpanId(src, stod, fileID);
+            a["session.id"] = tid;
+           }
+        else if (disc == XROOTD_MON_DISC)
+           {std::string sess = sessKey(src, stod, discUser);
+            std::string tid  = traceIdOf(sess);
+            j["traceId"] = tid;
+            j["spanId"]  = spanIdOf(sess + "|session");
+            a["session.id"] = tid;
            }
 
         otelBegin(j, ev, tWin, false);

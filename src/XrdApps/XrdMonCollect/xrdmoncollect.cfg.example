@@ -124,5 +124,5 @@ port = 9930
 # redirects = false
 
 # Debugging: also emit one JSON object per decoded record; print stats on exit.
-# dump = false
+# debug = false
 # verbose = false

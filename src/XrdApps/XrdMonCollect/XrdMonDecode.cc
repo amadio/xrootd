@@ -2084,20 +2084,27 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
            }
 
 // Trace context: correlate the record with its client session so tracing
-// backends nest the I/O detail under the transfer/session span. A file-scoped
-// record reuses the file's transfer span (keyed like EmitClose); a disconnect
-// reuses the session span (keyed like EmitDisconnect). The opening user is
-// resolved from the file dictid; when the open was not seen (or user monitoring
-// is off) it degrades to the same session-less key EmitClose already uses. An
-// appid record carries no dictid, so it stays uncorrelated.
+// backends nest the detail under the transfer/session span. A true I/O op
+// (read/write/readv) becomes its own span, a child of the file's transfer span,
+// so with --spans the waterfall reads session -> file -> I/O; its log carries
+// that span's id. A file marker (open/close) instead maps onto the file span
+// itself, and a disconnect onto the session span (keyed like EmitClose /
+// EmitDisconnect). The opening user is resolved from the file dictid; when the
+// open was not seen (or user monitoring is off) it degrades to the same
+// session-less key EmitClose already uses. An appid record carries no dictid,
+// so it stays uncorrelated.
 //
+        const bool ioOp = (disc & 0x80) == 0 || disc == XROOTD_MON_READV
+                                             || disc == XROOTD_MON_READU;
         if (fileID)
            {uint32_t openUser = 0;
             auto fit = srv.files.find(fileID);
             if (fit != srv.files.end()) openUser = fit->second.user;
             std::string tid = traceIdOf(sessKey(src, stod, openUser));
             j["traceId"] = tid;
-            j["spanId"]  = fileSpanId(src, stod, fileID);
+            j["spanId"]  = ioOp ? spanIdOf(src + "|" + std::to_string(stod)
+                                     + "|io|" + std::to_string(stats.traces))
+                                : fileSpanId(src, stod, fileID);
             a["session.id"] = tid;
            }
         else if (disc == XROOTD_MON_DISC)
@@ -2110,6 +2117,13 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
 
         otelBegin(j, ev, tWin, false);
         if (doc) doc(j.dump());
+
+// With --spans, an I/O op also appears as a child span under the file's transfer
+// span (emitSpan is a no-op otherwise); ev is "xrootd.<op>", so ev+7 names the
+// span with the bare operation.
+//
+        if (ioOp && fileID)
+           emitSpan(j, ev + 7, tWin, tWin, fileSpanId(src, stod, fileID));
        }
 }
 

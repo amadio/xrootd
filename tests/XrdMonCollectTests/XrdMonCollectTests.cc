@@ -365,6 +365,24 @@ TEST(XrdMonCollect, ShortPacketIsMalformed)
   EXPECT_EQ(dec.GetStats().malformed, 1u);
 }
 
+TEST(XrdMonCollect, MalformedPacketDebugDumpsReason)
+{
+  // With --debug (emitRaw=true) a rejected packet emits a diagnostic to the raw
+  // sink carrying its reason category, so malformed_total ticks are traceable.
+  std::string diag;
+  XrdMonDecode dec([](const std::string&){},
+                   [&](const std::string& r){ diag = r; },
+                   /*emitRaw=*/true);
+  char tiny[4] = {'f', 0, 0, 0};
+  EXPECT_FALSE(dec.Process("1.2.3.4:5", tiny, sizeof(tiny)));
+  EXPECT_EQ(dec.GetStats().malformed, 1u);
+  ASSERT_FALSE(diag.empty());
+  auto j = nlohmann::json::parse(diag);
+  EXPECT_EQ(j["reason"], "short_packet");
+  EXPECT_EQ(j["server"], "1.2.3.4:5");
+  EXPECT_EQ(j["note"], "malformed packet");
+}
+
 TEST(XrdMonCollect, UnknownStreamCounted)
 {
   XrdMonDecode dec([](const std::string&){});

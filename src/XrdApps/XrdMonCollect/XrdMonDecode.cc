@@ -1103,6 +1103,15 @@ void XrdMonDecode::Malformed(const std::string& src, unsigned char code,
            "structurally invalid monitor packets by stream and reason",
            {{"server", src}, {"stream", streamOf(code)},
             {"reason", reason}}) += 1;
+
+   // Under --debug, surface why the packet was rejected so the malformed_total
+   // tick can be traced back to a source and category (mirrors the unhandled-
+   // stream dump in Process).
+   if (dumpRaw && raw)
+      {json j = {{"server", src}, {"stream", streamOf(code)},
+                 {"reason", reason}, {"note", "malformed packet"}};
+       raw(j.dump());
+      }
 }
 
 bool XrdMonDecode::Process(const std::string& src, const char* buff, int blen)

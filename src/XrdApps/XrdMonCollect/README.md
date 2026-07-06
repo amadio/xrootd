@@ -978,6 +978,14 @@ g-stream provider run their own independent `pseq` counters, while the
 trace/redirect/map streams share one. The collector therefore tracks loss per
 stream class, and the metrics tell them apart:
 
+- `packets_total{server,stream}` — packets received, labeled the same
+  `{server,stream}` as `packets_lost_total` so the two divide into a loss
+  percentage per source (and per stream class):
+  `100 * sum by(server)(rate(packets_lost_total[5m]))
+  / sum by(server)(rate(packets_total[5m]))`. Malformed packets rejected before
+  a stream class is known are not counted here (they land in `malformed_total`),
+  so this is the well-formed denominator. `sum(packets_total)` still gives the
+  global receive rate.
 - `packets_lost_total{server,stream}` — pseq gaps, per stream class (`main`,
   `f`, `g:<provider>`). Loss concentrated on `f` with `mbuff`-sized `t`
   packets arriving fine is the fragmentation signature above. Loss across
@@ -988,7 +996,8 @@ stream class, and the metrics tell them apart:
   `bad_plen`/`short_packet` (truncation or stray traffic on the port),
   `bad_record` (`f`-stream record inconsistencies), `trailing_bytes`
   (`t`-stream payload not a whole number of records), `truncated_string`
-  (`r`-stream host:path running past the packet).
+  (`r`-stream host:path running past the packet). Run with `--debug` to log a
+  diagnostic line (server, stream, reason) for each rejected packet.
 - `unknown_packets_total` — packets with an unhandled stream code (usually
   stray traffic, e.g. a scanner hitting the port).
 

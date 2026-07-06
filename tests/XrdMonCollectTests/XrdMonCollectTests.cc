@@ -1308,6 +1308,10 @@ TEST(XrdMonCollect, PacketLossDetected)
   std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
   EXPECT_NE(out.find("xrootd_collector_packets_lost_total{server=\"h:1\",stream=\"main\"} 1"),
             std::string::npos) << out;
+  // packets_total mirrors the lost metric's {server, stream} labels: the four
+  // 'u' packets received are the denominator for a per-source loss percentage.
+  EXPECT_NE(out.find("xrootd_collector_packets_total{server=\"h:1\",stream=\"main\"} 4"),
+            std::string::npos) << out;
 }
 
 // The server does NOT stamp one pseq per destination: the f-stream (and each
@@ -1345,7 +1349,14 @@ TEST(XrdMonCollect, PacketLossTrackedPerStream)
   std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
   EXPECT_NE(out.find("xrootd_collector_packets_lost_total{server=\"h:1\",stream=\"f\"} 2"),
             std::string::npos) << out;
-  EXPECT_EQ(out.find("stream=\"main\""), std::string::npos) << out;
+  // No phantom loss is attributed to the shared "main" stream.
+  EXPECT_EQ(out.find("xrootd_collector_packets_lost_total{server=\"h:1\",stream=\"main\""),
+            std::string::npos) << out;
+  // packets_total is split per stream too: 4 'u' (main) and 5 'f' received.
+  EXPECT_NE(out.find("xrootd_collector_packets_total{server=\"h:1\",stream=\"main\"} 4"),
+            std::string::npos) << out;
+  EXPECT_NE(out.find("xrootd_collector_packets_total{server=\"h:1\",stream=\"f\"} 5"),
+            std::string::npos) << out;
 }
 
 // Malformed packets are counted per stream and reason.

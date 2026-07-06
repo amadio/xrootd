@@ -1150,6 +1150,11 @@ bool XrdMonDecode::Process(const std::string& src, const char* buff, int blen)
         gclass += (plen >= 24 ? gsProvider(p[16]) : "unknown");
         sclass = gclass.c_str();
        }
+    // Received count, labeled the same {server, stream} as packets_lost_total
+    // so a per-source (and per-stream) loss percentage is lost/received.
+    if (metrics)
+       metrics->counterSeries("packets_total", "monitor packets received",
+            {{"server", src}, {"stream", sclass}}) += 1;
     auto it = srv.lastPseq.find(sclass);
     if (it == srv.lastPseq.end()) srv.lastPseq.emplace(sclass, pseq);
        else

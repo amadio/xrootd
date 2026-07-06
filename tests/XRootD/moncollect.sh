@@ -216,8 +216,14 @@ function test_moncollect() {
 	# OTLP logs export to /v1/logs (resourceLogs envelope with typed KeyValue
 	# attributes) and, with --spans, a traces export to /v1/traces.
 	if [ -f "${OTLP_PID}" ]; then
+		# Wait for the transfer log itself to land, not merely the resourceLogs
+		# envelope: the always-present xrootd.server_ident log satisfies
+		# resourceLogs on its own, and the OTLP export is an async pipeline (the
+		# NDJSON sink is synchronous), so a transfer close reaches the file well
+		# before its OTLP body reaches the mock. Keying off operation.state (like
+		# drive_until keys off the NDJSON) tolerates that latency and UDP loss.
 		for _ in $(seq 1 30); do
-			grep -q 'resourceLogs' "${OTLP_OUT}" 2>/dev/null && break
+			grep -q '"key":"xrootd.operation.state"' "${OTLP_OUT}" 2>/dev/null && break
 			xrdcp -f "${TMPDIR}/ok.ref" "${HOST}/${TMPDIR}/ok.ref" >/dev/null 2>&1 || true
 			sleep 1
 		done

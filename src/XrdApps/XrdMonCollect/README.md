@@ -154,6 +154,37 @@ in the LogRecord `eventName` field with a matching human-readable `body`:
       "attributes":[{"key":"file.path","value":{"stringValue":"/store/…"}}, …]}]}]}]}
 ```
 
+#### Sink comparison (OpenSearch vs OTLP)
+
+Both sinks are fed the **same in-memory document** (`XrdMonDecode` builds one
+`resource`/`attributes` object per event; `XrdMonOpenSearch::Add` frames it
+verbatim, `XrdMonOtlpBatch::add` re-encodes that identical object). No
+monitoring field reaches one sink but not the other — every stream field the
+decoder captures (see [WLCG field mapping](#wlcg-field-mapping)) lands in a
+single canonical document *before* either sink runs, so the choice of backend
+(OpenSearch/Loki/Tempo) never changes which information is available. The
+sinks differ only in wire encoding:
+
+| Aspect | OpenSearch `_bulk` | OTLP / JSON |
+| :-- | :-- | :-- |
+| Field content | The full canonical document | The same fields, re-encoded (equivalent) |
+| `resource` / `attributes` | Nested JSON objects with dotted keys | `KeyValue` arrays (`{"key","value"}`) |
+| 64-bit integers | JSON numbers | Strings (proto3-JSON `intValue`) |
+| Nested objects / mixed arrays (e.g. `xrootd.gstream.data`) | Preserved as nested JSON, queryable | Flattened to a JSON `stringValue` |
+| Scalar arrays (e.g. `user.roles`) | JSON array | `arrayValue` of typed values |
+| Envelope fields (`timeUnixNano`, `severityNumber`, `traceId`, `spanId`, `eventName`) | Top-level document keys | Native OTLP LogRecord/Span fields |
+| `@timestamp` (ISO) / `scope` | Included (ISO convenience copy) | Omitted (redundant with `timeUnixNano`; scope is fixed to `xrdmoncollect`) |
+| `eventName` | Document key + `attributes["event.name"]` | LogRecord `eventName` + `body` + `attributes["event.name"]` |
+| Grouping | One document per event | Records grouped by resource (server incarnation) |
+| Spans (`--spans`) | Emitted as ordinary documents (carry `kind`) | Split out to `/v1/traces` as OTLP spans |
+| Endpoint / content-type | `<url>/_bulk`, `application/x-ndjson` | `<url>/v1/logs`+`/v1/traces`, `application/json` |
+
+The one practical asymmetry is queryability of *nested* values: a structured
+`xrootd.gstream.data` payload stays a nested object in OpenSearch but becomes a
+JSON string under OTLP (a deliberate flat-export choice — the data is retained,
+not dropped). All flat `xrootd.*`/`wlcg.*`/semconv fields are equally queryable
+in both.
+
 ### Durability and offline caching
 
 When an HTTP receiver is offline or returns errors, the output thread first

@@ -36,7 +36,10 @@ the \fBxrootd.*\fR/\fBwlcg.*\fR vendor namespaces; for example
 \fBresource.server.address\fR, \fBattributes.client.address\fR,
 \fBattributes.wlcg.vo\fR, \fBattributes.xrootd.transfer.read_bytes\fR).
 A store that expands dotted field names (such as OpenSearch) indexes each key as
-a nested field, and empty or zero-valued fields are omitted. There is no
+a nested field, and empty or zero-valued fields are omitted. The OpenSearch
+\fB_bulk\fR and OTLP sinks serialize this one canonical document, so they carry
+the same fields and differ only in wire encoding (nested JSON vs typed
+\fBKeyValue\fR arrays); see the README for a field-by-field comparison. There is no
 top-level \fBtype\fR field: the record kind is the top-level \fBeventName\fR
 (the OTLP LogRecord EventName field), duplicated as
 \fBattributes["event.name"]\fR for stores that only query attributes (such as

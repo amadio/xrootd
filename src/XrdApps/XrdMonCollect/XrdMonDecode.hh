@@ -241,6 +241,8 @@ struct UserInfo
    std::string prot;
    std::string host;       // descriptor @host: may be a reverse-resolved name
    std::string addr;       // &a= numeric client IP (DNS-free; empty pre-6.x)
+   std::string authHost;   // &h= auth-reported client host (name candidate)
+   std::string dn;         // &n= client distinguished name (auth subject)
    std::string authMethod; // &p= security protocol (gsi/krb5/sss/unix/ztn)
    std::string vo;         // &o= VO / organisation (auth-derived; token preferred)
    std::string role;       // &r= role

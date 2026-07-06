@@ -559,6 +559,10 @@ std::string XrdMonDecode::otelIdentity(json& a, const Server& srv,
       {const UserInfo& u = uit->second;
        Touch(u.lru);   // a referenced session is active: keep it warm
        if (!u.user.empty())       a["user.name"]            = u.user;
+       // The '&n=' login distinguished name is the authenticated subject:
+       // semconv user.id. A 'T' token subject (below) is preferred and
+       // overwrites this, as the token block runs after the user block.
+       if (!u.dn.empty())         a["user.id"]              = u.dn;
        // Access protocol (descriptor prot): semconv network.protocol.name,
        // plus url.scheme when the session came in over HTTP(S).
        if (!u.prot.empty())
@@ -570,43 +574,51 @@ std::string XrdMonDecode::otelIdentity(json& a, const Server& srv,
           }
        if (!u.authMethod.empty()) a["xrootd.auth.method"]   = u.authMethod;
        // Client endpoint: semconv wants client.address to carry the resolved
-       // name, with the IP only as a fallback. The name is the descriptor
-       // host, reverse-resolved by the *server* at login time — never here
-       // (the receive path does no DNS). When the name wins, the numeric IP
-       // from the '&a=' login CGI is kept as network.peer.address (the direct
-       // peer). Loopback values are renamed to this host's public identity
-       // (publicFor/localHost).
-       std::string chost = u.host;
-       if (resolveHosts && isLocalName(chost) && !localHost.empty())
-          chost = localHost;
-       std::string cip = !u.addr.empty()        ? publicFor(u.addr)
-                       : (isIPLiteral(chost)    ? publicFor(chost)
-                                                : std::string());
-       std::string caddr = (!chost.empty() && !isIPLiteral(chost)
-                            && !isLocalName(chost)) ? chost : cip;
+       // name, with the IP only as a fallback. A name may come from the
+       // descriptor '@host' or the auth-reported '&h=' — whichever resolves to
+       // a real hostname (the *server* does any DNS at login time, never the
+       // receive path). Loopback "localhost" names are renamed to this host's
+       // public identity. When a name wins, the numeric IP (the '&a=' login CGI
+       // or an IP-literal host) is kept as network.peer.address (the direct
+       // peer).
+       auto nameOf = [&](const std::string& h) -> std::string
+          {if (h.empty() || isIPLiteral(h)) return std::string();
+           if (isLocalName(h))
+              return (resolveHosts && !localHost.empty()) ? localHost
+                                                          : std::string();
+           return h;
+          };
+       std::string cname = nameOf(u.host);
+       if (cname.empty()) cname = nameOf(u.authHost);
+       std::string cip = !u.addr.empty()          ? publicFor(u.addr)
+                       : (isIPLiteral(u.host)     ? publicFor(u.host)
+                       : (isIPLiteral(u.authHost) ? publicFor(u.authHost)
+                                                  : std::string()));
+       std::string caddr = !cname.empty() ? cname : cip;
        if (!caddr.empty())
           {a["client.address"] = caddr;
            if (!cip.empty() && cip != caddr) a["network.peer.address"] = cip;
            a["network.transport"] = "tcp";   // all XRootD/HTTP traffic is TCP
            if      (u.ipVersion == 4) a["network.type"] = "ipv4";
            else if (u.ipVersion == 6) a["network.type"] = "ipv6";
-           // The login '&R=' release identifies the client software: semconv
-           // user_agent.name/.version (any client software, not just HTTP).
-           if (!u.clientVer.empty())
-              {a["user_agent.name"]    = "xrootd";
-               a["user_agent.version"] = u.clientVer;
-              }
            if (!u.site.empty())      a["xrootd.client.site"]    = u.site;
           }
-       // Application info: structured (&x=/&y=) plus the raw 'i' blob, the
-       // latter only when it adds information over the login &y= appinfo.
-       if (!u.appName.empty()) a["xrootd.app.name"] = u.appName;
-       if (!u.appInfo.empty()) a["xrootd.app.info"] = u.appInfo;
+       // Client software as the semconv user agent: the executable name ('&x=')
+       // is user_agent.name (falling back to "xrootd" when only a client
+       // release is known), the xrootd client release ('&R=') its version, and
+       // the XRD_MONINFO string ('&y=') the raw user_agent.original. These do
+       // not depend on a client address being present.
+       if (!u.appName.empty() || !u.clientVer.empty())
+          a["user_agent.name"] = u.appName.empty() ? "xrootd" : u.appName;
+       if (!u.clientVer.empty()) a["user_agent.version"]  = u.clientVer;
+       if (!u.appInfo.empty())   a["user_agent.original"] = u.appInfo;
+       // The un-interpreted 'i'-stream application blob, only when it adds
+       // information over the '&y=' XRD_MONINFO string already carried above.
        auto iit = srv.infos.find(u.raw);
        if (iit != srv.infos.end())
           {Touch(iit->second.lru);
            if (iit->second.val != u.appInfo)
-              a["xrootd.app.raw"] = iit->second.val;
+              a["xrootd.app"] = iit->second.val;
           }
        // VO/role/groups: prefer the token ('T'); fall back to the auth CGI.
        // The role lives in the semconv user.roles (a string array); VO and
@@ -623,6 +635,9 @@ std::string XrdMonDecode::otelIdentity(json& a, const Server& srv,
       {const TokenInfo& t = tit->second;
        Touch(t.lru);
        if (!t.subject.empty()) a["user.id"]     = t.subject;
+       // The token's (possibly mapped) username is authoritative over the
+       // descriptor's unverified unix name; prefer it for semconv user.name.
+       if (!t.username.empty()) a["user.name"]  = t.username;
        if (!t.vo.empty())     {vo = t.vo;        a["wlcg.vo"]     = t.vo;}
        if (!t.role.empty())    a["user.roles"]  = json::array({t.role});
        if (!t.groups.empty())  a["wlcg.groups"] = t.groups;
@@ -818,7 +833,8 @@ bool XrdMonDecode::SaveState(const std::string& path) const
        for (const auto& [id, u] : s.users)
           {json e = {{"raw",  u.raw},       {"user",   u.user},
                      {"prot", u.prot},      {"host",   u.host},
-                     {"addr", u.addr},      {"auth",   u.authMethod},
+                     {"addr", u.addr},      {"ahost",  u.authHost},
+                     {"dn",   u.dn},        {"auth",   u.authMethod},
                      {"vo",   u.vo},        {"role",   u.role},
                      {"groups", u.groups},  {"cver",   u.clientVer},
                      {"app",  u.appName},   {"info",   u.appInfo},
@@ -951,6 +967,8 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
                   u.prot       = e.value("prot",   std::string());
                   u.host       = e.value("host",   std::string());
                   u.addr       = e.value("addr",   std::string());
+                  u.authHost   = e.value("ahost",  std::string());
+                  u.dn         = e.value("dn",     std::string());
                   u.authMethod = e.value("auth",   std::string());
                   u.vo         = e.value("vo",     std::string());
                   u.role       = e.value("role",   std::string());
@@ -1247,7 +1265,8 @@ std::size_t XrdMonDecode::bytesOf(const UserInfo& u)
    std::size_t recent = 0;
    for (const auto& f : u.sRecent) recent += sizeof(f) + f.lfn.size();
    return kEntryOverhead + u.raw.size() + u.user.size() + u.prot.size()
-        + u.host.size() + u.addr.size() + u.authMethod.size() + u.vo.size()
+        + u.host.size() + u.addr.size() + u.authHost.size() + u.dn.size()
+        + u.authMethod.size() + u.vo.size()
         + u.role.size() + u.groups.size() + u.clientVer.size()
         + u.appName.size() + u.appInfo.size() + u.site.size() + recent;
 }
@@ -1375,6 +1394,8 @@ void XrdMonDecode::DecodeMap(unsigned char code, Server& srv,
        // "&key=". The &a= numeric client IP (added in 6.x) is preferred over
        // the descriptor @host, which may be a reverse-resolved name.
        u.addr       = cgiVal(text, "a");
+       u.authHost   = cgiVal(text, "h");
+       u.dn         = cgiVal(text, "n");
        u.authMethod = cgiVal(text, "p");
        u.vo         = cgiVal(text, "o");
        // Gate the auth-CGI VO once per login: only methods that can actually
@@ -2091,7 +2112,7 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
                  break;
             case XROOTD_MON_APPID:
                  {char b[13]; std::memcpy(b, a0 + 4, 12); b[12] = 0;
-                  ev = "xrootd.appid"; a["xrootd.app.info"] = b;
+                  ev = "xrootd.appid"; a["xrootd.app"] = b;
                  }
                  break;
             default: continue;   // REDHOST and anything else: skip

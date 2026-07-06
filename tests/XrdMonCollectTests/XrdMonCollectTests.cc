@@ -465,6 +465,28 @@ TEST(XrdMonCollect, TStreamRecordsDecoded)
   EXPECT_NE(di["spanId"], cl["spanId"]);
 }
 
+// The 't'-stream appid marker carries the application id under xrootd.app
+// (consistent with the 'i'-stream appinfo mapping).
+TEST(XrdMonCollect, TraceAppidMapsToXrootdApp)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); },
+                   nullptr, false, /*traces=*/true);
+
+  // appid record (disc 0xa0): a 12-byte app id string at bytes [4..15].
+  std::vector<unsigned char> rec(16, 0);
+  rec[0] = 0xa0;
+  const char* app = "myapp";
+  std::memcpy(rec.data() + 4, app, std::strlen(app));
+  auto pkt = packet('t', kStod, rec);
+  dec.Process("h:1", (const char*)pkt.data(), pkt.size());
+
+  ASSERT_EQ(docs.size(), 1u);
+  json j = json::parse(docs[0]);
+  EXPECT_EQ(j["attributes"]["event.name"], "xrootd.appid");
+  EXPECT_EQ(j["attributes"]["xrootd.app"], "myapp");
+}
+
 // A trace-stream I/O op must nest under the file's transfer span: with --spans
 // it emits its own child span whose parent is the transfer span EmitClose emits,
 // so Tempo renders session -> file -> I/O. Cross-check the emitted documents
@@ -579,7 +601,7 @@ TEST_F(Transfer, AppInfoEnrichesTransfer)
 
   ASSERT_FALSE(lastDoc.empty());
   json j = json::parse(lastDoc);
-  EXPECT_EQ(j["attributes"]["xrootd.app.raw"], "test-app-v1");
+  EXPECT_EQ(j["attributes"]["xrootd.app"], "test-app-v1");
   // The 'u' descriptor is decomposed into user.name/protocol/client fields;
   // the raw line itself is not duplicated into the document.
   EXPECT_FALSE(j["attributes"].contains("xrootd.user.raw"));
@@ -668,8 +690,9 @@ TEST(XrdMonCollect, DatasetRegexInvalidRejected)
   EXPECT_TRUE(dec.SetDatasetRegex(""));    // clear
 }
 
-// The 'i' blob is only emitted when it adds information over the login &y=.
-TEST_F(Transfer, AppRawSuppressedWhenEqualToAppInfo)
+// The 'i' blob is only emitted when it adds information over the login &y=
+// (which is user_agent.original).
+TEST_F(Transfer, AppSuppressedWhenEqualToUserAgentOriginal)
 {
   { W body; body.u32(7);
     std::string info = "xroot/alice.123:4@wn.example.org\n&R=v5&x=xrdcp"
@@ -689,8 +712,8 @@ TEST_F(Transfer, AppRawSuppressedWhenEqualToAppInfo)
 
   ASSERT_FALSE(lastDoc.empty());
   json j = json::parse(lastDoc);
-  EXPECT_EQ(j["attributes"]["xrootd.app.info"], "test-app-v1");
-  EXPECT_FALSE(j["attributes"].contains("xrootd.app.raw"));   // same as &y=
+  EXPECT_EQ(j["attributes"]["user_agent.original"], "test-app-v1");
+  EXPECT_FALSE(j["attributes"].contains("xrootd.app"));   // same as &y=
 }
 
 TEST(XrdMonCollect, RedirectStreamDecoded)
@@ -929,7 +952,8 @@ TEST_F(Transfer, AuthTailEnrichesTransfer)
   EXPECT_EQ(j["attributes"]["user.roles"], json::array({"production"}));
   EXPECT_EQ(j["attributes"]["user_agent.version"], "v5.6.1");
   EXPECT_EQ(j["attributes"]["network.type"], "ipv4");
-  EXPECT_EQ(j["attributes"]["xrootd.app.name"], "xrdcp");
+  EXPECT_EQ(j["attributes"]["user_agent.name"], "xrdcp");   // &x= executable
+  EXPECT_EQ(j["attributes"]["user.id"], "alice");           // &n= login DN
   EXPECT_EQ(j["attributes"]["client.address"], "198.51.100.7");
 }
 
@@ -1028,7 +1052,64 @@ TEST_F(Transfer, ClientSiteAdvertised)
   json j = json::parse(lastDoc);
   EXPECT_EQ(j["attributes"]["xrootd.client.site"], "CERN-PROD");
   EXPECT_EQ(j["attributes"]["user_agent.version"], "v5.6.1");  // neighbouring fields intact
-  EXPECT_EQ(j["attributes"]["xrootd.app.name"], "xrdcp");
+  EXPECT_EQ(j["attributes"]["user_agent.name"], "xrdcp");
+}
+
+// user_agent.name falls back to "xrootd" when only a client release (&R=) is
+// known (no &x= executable name).
+TEST_F(Transfer, UserAgentNameFallsBackToXrootd)
+{
+  feedUserMapTail(dec, "&R=v5.6.1&I=4");   // no &x=
+  feedOpen();
+  feedClose();
+
+  ASSERT_FALSE(lastDoc.empty());
+  json j = json::parse(lastDoc);
+  EXPECT_EQ(j["attributes"]["user_agent.name"], "xrootd");
+  EXPECT_EQ(j["attributes"]["user_agent.version"], "v5.6.1");
+}
+
+// The auth-reported '&h=' hostname is preferred for client.address (semconv:
+// name over IP) when the descriptor '@host' is only an IP literal; the numeric
+// address is then kept as network.peer.address.
+TEST_F(Transfer, AuthHostNameWinsOverDescriptorIp)
+{
+  W body; body.u32(7);
+  // Descriptor host is an IP; &h= carries a resolved name.
+  std::string info = "xroot/alice.123:4@198.51.100.7\n&p=gsi&h=wn.example.org&I=4";
+  std::vector<unsigned char> pl = body.b;
+  pl.insert(pl.end(), info.begin(), info.end());
+  auto pkt = packet('u', kStod, pl);
+  dec.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size());
+  feedOpen();
+  feedClose();
+
+  ASSERT_FALSE(lastDoc.empty());
+  json j = json::parse(lastDoc);
+  EXPECT_EQ(j["attributes"]["client.address"], "wn.example.org");
+  EXPECT_EQ(j["attributes"]["network.peer.address"], "198.51.100.7");
+}
+
+// The token's mapped username (&n=) is authoritative over the descriptor's
+// unverified unix name for user.name; a login DN (&n=) maps to user.id but the
+// token subject (&s=) wins.
+TEST_F(Transfer, TokenUsernameAndSubjectWin)
+{
+  // Descriptor user "alice"; login DN via &n=.
+  feedUserMapTail(dec, "&p=gsi&n=/DC=org/CN=alice&I=4");
+  { W body; body.u32(7);
+    std::string info = "&Uc=7&s=https://issuer/sub42&n=bob";  // mapped user "bob"
+    std::vector<unsigned char> pl = body.b;
+    pl.insert(pl.end(), info.begin(), info.end());
+    auto pkt = packet('T', kStod, pl);
+    dec.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size()); }
+  feedOpen();
+  feedClose();
+
+  ASSERT_FALSE(lastDoc.empty());
+  json j = json::parse(lastDoc);
+  EXPECT_EQ(j["attributes"]["user.name"], "bob");                 // token wins
+  EXPECT_EQ(j["attributes"]["user.id"], "https://issuer/sub42");  // subject wins over DN
 }
 
 TEST_F(Transfer, WriteOperationDerived)

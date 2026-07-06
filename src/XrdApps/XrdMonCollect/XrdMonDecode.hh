@@ -392,6 +392,17 @@ void     DecodeTStream(const std::string& src, int32_t stod, Server& srv,
                        const unsigned char* p, int len);
 void     DecodeGStream(const std::string& src, int32_t stod, Server& srv,
                        const unsigned char* p, int plen);
+//! Decode a g-stream datagram sent as newline-delimited text rather than the
+//! binary XrdXrootdMonGS protocol (xrootd.mongstream `send json`/`cgi`). Such a
+//! datagram leads with '{' and would otherwise be flagged bad_plen. Feeds the
+//! same events/metrics as DecodeGStream via EmitGStreamRecord.
+void     DecodeGStreamJson(const std::string& src, const char* buff, int blen);
+//! Emit one g-stream plugin record (a single JSON/CGI line): bumps stats.gevents,
+//! aggregates known providers into metrics, and forwards the record as a document.
+//! Shared by the binary (DecodeGStream) and JSON (DecodeGStreamJson) paths.
+void     EmitGStreamRecord(const std::string& src, int32_t stod, Server& srv,
+                           unsigned char provByte, int32_t tBeg, int32_t tEnd,
+                           const std::string& line);
 void     DecodeRStream(const std::string& src, int32_t stod, Server& srv,
                        const unsigned char* p, int plen);
 

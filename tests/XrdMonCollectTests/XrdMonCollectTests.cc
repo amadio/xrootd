@@ -1967,6 +1967,80 @@ TEST(XrdMonCollect, GStreamOssMetricsDelta)
             std::string::npos) << out;
 }
 
+namespace
+{
+// A g-stream datagram in `send json` form (xrootd.mongstream ... send json): a
+// header object (code 'g', gs.type = provider) followed by one payload record,
+// newline-delimited, instead of the binary XrdXrootdMonGS protocol.
+std::string gJson(char prov, const std::string& jsonRec, int pseq)
+{
+   return std::string("{\"code\":\"g\",\"pseq\":") + std::to_string(pseq)
+        + ",\"stod\":" + std::to_string(kStod)
+        + ",\"sid\":123,\"gs\":{\"type\":\"" + prov
+        + "\",\"tbeg\":1700000000,\"tend\":1700000060}}\n" + jsonRec + "\n";
+}
+}
+
+TEST(XrdMonCollect, JsonGStreamForwarded)
+{
+  // A `send json` g-stream leads with '{' rather than a binary code byte; it
+  // must be decoded into the same document as the binary path, not rejected as
+  // bad_plen.
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); },
+                   nullptr, false, false, /*gstream=*/true);
+
+  auto p = gJson('H', "{\"HTTP_GET_200\":{\"count\":240,\"success\":240}}", 3);
+  EXPECT_TRUE(dec.Process("h:1", p.data(), (int)p.size()));
+
+  ASSERT_EQ(docs.size(), 1u);
+  json j = json::parse(docs[0]);
+  EXPECT_EQ(j["attributes"]["event.name"], "xrootd.gstream");
+  EXPECT_EQ(j["attributes"]["xrootd.gstream.provider"], "http");
+  EXPECT_EQ(j["attributes"]["xrootd.gstream.data"]["HTTP_GET_200"]["count"], 240);
+  EXPECT_EQ(dec.GetStats().gevents, 1u);
+  EXPECT_EQ(dec.GetStats().malformed, 0u);   // not flagged bad_plen
+  EXPECT_EQ(dec.GetStats().unknown, 0u);
+}
+
+TEST(XrdMonCollect, JsonGStreamNohdrProviderUnknown)
+{
+  // `send json nohdr` omits the header, so the datagram leads straight with a
+  // payload object. It is still forwarded (provider unknown), not rejected.
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); },
+                   nullptr, false, false, /*gstream=*/true);
+
+  std::string p = "{\"some_event\":{\"n\":1}}\n";
+  EXPECT_TRUE(dec.Process("h:1", p.data(), (int)p.size()));
+  ASSERT_EQ(docs.size(), 1u);
+  json j = json::parse(docs[0]);
+  EXPECT_EQ(j["attributes"]["xrootd.gstream.provider"], "unknown");
+  EXPECT_EQ(dec.GetStats().malformed, 0u);
+}
+
+TEST(XrdMonCollect, JsonGStreamOssMetricsDelta)
+{
+  // The metrics-aggregation path works identically whether the g-stream arrives
+  // in binary or `send json` form.
+  XrdMetrics::Collector collector("xrootd");
+  XrdMonDecode dec([](const std::string&){}, nullptr,
+                   false, false, false, false, &collector.subsystem("collector"));
+
+  auto p1 = gJson('O', "{\"event\":\"oss_stats\",\"reads\":100,\"writes\":10,"
+                       "\"slow_reads\":4}", 1);
+  dec.Process("h:1", p1.data(), (int)p1.size());
+  auto p2 = gJson('O', "{\"event\":\"oss_stats\",\"reads\":150,\"writes\":15,"
+                       "\"slow_reads\":5}", 2);
+  dec.Process("h:1", p2.data(), (int)p2.size());
+
+  std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
+  EXPECT_NE(out.find("xrootd_collector_oss_ops_total{server=\"h:1\",op=\"read\"} 50"),
+            std::string::npos) << out;
+  EXPECT_NE(out.find("xrootd_collector_oss_ops_total{server=\"h:1\",op=\"write\"} 5"),
+            std::string::npos) << out;
+}
+
 TEST(XrdMonCollect, GStreamPfcAndTpcMetrics)
 {
   XrdMetrics::Collector collector("xrootd");

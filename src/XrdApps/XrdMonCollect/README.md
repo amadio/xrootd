@@ -897,6 +897,18 @@ spec](https://xrootd.web.cern.ch/doc/dev6/xrd_monitoring.htm).
 | provider (top byte of sID) | `attributes.xrootd.gstream.provider` |
 | record body (JSON/CGI line) | `attributes.xrootd.gstream.data` (nested object; a string under OTLP if unparseable) |
 
+The g-stream reaches the collector in one of two on-wire shapes. The built-in
+providers (`ccm`, `oss`, `http`, `pfc`, `TcpMon`, `Throttle`, `Tpc`) default to
+the **binary** `XrdXrootdMonGS` framing (`dest ... <collector>` on the
+`xrootd.monitor` line) — the native form. A separate `xrootd.mongstream ... send
+json` (or `cgi`) directive instead emits **newline-delimited text**: a header
+object (`{"code":"g",...,"gs":{"type":T,"tbeg":..,"tend":..}}`, or none with
+`send json nohdr`) followed by each plugin's raw record, one per line. The
+collector auto-detects the text form by its leading `{` and decodes it into the
+same `xrootd.gstream` events and provider metrics; the provider comes from the
+header's `gs.type` (or `unknown` under `nohdr`). Point a `send json` destination
+only at a JSON consumer or at this collector — never mix it into a binary sink.
+
 **`r` — redirect (`MAPREDR`, `--redirects`) → `xrootd.transfer`:**
 
 | Wire field | Canonical key |
@@ -1166,7 +1178,10 @@ stream class, and the metrics tell them apart:
   `bad_record` (`f`-stream record inconsistencies), `trailing_bytes`
   (`t`-stream payload not a whole number of records), `truncated_string`
   (`r`-stream host:path running past the packet). Run with `--debug` to log a
-  diagnostic line (server, stream, reason) for each rejected packet.
+  diagnostic line (server, stream, reason) for each rejected packet. A
+  `xrootd.mongstream ... send json`/`cgi` g-stream (leading `{`) is *not* counted
+  here — it is decoded as text g-stream (see above), so it lands in
+  `packets_total{stream="g:<provider>"}` like the binary form.
 - `unknown_packets_total` — packets with an unhandled stream code (usually
   stray traffic, e.g. a scanner hitting the port).
 

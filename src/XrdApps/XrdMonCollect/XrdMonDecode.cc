@@ -1138,6 +1138,13 @@ bool XrdMonDecode::Process(const std::string& src, const char* buff, int blen)
 
    stats.packets++;
 
+// A g-stream configured with `xrootd.mongstream ... send json` (or `cgi`) emits
+// newline-delimited text, not the binary XrdXrootdMon protocol. It leads with a
+// '{' (JSON) where a binary packet would carry a stream code byte, so route it
+// to the text g-stream decoder rather than misreading the header as bad_plen.
+//
+   if (blen > 0 && p[0] == '{') {DecodeGStreamJson(src, buff, blen); return true;}
+
 // Every packet starts with an 8-byte XrdXrootdMonHeader.
 //
    if (blen < 8)
@@ -2332,7 +2339,6 @@ void XrdMonDecode::DecodeGStream(const std::string& src, int32_t stod,
    int32_t  tEnd = ri32(p + 12);
    uint64_t sID  = rd64(p + 16);
    unsigned char provByte = (unsigned char)(sID >> 56);
-   const char* provider = gsProvider(provByte);
 
    const char* body = (const char*)(p + 24);
    int blen = plen - 24;
@@ -2341,33 +2347,145 @@ void XrdMonDecode::DecodeGStream(const std::string& src, int32_t stod,
    for (int i = 0; i <= blen; i++)
        {if (i == blen || body[i] == '\n')
            {int n = i - start;
-            if (n > 0)
-               {stats.gevents++;
-                if (gstream || metrics)
-                   {std::string line(body + start, n);
-                    json payload = json::parse(line, nullptr, false);
-
-                    // (a) aggregate known providers into bounded metrics.
-                    if (metrics && !payload.is_discarded())
-                       gsAggregate(metrics, gsPrev, provByte, src, payload);
-
-                    // (b) forward the record (structured payload) as a document.
-                    if (gstream && doc)
-                       {json j;
-                        otelResource(j, src, stod, srv);
-                        otelBegin(j, "xrootd.gstream", tEnd ? tEnd : tBeg, false);
-                        json& a = j["attributes"];
-                        a["xrootd.gstream.provider"] = provider;
-                        if (payload.is_discarded())
-                             a["xrootd.gstream.data"] = line;
-                        else a["xrootd.gstream.data"] = payload;
-                        doc(j.dump());
-                       }
-                   }
-               }
+            if (n > 0) EmitGStreamRecord(src, stod, srv, provByte, tBeg, tEnd,
+                                         std::string(body + start, n));
             start = i + 1;
            }
        }
+}
+
+/******************************************************************************/
+/*                     E m i t G S t r e a m R e c o r d                      */
+/******************************************************************************/
+
+void XrdMonDecode::EmitGStreamRecord(const std::string& src, int32_t stod,
+                                     Server& srv, unsigned char provByte,
+                                     int32_t tBeg, int32_t tEnd,
+                                     const std::string& line)
+{
+   stats.gevents++;
+   if (!(gstream || metrics)) return;
+
+   json payload = json::parse(line, nullptr, false);
+
+// (a) aggregate known providers into bounded metrics.
+//
+   if (metrics && !payload.is_discarded())
+      gsAggregate(metrics, gsPrev, provByte, src, payload);
+
+// (b) forward the record (structured payload) as a document.
+//
+   if (gstream && doc)
+      {json j;
+       otelResource(j, src, stod, srv);
+       otelBegin(j, "xrootd.gstream", tEnd ? tEnd : tBeg, false);
+       json& a = j["attributes"];
+       a["xrootd.gstream.provider"] = gsProvider(provByte);
+       if (payload.is_discarded())
+            a["xrootd.gstream.data"] = line;
+       else a["xrootd.gstream.data"] = payload;
+       doc(j.dump());
+      }
+}
+
+/******************************************************************************/
+/*                   D e c o d e G S t r e a m J s o n                        */
+/******************************************************************************/
+
+// A g-stream configured with `xrootd.mongstream ... send json` (or `cgi`) ships
+// newline-delimited text instead of the binary XrdXrootdMonGS protocol: a header
+// object ({"code":"g","pseq":..,"stod":..,"gs":{"type":T,"tbeg":..,"tend":..}})
+// followed by the plugins' raw records, one per line. `send json nohdr` omits the
+// header, leading straight with a payload object. Decode either shape into the
+// same events/metrics as the binary path so a `send json` destination aimed at
+// the collector is handled rather than every flush flagged bad_plen.
+//
+void XrdMonDecode::DecodeGStreamJson(const std::string& src,
+                                     const char* buff, int blen)
+{
+// Isolate the first line and try to read it as a header object.
+//
+   int hEnd = 0;
+   while (hEnd < blen && buff[hEnd] != '\n') hEnd++;
+   json hdr = json::parse(buff, buff + hEnd, nullptr, false);
+
+   const bool hasCode = hdr.is_object() && hdr.contains("code")
+                     && hdr["code"].is_string();
+   const std::string code = hasCode ? hdr["code"].get<std::string>() : "";
+
+// Other JSON monitor packets (server ident '=', dictionary 'd'/'i') also arrive
+// on a `send json` stream. We do not correlate them yet, but they must not be
+// mistaken for bad_plen: count them as received and, under --debug, surface them.
+//
+   if (hasCode && code != "g")
+      {int32_t stod = (int32_t)hdr.value("stod", 0);
+       (void)ServerFor(src, stod);            // refresh lastSeen for reaping
+       if (metrics)
+          metrics->counterSeries("packets_total", "monitor packets received",
+               {{"server", src}, {"stream", "g:json"}}) += 1;
+       if (dumpRaw && raw)
+          {json j = {{"server", src}, {"code", code},
+                     {"note", "json monitor packet (uncorrelated)"}};
+           raw(j.dump());
+          }
+       return;
+      }
+
+// g-stream. With a header present ('g'), it carries the provider and window and
+// is consumed; `nohdr` has none, so the provider stays unknown and the first
+// line is already payload.
+//
+   unsigned char provByte = 0;                // -> gsProvider() "unknown"
+   int32_t tBeg = 0, tEnd = 0, stod = 0;
+   int     pseq = -1, payloadStart = 0;
+   if (hasCode)                               // code == "g"
+      {auto gs = hdr.find("gs");
+       if (gs != hdr.end() && gs->is_object())
+          {std::string t = gs->value("type", "");
+           if (!t.empty()) provByte = (unsigned char)t[0];
+           tBeg = (int32_t)gs->value("tbeg", 0);
+           tEnd = (int32_t)gs->value("tend", 0);
+          }
+       stod = (int32_t)hdr.value("stod", 0);
+       pseq = (int)hdr.value("pseq", -1);
+       payloadStart = (hEnd < blen) ? hEnd + 1 : blen;   // consume header line
+      }
+
+   Server& srv = ServerFor(src, stod);
+
+// Received/loss accounting, mirroring Process() for the binary path but on the
+// JSON pseq, which wraps at 1000 (see XrdXrootdGSReal::hdrJSN) rather than 256.
+//
+   std::string sclass = std::string("g:") + gsProvider(provByte);
+   if (metrics)
+      metrics->counterSeries("packets_total", "monitor packets received",
+           {{"server", src}, {"stream", sclass}}) += 1;
+   if (pseq >= 0)
+      {auto it = srv.lastPseq.find(sclass);
+       if (it == srv.lastPseq.end()) srv.lastPseq.emplace(sclass, pseq);
+          else
+          {int gap = (pseq - ((it->second + 1) % 1000) + 1000) % 1000;
+           if (gap > 0 && gap < 500)
+              {stats.lost += gap;
+               if (metrics)
+                  metrics->counterSeries("packets_lost_total",
+                       "estimated lost packets (pseq gaps)",
+                       {{"server", src}, {"stream", sclass}}) += gap;
+              }
+           it->second = pseq;
+          }
+      }
+
+// Remaining lines are the plugins' raw records.
+//
+   int start = payloadStart;
+   for (int i = payloadStart; i <= blen; i++)
+       if (i == blen || buff[i] == '\n')
+          {int n = i - start;
+           if (n > 0) EmitGStreamRecord(src, stod, srv, provByte, tBeg, tEnd,
+                                        std::string(buff + start, n));
+           start = i + 1;
+          }
 }
 
 /******************************************************************************/

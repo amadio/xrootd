@@ -417,8 +417,9 @@ Several opt-in streams add finer-grained events:
 
 The `u` (user), `d` (path) and `i` (appinfo) dictionaries are always consumed:
 they resolve identities and paths for the other streams, and the appinfo (`i`)
-is joined to each transfer document by session descriptor (adds `xrootd.app.raw`
-when the client set one and it differs from the login `&y=` appinfo).
+is joined to each transfer document by session descriptor (adds `xrootd.app`
+when the client set one and it differs from the login `&y=`, which is
+`user_agent.original`).
 
 The `=` (server identity), `T` (token) and `U` (user experiment/activity)
 records are also always consumed:
@@ -531,11 +532,10 @@ shows a fully-populated successful whole-file read (server configured with
     "user.roles": ["production"],
     "wlcg.vo": "atlas", "wlcg.groups": "/atlas/prod",
     "xrootd.auth.method": "gsi",
-    "user_agent.name": "xrootd", "user_agent.version": "v5.6.1",
+    "user_agent.name": "xrdcp", "user_agent.version": "v5.6.1",
+    "user_agent.original": "task=prod-copy",
     "xrootd.client.site": "client-site",
-    "xrootd.app.name": "xrdcp",
-    "xrootd.app.info": "task=prod-copy",
-    "xrootd.app.raw": "job=1234",
+    "xrootd.app": "job=1234",
     "scitags.experiment_id": 8, "scitags.experiment": "cms",
     "scitags.activity_id": 3, "scitags.activity": "analysis",
     "xrootd.operation.name": "read",
@@ -682,12 +682,12 @@ on the wire. Mapping (and the server config each needs):
 | error_category | `xrootd.operation.name` + `xrootd.error.code` | `fstat` (failed open / I/O / close) |
 | server_name/site | `server.address` / `xrootd.server.site` | `=` ident (`all.sitename`/`XRDSITE` for site) |
 | server_ip / hostname | `server.address` | `=` ident, else UDP source (loopback → public address / local FQDN) |
-| client_ip / hostname | `client.address` (name first) / `network.peer.address` (IP) | `u` descriptor (server DNS config) / login CGI `&a=` (numeric IP, 6.x+) |
-| client_version | `user_agent.version` (with `user_agent.name` = `xrootd`) | login appinfo (`&R=`) |
+| client_ip / hostname | `client.address` (name first, from `@host` or `&h=`) / `network.peer.address` (IP) | `u` descriptor / auth `&h=` (server DNS config) / login CGI `&a=` (numeric IP, 6.x+) |
+| client_app / version | `user_agent.name` (`&x=` executable, else `xrootd`) / `user_agent.version` / `user_agent.original` (`&y=`) | login appinfo (`&x=`/`&R=`/`&y=`) |
 | ip_version | `network.type` (`ipv4`/`ipv6`) | login appinfo (`&I=`) |
 | client_site | `xrootd.client.site` | login appinfo (`&S=`, client `XRDSITE`/`XRD_SITE`) |
 | auth_method | `xrootd.auth.method` | **`… auth`** |
-| user | `user.name` / `user.id` | `u` / `T` token |
+| user | `user.name` (token `&n=` preferred over descriptor) / `user.id` (token `&s=`, else login DN `&n=`) | `u` / `T` token |
 | vo | `wlcg.vo` | `T` token, else `… auth` (`&o=` from a VO-bearing method: gsi/sss/ztn/http(s)) |
 | activity | `scitags.experiment`/`scitags.activity` (names), `scitags.*_id` (numeric), `user.roles` | `U` SciTags + `--scitags` registry; `T` token for role |
 | start_time / end_time | `xrootd.transfer.start_time` / `.end_time` | f-stream `FileTOD` window |
@@ -696,9 +696,10 @@ on the wire. Mapping (and the server config each needs):
 
 `client.address` carries the client's resolved name when one is known, with
 the IP address only as a fallback (per the OTel semantic conventions). The
-name is the `u` descriptor's host, which the *server* reverse-resolved at
-login time depending on its DNS configuration — the collector itself never
-does DNS in the receive path. When the name wins, the numeric client IP the
+name is taken from the first real hostname among the `u` descriptor's `@host`
+and the auth-reported `&h=` — both reverse-resolved by the *server* at login
+time depending on its DNS configuration; the collector itself never does DNS
+in the receive path. When the name wins, the numeric client IP the
 server puts in the login CGI (`&a=`, XRootD 6.x+) is kept as
 `network.peer.address` (the direct peer). When no name is available,
 `client.address` is that numeric IP (or the descriptor's IP literal against
@@ -783,6 +784,143 @@ in its config, exported as `XRDSITE` — from the `=` ident record. A site that
 is only dots — `XrdOucSiteName`'s sanitization of an entirely invalid name,
 e.g. a stray `XRDSITE` env var inherited by a daemon with no `all.sitename`
 directive — is dropped as carrying no information.)
+
+### Monitoring stream field mapping
+
+These tables give the concrete wire-field → JSON-key mapping for every XRootD
+monitoring stream. Both sinks serialize the **same** canonical document (see
+[Sink comparison](#sink-comparison-opensearch-vs-otlp)), so each key below is
+identical in OpenSearch and OTLP — OpenSearch nests it as a JSON path
+(`resource.<key>` / `attributes.<key>`), OTLP emits the same key as a Resource
+or LogRecord `KeyValue`; the envelope keys become native OTLP LogRecord/Span
+fields. Field meanings follow the [XRootD monitoring
+spec](https://xrootd.web.cern.ch/doc/dev6/xrd_monitoring.htm).
+
+**Resource** (process-level, from the `=` ident record and the UDP source):
+
+| Wire field | Canonical key |
+| :-- | :-- |
+| `&inst=` | `resource.service.instance.id` |
+| `&ver=` | `resource.service.version` |
+| `@host` / resolved / source IP | `resource.server.address` |
+| `&port=` | `resource.server.port` |
+| `&site=` | `resource.xrootd.server.site` |
+| `&pgm=` | `resource.xrootd.server.program` |
+| f-stream `sID` | `resource.xrootd.server.id` |
+| header `stod` | `resource.xrootd.server.incarnation` |
+| — | `resource.service.name` = `xrootd` (constant) |
+
+**Envelope** (per record, set by `otelBegin`):
+
+| Source | Canonical key |
+| :-- | :-- |
+| record window time | `@timestamp`, `timeUnixNano` |
+| receipt time | `observedTimeUnixNano` |
+| error flag | `severityNumber` / `severityText` |
+| record kind | `eventName` (+ `attributes.event.name`) |
+| correlation | `traceId`, `spanId` (+ `attributes.session.id`) |
+
+**`u` — user login (`MAPUSER`), descriptor `<prot>/<user>.<pid>:<sfd>@<host>` + CGI:**
+
+| Wire field | Canonical key |
+| :-- | :-- |
+| `<prot>` | `attributes.network.protocol.name` (+ `url.scheme` if `http`/`https`) |
+| `<user>` | `attributes.user.name` (token `&n=` preferred when present) |
+| `@host` / `&h=` | `attributes.client.address` (first real hostname) |
+| `&a=` (numeric IP) | `attributes.network.peer.address` (or `client.address` if no name) |
+| `&h=` | auth-reported client host — name candidate for `client.address` |
+| `&n=` | `attributes.user.id` (login DN; token `&s=` wins) |
+| `&p=` | `attributes.xrootd.auth.method` |
+| `&o=` | `attributes.wlcg.vo` (only if the auth method conveys a VO) |
+| `&r=` | `attributes.user.roles[]` |
+| `&g=` | `attributes.wlcg.groups` |
+| `&x=` | `attributes.user_agent.name` (executable; else `xrootd`) |
+| `&R=` | `attributes.user_agent.version` (client release) |
+| `&y=` | `attributes.user_agent.original` (XRD_MONINFO) |
+| `&S=` | `attributes.xrootd.client.site` |
+| `&I=` | `attributes.network.type` (`ipv4`/`ipv6`) |
+| — | `attributes.network.transport` = `tcp` (constant) |
+
+**`d` / `i` — path & appinfo dictionaries:**
+
+| Stream | Wire field | Canonical key |
+| :-- | :-- | :-- |
+| `d` (`MAPPATH`) | `<lfn>` | `attributes.file.path` (+ `file.name`/`file.directory`/`file.extension`) |
+| `i` (`MAPINFO`) | `<appinfo>` | `attributes.xrootd.app` (only when it differs from `&y=`) |
+
+**`T` — token (`MAPTOKN`):**
+
+| Wire field | Canonical key |
+| :-- | :-- |
+| `&s=` | `attributes.user.id` (subject; preferred over login `&n=`) |
+| `&n=` | `attributes.user.name` (mapped username; preferred over descriptor) |
+| `&o=` | `attributes.wlcg.vo` (preferred over the `u` auth `&o=`) |
+| `&r=` | `attributes.user.roles[]` |
+| `&g=` | `attributes.wlcg.groups` |
+
+**`U` — SciTags experiment/activity (`MAPUEAC`):**
+
+| Wire field | Canonical key |
+| :-- | :-- |
+| `&Ec=` | `attributes.scitags.experiment_id` (+ `scitags.experiment` name via registry) |
+| `&Ac=` | `attributes.scitags.activity_id` (+ `scitags.activity` name via registry) |
+
+**`f` — file stream (`MAPFSTA`) → `xrootd.transfer` / `xrootd.session` docs:**
+
+| Record | Wire field | Canonical key |
+| :-- | :-- | :-- |
+| `isTime` | tEnd / sID | envelope time / `resource.xrootd.server.id` |
+| `isOpen` | fsz / RW / lfn / user | `attributes.file.size`, `.xrootd.file.read_write`, `.file.*`, → identity |
+| `isClose` (`xfr`) | read/readv/write bytes | `attributes.xrootd.transfer.{read,readv,write}_bytes` |
+| `isClose` (`ops`) | op counts, readv segs, min/max | `attributes.xrootd.transfer.{read,readv,write}_{ops,min,max}`, `.readv_segs` |
+| `isClose` (`ssq`) | Σx² | `attributes.xrootd.transfer.{read,readv,rsegs,write}_sumsq` |
+| `isClose` | derived | `.kind`, `.operation.name`, `.operation.state`, `.open_seen`, `.forced_close`, `.duration`, `.is_local` |
+| `isClose`/`isError` | error text / code | `attributes.error.type`, `.xrootd.error.code` |
+| `isDisc` | session rollup | `attributes.xrootd.session.{files,transfers,accesses,errors,read_bytes,write_bytes,start_time,end_time,duration,recent_files}` |
+
+**`t` — trace stream (`MAPTRCE`, `--traces`):**
+
+| Record | Wire field | Canonical key / `eventName` |
+| :-- | :-- | :-- |
+| read / write | offset, length | `attributes.xrootd.io.offset`, `.xrootd.io.length`; `xrootd.read`/`xrootd.write` |
+| readv / readu | file dictid | `attributes.file.*`, `.xrootd.file.id`; `xrootd.readv` |
+| open | fsz | `attributes.file.size`; `xrootd.open` |
+| close | read/write bytes | `attributes.xrootd.transfer.{read,write}_bytes`; `xrootd.close` |
+| disc | duration, user | `attributes.xrootd.session.duration` + identity; `xrootd.disconnect` |
+| appid | 12-byte app id | `attributes.xrootd.app`; `xrootd.appid` |
+| window | time | (sets envelope time; no document) |
+
+**`g` — g-stream (`MAPGSTA`, `--gstream`) → `xrootd.gstream`:**
+
+| Wire field | Canonical key |
+| :-- | :-- |
+| provider (top byte of sID) | `attributes.xrootd.gstream.provider` |
+| record body (JSON/CGI line) | `attributes.xrootd.gstream.data` (nested object; a string under OTLP if unparseable) |
+
+**`r` — redirect (`MAPREDR`, `--redirects`) → `xrootd.transfer`:**
+
+| Wire field | Canonical key |
+| :-- | :-- |
+| type low nibble | `attributes.xrootd.operation.name` |
+| type high nibble | `attributes.xrootd.redirect.kind` (`local`/`remote`) |
+| port | `attributes.xrootd.redirect.target.port` |
+| host | `attributes.xrootd.redirect.target.address` |
+| path | `attributes.file.*` |
+| dictid | → identity; `attributes.xrootd.operation.state` = `Redirected` |
+
+**`x` / `p` — FRM stage/purge (`MAPXFER`/`MAPPURG`) → `xrootd.frm`:**
+
+| Wire field | Canonical key |
+| :-- | :-- |
+| code | `attributes.xrootd.operation.name` (`transfer`/`purge`) |
+| `<path>` | `attributes.file.*` |
+| `<who>` descriptor | `attributes.network.protocol.name`, `.user.name`, `.client.address` |
+| `&sz=` | `attributes.file.size` |
+| `&tod=` | envelope time |
+
+Two spec fields are intentionally not emitted: the `=` record's own daemon
+login user (internal change-detection only) and the login `&h=` when a
+descriptor hostname already won `client.address`.
 
 ## Sinks
 

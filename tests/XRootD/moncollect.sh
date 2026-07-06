@@ -136,8 +136,11 @@ function setup_moncollect() {
 	# --dataset captures the per-run mktemp leaf (test-XXXXXX) of the paths the
 	# test transfers, standing in for an experiment dataset name.
 	: > "${COLLECTOR_OUT}"
+	# --traces emits the per-I/O trace-stream records (the server sends them via
+	# the 'io' destination in moncollect.cfg) so the test can assert they carry
+	# trace correlation ids.
 	xrdmoncollect -p "${COLLECTOR_PORT}" -o "${COLLECTOR_OUT}" \
-	              --flush-secs 1 --flush-count 1 ${OTLP_ARGS} \
+	              --flush-secs 1 --flush-count 1 --traces ${OTLP_ARGS} \
 	              --dataset '/(test-[A-Za-z0-9]+)/' \
 	              > "${PWD}/${NAME}/collector.log" 2>&1 < /dev/null &
 	echo $! > "${COLLECTOR_PID}"
@@ -211,6 +214,16 @@ function test_moncollect() {
 	assert grep -Fq "\"file.directory\":\"${TMPDIR}\"" "${COLLECTOR_OUT}"
 	assert grep -Fq '"file.extension":"ref"' "${COLLECTOR_OUT}"
 	assert grep -Eq '"xrootd.dataset":"test-[A-Za-z0-9]+"' "${COLLECTOR_OUT}"
+
+	# Trace-stream I/O records (--traces) must carry OTel correlation ids so a
+	# tracing backend can nest the per-I/O detail under the transfer span: a
+	# 32-hex traceId and a 16-hex spanId. Re-drive until a read record lands
+	# (the trace stream is buffered server-side and can lag the close).
+	drive_until '"event.name":"xrootd.read"' "trace-stream read record" \
+		"xrdcp -f '${HOST}/${TMPDIR}/ok.ref' '${TMPDIR}/ok.dat'"
+	read_doc=$(grep -E '"event.name":"xrootd.read"' "${COLLECTOR_OUT}" | head -n1)
+	assert grep -Eq '"traceId":"[0-9a-f]{32}"' <<<"${read_doc}"
+	assert grep -Eq '"spanId":"[0-9a-f]{16}"' <<<"${read_doc}"
 
 	# OTLP export (when the mock receiver is running): the collector must POST an
 	# OTLP logs export to /v1/logs (resourceLogs envelope with typed KeyValue

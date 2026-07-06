@@ -344,7 +344,15 @@ Several opt-in streams add finer-grained events:
   `xrootd.open`, `xrootd.close`, `xrootd.disconnect`, and `xrootd.appid`). This
   is **high volume** (one record per I/O) — enable only when the detail is
   needed. Requires `io` in the server's monitor `dest` list and the path
-  dictionary (`d` stream) to resolve file names.
+  dictionary (`d` stream) to resolve file names. Each file-scoped record
+  (`read`/`write`/`open`/`close`/`readv`) carries the same `traceId` (the client
+  session) and `spanId` (the file's transfer span) the corresponding `transfer`
+  document emits, so a tracing backend nests the per-I/O detail under the
+  transfer span; a `disconnect` record reuses the session span. The one
+  exception is `appid`, which carries no dictionary id and so cannot be
+  correlated. The opening user is resolved from the file id, so the file's
+  `open` (`f` stream) must have been seen — otherwise the record falls back to
+  the session-less trace, exactly as a close without a joined open does.
 - `--gstream` forwards each `g` (plugin) record — from the `oss`, `pfc`,
   `throttle`, `tpc`, `http` g-streams — as a document tagged with its provider,
   embedding the plugin's JSON payload. Requires `xrootd.mongstream` on the
@@ -1251,6 +1259,8 @@ the collector; a **Server** variable multi-selects the reporting servers.
   [shoveler chain](#shoveler-mode-reliable-tcp-transport) confines this to the
   local hop; its own TCP leg is lossless except for the un-acked kernel-buffer
   window when the collector dies abruptly (see the caveat there).
-- Only the `f` stream is correlated today. The `t` (per-I/O trace) and `g`
-  (plugin) streams are decoded enough to be counted and optionally emitted as
-  documents, but are not joined into the transfer correlation.
+- The `f` stream drives the transfer correlation state. The `t` (per-I/O trace)
+  records reuse that state read-only to stamp each record with its file's
+  `traceId`/`spanId` (see `--traces`), but do not themselves build correlation
+  entries; the `g` (plugin) stream is decoded enough to be counted and
+  optionally emitted, but is not joined into the transfer correlation.

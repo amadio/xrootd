@@ -402,7 +402,7 @@ TEST(XrdMonCollect, TStreamRecordsDecoded)
     dec.Process("h:1", (const char*)pkt.data(), pkt.size());
   }
 
-  // 't' packet: window, a read I/O on file 50, and a close on file 50.
+  // 't' packet: window, a read I/O and a close on file 50, and a disconnect.
   W payload;
   { std::vector<unsigned char> a0(8, 0); a0[0] = 0xe0;     // WINDOW
     payload.raw(trace(a0, 0, 1700000000)); }
@@ -412,11 +412,13 @@ TEST(XrdMonCollect, TStreamRecordsDecoded)
     a0[1] = 0; a0[2] = 0;                                   // shifts
     a0[4]=0; a0[5]=0; a0[6]=0x08; a0[7]=0x00;              // rVal = 2048
     payload.raw(trace(a0, 0, 50)); }
+  { std::vector<unsigned char> a0(8, 0); a0[0] = 0xd0;     // DISC
+    payload.raw(trace(a0, 5, 50)); }                       // dur 5, user 50
   auto pkt = packet('t', kStod, payload.b);
   dec.Process("h:1", (const char*)pkt.data(), pkt.size());
 
-  EXPECT_EQ(dec.GetStats().traces, 3u);
-  ASSERT_EQ(docs.size(), 2u);   // window emits nothing; read + close do
+  EXPECT_EQ(dec.GetStats().traces, 4u);
+  ASSERT_EQ(docs.size(), 3u);   // window emits nothing; read + close + disc do
   json rd = json::parse(docs[0]);
   EXPECT_EQ(rd["attributes"]["event.name"], "xrootd.read");
   EXPECT_EQ(rd["attributes"]["xrootd.io.offset"], 4096);
@@ -425,6 +427,62 @@ TEST(XrdMonCollect, TStreamRecordsDecoded)
   json cl = json::parse(docs[1]);
   EXPECT_EQ(cl["attributes"]["event.name"], "xrootd.close");
   EXPECT_EQ(cl["attributes"]["xrootd.transfer.read_bytes"], 2048);
+  json di = json::parse(docs[2]);
+  EXPECT_EQ(di["attributes"]["event.name"], "xrootd.disconnect");
+
+  // Every emitted trace record carries a well-formed traceId/spanId so tracing
+  // backends can correlate it (32-hex trace id, 16-hex span id); the session.id
+  // attribute mirrors the traceId. File-scoped records share the file's transfer
+  // span, the disconnect its session span.
+  for (const json* d : {&rd, &cl, &di})
+     {ASSERT_TRUE(d->contains("traceId")) << *d;
+      ASSERT_TRUE(d->contains("spanId"))  << *d;
+      EXPECT_EQ((*d)["traceId"].get<std::string>().size(), 32u);
+      EXPECT_EQ((*d)["spanId"].get<std::string>().size(),  16u);
+      EXPECT_EQ((*d)["attributes"]["session.id"], (*d)["traceId"]);
+     }
+  EXPECT_EQ(rd["spanId"], cl["spanId"]);     // same file -> same transfer span
+  EXPECT_NE(di["spanId"], cl["spanId"]);     // disconnect gets the session span
+}
+
+// A trace-stream I/O record must correlate with the file's transfer span: it
+// reuses the session traceId and the same spanId EmitClose emits, so the detail
+// logs nest under the transfer span in Tempo/Grafana. Cross-check the two docs
+// rather than recomputing the (internal) key.
+TEST_F(Transfer, TraceRecordsCorrelateWithTransferSpan)
+{
+  std::vector<std::string> tdocs;
+  XrdMonDecode traced([&](const std::string& d){ tdocs.push_back(d); },
+                      nullptr, false, /*traces=*/true);
+  alt = &traced;                 // the feed helpers now target the traced decoder
+
+  feedUserMap();                 // user dictid 7
+  feedOpen();                    // file 100 opened by user 7 (populates srv.files)
+
+  // t-stream read on file 100, fed before the close erases the file record.
+  { W payload;
+    { std::vector<unsigned char> a0(8, 0); a0[0] = 0xe0;   // WINDOW
+      payload.raw(trace(a0, 0, (uint32_t)kCloseT)); }
+    { auto a0 = u64v(4096);                                // read offset 4096
+      payload.raw(trace(a0, 2048, 100)); }                 // len 2048, file 100
+    auto pkt = packet('t', kStod, payload.b);
+    traced.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size()); }
+
+  ASSERT_EQ(tdocs.size(), 1u);
+  json rd = json::parse(tdocs.back());
+  EXPECT_EQ(rd["attributes"]["event.name"], "xrootd.read");
+  ASSERT_TRUE(rd.contains("traceId"));
+  ASSERT_TRUE(rd.contains("spanId"));
+  EXPECT_EQ(rd["attributes"]["session.id"], rd["traceId"]);
+
+  // Feed the close and compare: same session trace, same (transfer) span.
+  tdocs.clear();
+  feedClose();
+  ASSERT_FALSE(tdocs.empty());
+  json xfer = json::parse(tdocs.back());
+  EXPECT_EQ(xfer["eventName"], "xrootd.transfer");
+  EXPECT_EQ(rd["traceId"], xfer["traceId"]);
+  EXPECT_EQ(rd["spanId"],  xfer["spanId"]);
 }
 
 TEST_F(Transfer, AggregatesIntoMetricsRegistry)

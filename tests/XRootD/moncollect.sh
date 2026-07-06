@@ -313,7 +313,7 @@ function test_moncollect() {
 	# server's ESPIPE reason (kXR_FSError = 3005), not just any error. The
 	# strerror text differs by libc: "illegal seek" (glibc) vs "invalid seek"
 	# (musl).
-	readv_doc=$(grep -E '"xrootd.app.name":"xrdreadv-eof"' "${COLLECTOR_OUT}" \
+	readv_doc=$(grep -E '"user_agent.name":"xrdreadv-eof"' "${COLLECTOR_OUT}" \
 		| grep -E '"xrootd.operation.state":"Failed"' | head -n1)
 	test -n "${readv_doc}" || error "no failed-readv transfer document found"
 	assert grep -Eq '"xrootd.operation.name":"read"' <<<"${readv_doc}"

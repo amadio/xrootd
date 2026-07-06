@@ -443,9 +443,13 @@ just flush more often. In the collector's metrics,
 sequence counters for the fstat stream and each g-stream provider); loss
 concentrated on \fBf\fR while \fBt\fR arrives fine is the fragmentation
 signature, loss on all streams points at the network or the collector's
-receive buffer. \fBmalformed_total{server,stream,reason}\fR breaks out
+receive buffer. \fBpackets_total{server,stream}\fR carries the same
+\fB{server,stream}\fR labels, so a per-source loss percentage is
+\fBpackets_lost_total / packets_total\fR.
+\fBmalformed_total{server,stream,reason}\fR breaks out
 structurally invalid packets (\fBbad_plen\fR, \fBshort_packet\fR,
-\fBbad_record\fR, \fBtrailing_bytes\fR, \fBtruncated_string\fR), and
+\fBbad_record\fR, \fBtrailing_bytes\fR, \fBtruncated_string\fR); run with
+\fB--debug\fR to log the server, stream, and reason of each rejected packet.
 \fBunknown_packets_total\fR counts unhandled stream codes (usually stray
 traffic on the port).
 .SH CONFIGURATION FILE

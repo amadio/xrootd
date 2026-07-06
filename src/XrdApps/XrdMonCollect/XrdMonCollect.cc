@@ -1294,9 +1294,9 @@ int main(int argc, char* argv[])
       {auto& s = decoder.GetStats();
 #define OBS(name, help, fld) \
        subsystem->observeCounter<std::uint64_t>(name, help).add({}, [&]{return (uint64_t)s.fld;})
-       OBS("packets_total",   "monitor packets received", packets);
-       // malformed_total is emitted by the decoder itself, labeled by
-       // {server, stream, reason}; only the unlabeled aggregates live here.
+       // packets_total and malformed_total are emitted by the decoder itself,
+       // labeled by {server, stream} and {server, stream, reason} respectively;
+       // only the unlabeled aggregates live here.
        OBS("unknown_packets_total",
            "packets with an unhandled stream code", unknown);
        OBS("evicted_total",

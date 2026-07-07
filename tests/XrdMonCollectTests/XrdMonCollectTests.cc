@@ -59,15 +59,25 @@ std::vector<unsigned char> packet(char code, int32_t stod,
    return w.b;
 }
 
-// f-stream TOD (isTime) record with the given window end time.
-std::vector<unsigned char> todRec(int32_t tEnd, int64_t sID)
+// f-stream TOD (isTime) record spanning [tBeg, tEnd] with nTot following
+// records (the decoder interpolates per-record times over that range).
+std::vector<unsigned char> todRec(int32_t tBeg, int32_t tEnd, uint16_t nTot,
+                                  int64_t sID)
 {
    W body;
-   body.u32(0);             // union: nRecs (unused here)
-   body.u32((uint32_t)tEnd);// tBeg
+   body.u16(0);             // union: nRecs[0] (isXfr records)
+   body.u16(nTot);          // union: nRecs[1] (records after the TOD)
+   body.u32((uint32_t)tBeg);// tBeg
    body.u32((uint32_t)tEnd);// tEnd
    body.u64((uint64_t)sID); // sID
    return rec(2 /*isTime*/, 0, body.b);
+}
+
+// Degenerate TOD (tBeg == tEnd, no record count): every record in the packet
+// is stamped with the window end, as before interpolation existed.
+std::vector<unsigned char> todRec(int32_t tEnd, int64_t sID)
+{
+   return todRec(tEnd, tEnd, 0, sID);
 }
 
 const int32_t kStod  = 1700000000;
@@ -240,6 +250,82 @@ TEST_F(Transfer, SpanStreamEmitsCorrelatedFileSpan)
   EXPECT_EQ(span["traceId"], log["traceId"]);
   EXPECT_EQ(span["spanId"],  log["spanId"]);
   EXPECT_EQ(dec.GetStats().spans, 1u);
+}
+
+// An open and close reported in the same packet used to compute a zero
+// duration (both were stamped with the packet's flush time). With the TOD's
+// tBeg/tEnd/nRecs the decoder interpolates each record's time over its
+// position, so the pair yields a positive, fractional duration estimate.
+TEST_F(Transfer, SamePacketOpenCloseInterpolatesDuration)
+{
+  dec.SetEmitSpans(true);
+  feedUserMap();
+
+  // One packet, TOD says: 3 records appended between tBeg and tBeg+5.
+  // Records: isOpen (k=0 -> tBeg), isClose (k=1 -> tBeg+2.5), isXfr (k=2).
+  auto payload = todRec(kOpenT, kOpenT + 5, 3, 42);
+  {W body;
+   body.u32(100);                 // fileID
+   body.u64(123456);              // fsz
+   body.u32(7);                   // user dictid
+   std::string lfn = "/store/data/file.root";
+   body.raw(lfn); body.u8(0);
+   auto r = rec(1 /*isOpen*/, 0x01 | 0x02 /*hasLFN|hasRW*/, body.b);
+   payload.insert(payload.end(), r.begin(), r.end());
+  }
+  {W body;
+   body.u32(100);                 // fileID
+   body.u64(123456);              // Xfr.read (whole file)
+   body.u64(0);                   // Xfr.readv
+   body.u64(0);                   // Xfr.write
+   auto r = rec(0 /*isClose*/, 0, body.b);
+   payload.insert(payload.end(), r.begin(), r.end());
+  }
+  {W body;
+   body.u32(101);                 // some other open file
+   body.u64(0); body.u64(0); body.u64(0);   // xfr byte counters
+   auto r = rec(3 /*isXfr*/, 0, body.b);
+   payload.insert(payload.end(), r.begin(), r.end());
+  }
+  auto pkt = packet('f', kStod, payload);
+  dec.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size());
+
+  json log, span;
+  bool haveLog = false, haveSpan = false;
+  for (const auto& d : allDocs)
+     {json x = json::parse(d);
+      if (x.contains("kind"))              {span = x; haveSpan = true;}
+      else if (x["attributes"].value("event.name", std::string())
+               == "xrootd.transfer")       {log  = x; haveLog  = true;}
+     }
+  ASSERT_TRUE(haveLog);
+  ASSERT_TRUE(haveSpan);
+
+  EXPECT_EQ(log["attributes"]["xrootd.transfer.open_seen"], true);
+  EXPECT_DOUBLE_EQ(
+      log["attributes"]["xrootd.transfer.duration"].get<double>(), 2.5);
+  // The open time carries the interpolated fraction (tBeg + 0/2 of 5s).
+  EXPECT_EQ(log["attributes"]["xrootd.transfer.start_time"],
+            "2023-11-14T22:13:20.000Z");
+  // The span covers open -> close with nanosecond-encoded fractional times.
+  EXPECT_EQ(span["startTimeUnixNano"], std::to_string(
+            (uint64_t)kOpenT * 1000000000ULL));
+  EXPECT_EQ(span["endTimeUnixNano"], std::to_string(
+            (uint64_t)kOpenT * 1000000000ULL + 2500000000ULL));
+}
+
+// A degenerate TOD (tBeg == tEnd, nRecs == 0), as produced by the two-packet
+// helpers, keeps the pre-interpolation behavior: records are stamped with the
+// window end, and a cross-packet pair measures window-end to window-end.
+TEST_F(Transfer, CrossPacketDurationUsesWindowEnds)
+{
+  feedUserMap();
+  feedOpen();
+  feedClose();
+
+  json j = json::parse(lastDoc);
+  EXPECT_DOUBLE_EQ(j["attributes"]["xrootd.transfer.duration"].get<double>(),
+                   (double)(kCloseT - kOpenT));
 }
 
 namespace

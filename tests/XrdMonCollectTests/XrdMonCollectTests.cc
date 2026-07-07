@@ -84,6 +84,18 @@ const int32_t kStod  = 1700000000;
 const int32_t kOpenT = 1700000000;
 const int32_t kCloseT= 1700000082;
 
+// Expected ISO-8601 rendering of a whole-second Unix time, matching the
+// decoder's millisecond-precision output format.
+std::string isoOf(time_t t)
+{
+   struct tm tmv;
+   char buf[40];
+   gmtime_r(&t, &tmv);
+   std::size_t n = strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tmv);
+   snprintf(buf + n, sizeof(buf) - n, ".000Z");
+   return buf;
+}
+
 // ::testing::TempDir() is not public in the GoogleTest shipped with EL8.
 std::string tempDir()
 {
@@ -549,6 +561,36 @@ TEST(XrdMonCollect, TStreamRecordsDecoded)
   // and the disconnect onto the session span.
   EXPECT_NE(rd["spanId"], cl["spanId"]);
   EXPECT_NE(di["spanId"], cl["spanId"]);
+}
+
+// Records between two WINDOW marks are spread linearly across the window they
+// fall in, instead of all being stamped with the window boundary.
+TEST(XrdMonCollect, TStreamInterpolatesRecordTimes)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); },
+                   nullptr, false, /*traces=*/true);
+
+  const uint32_t t0 = 1700000000;
+  W payload;
+  { std::vector<unsigned char> a0(8, 0); a0[0] = 0xe0;     // WINDOW: opens [t0,
+    payload.raw(trace(a0, 0, t0)); }                       // ...] at t0
+  for (int i = 0; i < 3; i++)                              // 3 reads on file 50
+  { auto a0 = u64v(4096);
+    payload.raw(trace(a0, 1024, 50)); }
+  { std::vector<unsigned char> a0(8, 0); a0[0] = 0xe0;     // WINDOW: closes the
+    payload.raw(trace(a0, t0 + 4, t0 + 4)); }              // segment at t0+4
+  auto pkt = packet('t', kStod, payload.b);
+  dec.Process("h:1", (const char*)pkt.data(), pkt.size());
+
+  ASSERT_EQ(docs.size(), 3u);
+  const char* expect[] = {"1700000000000000000",           // t0
+                          "1700000002000000000",           // t0 + 2
+                          "1700000004000000000"};          // t0 + 4
+  for (int i = 0; i < 3; i++)
+     {json j = json::parse(docs[i]);
+      EXPECT_EQ(j["timeUnixNano"], expect[i]) << docs[i];
+     }
 }
 
 // The 't'-stream appid marker carries the application id under xrootd.app
@@ -1820,6 +1862,76 @@ TEST(XrdMonCollect, SessionDiscAndActiveGauge)
   EXPECT_NE(out.find("xrootd_collector_stale_opens_total{server=\"h:1\"} 1"),
             std::string::npos) << out;
   EXPECT_EQ(dec.GetStats().staleOpens, 1u);
+}
+
+// The session document and its root span begin at the login (the 'u' map
+// record's arrival, sent by the server at connect time), not at the first
+// file close, so the trace covers the whole session.
+TEST(XrdMonCollect, SessionStartsAtLogin)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetEmitSessions(true);
+  dec.SetEmitSpans(true);
+
+  const time_t now = time(nullptr);   // login stamped on the map's arrival
+
+  { W body; body.u32(7);
+    std::string info = "xroot/bob.1:2@cli.example.org\n";
+    std::vector<unsigned char> pl = body.b;
+    pl.insert(pl.end(), info.begin(), info.end());
+    auto pkt = packet('u', kStod, pl);
+    dec.Process("h:1", (const char*)pkt.data(), pkt.size()); }
+
+  // Open at now+10, close at now+30 (folds into the session), disc at now+60.
+  { W body; body.u32(100); body.u64(1000); body.u32(7);
+    std::string lfn = "/store/f.root"; body.raw(lfn); body.u8(0);
+    auto payload = todRec((int32_t)(now + 10), 42);
+    auto r = rec(1 /*isOpen*/, 0x03, body.b);
+    payload.insert(payload.end(), r.begin(), r.end());
+    auto pkt = packet('f', kStod, payload);
+    dec.Process("h:1", (const char*)pkt.data(), pkt.size()); }
+  { W body; body.u32(100); body.u64(1000); body.u64(0); body.u64(0);
+    auto payload = todRec((int32_t)(now + 30), 42);
+    auto r = rec(0 /*isClose*/, 0, body.b);
+    payload.insert(payload.end(), r.begin(), r.end());
+    auto pkt = packet('f', kStod, payload);
+    dec.Process("h:1", (const char*)pkt.data(), pkt.size()); }
+  { W disc; disc.u32(7);
+    auto payload = todRec((int32_t)(now + 60), 42);
+    auto dr = rec(4 /*isDisc*/, 0, disc.b);
+    payload.insert(payload.end(), dr.begin(), dr.end());
+    auto pkt = packet('f', kStod, payload);
+    dec.Process("h:1", (const char*)pkt.data(), pkt.size()); }
+
+  json sess, span;
+  bool haveSess = false, haveSpan = false;
+  for (const auto& d : docs)
+     {json x = json::parse(d);
+      if (x.contains("kind") && x["name"] == "session")
+         {span = x; haveSpan = true;}
+      else if (x.contains("severityText")
+           &&  x["attributes"].value("event.name", std::string())
+               == "xrootd.session") {sess = x; haveSess = true;}
+     }
+  ASSERT_TRUE(haveSess);
+  ASSERT_TRUE(haveSpan);
+
+  // Duration spans login -> disconnect (~60s; the login stamp may lag the
+  // captured `now` by a second), not first close -> last close (which would
+  // be 0 here: only one close was folded).
+  double dur = sess["attributes"]["xrootd.session.duration"].get<double>();
+  EXPECT_GE(dur, 58.0);
+  EXPECT_LE(dur, 62.0);
+  EXPECT_EQ(sess["attributes"]["xrootd.session.end_time"],
+            isoOf(now + 60));
+
+  // The root span covers the same login -> disconnect range.
+  uint64_t sBeg = std::stoull(span["startTimeUnixNano"].get<std::string>());
+  uint64_t sEnd = std::stoull(span["endTimeUnixNano"].get<std::string>());
+  EXPECT_EQ(sEnd, (uint64_t)(now + 60) * 1000000000ULL);
+  EXPECT_GE(sEnd - sBeg, 58000000000ULL);
+  EXPECT_LE(sEnd - sBeg, 62000000000ULL);
 }
 
 // A leaked open with no disconnect (its user map was lost too) is expired by

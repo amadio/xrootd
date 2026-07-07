@@ -30,6 +30,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <regex.h>
 
@@ -79,6 +80,9 @@ struct Stats
    uint64_t failed    = 0;   // 'f' failed/aborted operation records (isError +
                              // hasERR closes)
    uint64_t orphanCls = 0;   // closes with no matching open
+   uint64_t staleOpens = 0;  // open-file entries dropped without a close
+                             // (disconnect sweep or file TTL: the close was
+                             // lost, e.g. to UDP packet loss)
    uint64_t traces    = 0;   // 't' stream records decoded
    uint64_t gevents   = 0;   // 'g' stream records decoded
    uint64_t redirs    = 0;   // 'r' stream redirect records decoded
@@ -119,6 +123,13 @@ void SetMaxEntries(std::size_t n) {maxEntries = n;}
 //! baselines) once it has gone silent for more than `secs` seconds, bounding
 //! the accumulation of dead incarnations across restarts/upgrades. 0 disables.
 void SetServerTTL(long secs) {serverTTL = secs;}
+
+//! Expire open-file entries untouched for `secs` seconds (0 = off). Only
+//! applied to servers that report in-flight transfer snapshots ("xfr"
+//! configured on xrootd.monitor fstat), where a live transfer refreshes its
+//! entry every interval — so anything older than the TTL is a leaked open
+//! whose close was lost, not a long-running transfer.
+void SetFileTTL(long secs) {fileTTL = secs;}
 
 //! Drop server incarnations idle past the server TTL (see SetServerTTL). Cheap
 //! (scans only the small per-incarnation table); call it periodically, e.g.
@@ -277,6 +288,12 @@ struct UserInfo
    int32_t  sFirst      = 0;  // window time of the first folded close
    int32_t  sLast       = 0;  // window time of the most recent folded close
    std::deque<FileSummary> sRecent;  // capped most-recent file summaries
+
+   // fileIDs of this user's open files still awaiting their close. The server
+   // closes a session's files before reporting its disconnect, so anything
+   // still here at the isDisc is a leaked open (its close record was lost)
+   // and is swept out of the open-file table (see DropUserFiles).
+   std::unordered_set<uint32_t> openFiles;
 };
 
 // Token identity from a 'T' (MAPTOKN) record, keyed by the user dictid.
@@ -331,6 +348,8 @@ struct OpenFile
    int64_t     fsz  = 0;  // file size at open
    double      tOpen = 0; // open time, interpolated within the open packet's
                           // reporting window (fractional Unix seconds)
+   time_t      lastSeen = 0; // wall-clock of the open or last xfr snapshot
+                             // naming this file (drives the file TTL sweep)
    bool        rw   = false;
    LruIt       lru;       // back-reference into the LRU index
 };
@@ -358,6 +377,8 @@ struct Server
    // counters as permanent phantom gaps.
    std::unordered_map<std::string, int> lastPseq;
    time_t  lastSeen = 0;     // wall-clock of the last packet (for idle reaping)
+   bool    sawXfr = false;   // this incarnation reports in-flight snapshots
+                             // ("xfr" configured), so the file TTL is safe
 };
 
 Server&  ServerFor(const std::string& src, int32_t stod);
@@ -379,6 +400,12 @@ void     EmitClose(const std::string& src, int32_t stod, Server& srv,
                    const unsigned char* rec, int recSize, double tRec);
 void     EmitDisc(const std::string& src, int32_t stod, Server& srv,
                   uint32_t userID, double tRec);
+//! Drop a disconnecting user's leftover open-file entries (their closes were
+//! lost): the server reports a session's closes before its disconnect, so the
+//! open-file table must not keep carrying them (they would inflate the
+//! active_transfers gauge forever). Bumps stats.staleOpens and
+//! stale_opens_total{server}.
+void     DropUserFiles(const std::string& src, Server& srv, uint32_t userID);
 void     EmitError(const std::string& src, int32_t stod, Server& srv,
                    unsigned char recFlag, const unsigned char* rec,
                    int recSize, double tRec);
@@ -515,6 +542,7 @@ std::size_t maxBytes   = 0;        // byte budget (0 = unbounded)
 std::size_t lruBytes   = 0;        // currently charged bytes
 std::size_t maxEntries = 0;        // optional entry-count backstop (0 = off)
 long        serverTTL  = 0;        // idle-incarnation reap age, secs (0 = off)
+long        fileTTL    = 0;        // stale open-file entry age, secs (0 = off)
 bool     resolveHosts = true;
 bool     emitSessions = false;   // per-session rollup + session documents
 bool     emitSpans    = false;   // companion OTLP span documents (--spans)

@@ -810,8 +810,8 @@ constexpr int kStateVersion = 2;
 #define XRDMON_STATS_FIELDS(X) \
    X(packets) X(malformed) X(records) X(mapUser) X(mapPath) X(mapInfo)    \
    X(mapIdnt) X(mapTokn) X(mapUeac) X(opens) X(closes) X(xfrs) X(discs)   \
-   X(docs) X(failed) X(orphanCls) X(traces) X(gevents) X(redirs) X(spans) \
-   X(frmEvents) X(lost) X(evicted) X(reaped) X(unknown)
+   X(docs) X(failed) X(orphanCls) X(staleOpens) X(traces) X(gevents)      \
+   X(redirs) X(spans) X(frmEvents) X(lost) X(evicted) X(reaped) X(unknown)
 }
 
 bool XrdMonDecode::SaveState(const std::string& path) const
@@ -1020,8 +1020,16 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
                   f.user  = e.value("user", 0u);
                   f.fsz   = e.value("fsz", (int64_t)0);
                   f.tOpen = e.value("topen", 0.0);
+                  f.lastSeen = time(nullptr);   // restart the TTL clock
                   f.rw    = e.value("rw", false);
                   uint32_t k32 = (uint32_t)std::stoul(id);
+                  // Rebuild the per-user open-file index (users are restored
+                  // before files) so a later disconnect can sweep the entry.
+                  if (f.user)
+                     {auto uit = srv.users.find(f.user);
+                      if (uit != srv.users.end())
+                         uit->second.openFiles.insert(k32);
+                     }
                   std::size_t w = bytesOf(f);
                   lruPut(&srv, Dict::Files, srv.files, k32, k32, std::string(),
                          std::move(f), w);
@@ -1344,6 +1352,37 @@ void XrdMonDecode::EnforceBudget()
 
 void XrdMonDecode::ReapServers(time_t now)
 {
+// Expire open-file entries whose close was never seen. Gated per incarnation
+// on sawXfr: with "xfr" reporting a live transfer refreshes its entry every
+// interval, so an entry untouched for fileTTL seconds is a leaked open (its
+// close packet was lost), not a long-running transfer. Without that gate a
+// long transfer on a server that does not report snapshots would be dropped.
+//
+   if (fileTTL)
+      for (auto& [key, s] : servers)
+          {if (!s.sawXfr) continue;
+           uint64_t n = 0;
+           for (auto fit = s.files.begin(); fit != s.files.end(); )
+               {if (fit->second.lastSeen
+                &&  now - fit->second.lastSeen > fileTTL)
+                   {LruDrop(fit->second.lru);
+                    fit = s.files.erase(fit);
+                    n++;
+                   } else ++fit;
+               }
+           if (!n) continue;
+           stats.staleOpens += n;
+           std::string sndr = key.substr(0, key.rfind('|'));
+           if (metrics)
+              {metrics->counterSeries("stale_opens_total",
+                             "open-file entries dropped without a close "
+                             "(close record lost)", {{"server", sndr}}) += n;
+               metrics->gaugeSeries("active_transfers",
+                             "files currently open (transfers in progress)",
+                             {{"server", sndr}}) = (double)s.files.size();
+              }
+          }
+
    if (!serverTTL) return;
 
    for (auto it = servers.begin(); it != servers.end(); )
@@ -1367,10 +1406,17 @@ void XrdMonDecode::ReapServers(time_t now)
            if (&kv.second != &s && kv.first.compare(0, pre.size(), pre) == 0)
               {shared = true; break;}
        if (!shared)
-          for (auto g = gsPrev.begin(); g != gsPrev.end(); )
-              {if (g->first.compare(0, pre.size(), pre) == 0) g = gsPrev.erase(g);
-                  else ++g;
-              }
+          {for (auto g = gsPrev.begin(); g != gsPrev.end(); )
+               {if (g->first.compare(0, pre.size(), pre) == 0) g = gsPrev.erase(g);
+                   else ++g;
+               }
+           // No live incarnation shares this sender: park its gauge at zero so
+           // a restarted (or gone) server does not strand a nonzero series.
+           if (metrics)
+              metrics->gaugeSeries("active_transfers",
+                            "files currently open (transfers in progress)",
+                            {{"server", pre.substr(0, pre.size() - 1)}}) = 0.0;
+          }
 
        it = servers.erase(it);
        stats.reaped++;
@@ -1669,12 +1715,20 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
                       OpenFile of;
                       of.fsz   = ri64(rec + 8);
                       of.tOpen = recTime();
+                      of.lastSeen = time(nullptr);
                       of.rw    = (recFlag & XrdXrootdMonFileHdr::hasRW) != 0;
                       if (recFlag & XrdXrootdMonFileHdr::hasLFN && recSize > 20)
                          {of.user = rd32(rec + 16);
                           const char* l = (const char*)(rec + 20);
                           int maxL = recSize - 20;
                           of.lfn.assign(l, strnlen(l, maxL));
+                         }
+                      // Register the file under its user so a disconnect can
+                      // sweep opens whose close record was lost (DropUserFiles).
+                      if (of.user)
+                         {auto uit = srv.users.find(of.user);
+                          if (uit != srv.users.end())
+                             uit->second.openFiles.insert(fileID);
                          }
                       std::size_t w = bytesOf(of);
                       lruPut(&srv, Dict::Files, srv.files, fileID, fileID,
@@ -1696,9 +1750,13 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
                      // Also keeps a still-active open warm in the LRU so a long
                      // but live transfer is not evicted ahead of cold strays.
                      {stats.xfrs++;
+                      srv.sawXfr = true;   // xfr reporting on: file TTL is safe
                       uint32_t fileID = rd32(rec + 4);
                       auto fit = srv.files.find(fileID);
-                      if (fit != srv.files.end()) Touch(fit->second.lru);
+                      if (fit != srv.files.end())
+                         {Touch(fit->second.lru);
+                          fit->second.lastSeen = time(nullptr);
+                         }
                      }
                      break;
 
@@ -1706,6 +1764,7 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
                      {stats.discs++;
                       uint32_t userID = rd32(rec + 4);
                       EmitDisc(src, stod, srv, userID, recTime());
+                      DropUserFiles(src, srv, userID);
                      }
                      break;
 
@@ -1774,6 +1833,34 @@ void XrdMonDecode::EmitDisc(const std::string& src, int32_t stod, Server& srv,
    int32_t sBeg = (uit != srv.users.end() && uit->second.sFirst > 0)
                 ? uit->second.sFirst : 0;
    emitSpan(j, "session", sBeg, tRec, std::string());
+}
+
+/******************************************************************************/
+/*                        D r o p U s e r F i l e s                           */
+/******************************************************************************/
+
+void XrdMonDecode::DropUserFiles(const std::string& src, Server& srv,
+                                 uint32_t userID)
+{
+   auto uit = srv.users.find(userID);
+   if (uit == srv.users.end() || uit->second.openFiles.empty()) return;
+
+   uint64_t n = 0;
+   for (uint32_t fid : uit->second.openFiles)
+       {auto fit = srv.files.find(fid);
+        if (fit == srv.files.end()) continue;   // closed or evicted already
+        LruDrop(fit->second.lru);
+        srv.files.erase(fit);
+        n++;
+       }
+   uit->second.openFiles.clear();
+   if (!n) return;
+
+   stats.staleOpens += n;
+   if (metrics)
+      metrics->counterSeries("stale_opens_total",
+                    "open-file entries dropped without a close "
+                    "(close record lost)", {{"server", src}}) += n;
 }
 
 /******************************************************************************/
@@ -1861,10 +1948,20 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
            if (!cd.empty() && !sd.empty())
               a["xrootd.transfer.is_local"] = (cd == sd);
           }
+       if (openUser)               // the close arrived: not a stale open
+          {auto uit = srv.users.find(openUser);
+           if (uit != srv.users.end()) uit->second.openFiles.erase(fileID);
+          }
        LruDrop(fit->second.lru);   // unlink before erasing the map entry
        srv.files.erase(fit);
       }
-      else {a["xrootd.transfer.open_seen"] = false; stats.orphanCls++;}
+      else {a["xrootd.transfer.open_seen"] = false;
+            stats.orphanCls++;
+            if (metrics)
+               metrics->counterSeries("orphan_closes_total",
+                             "closes without a matching open record "
+                             "(open lost or evicted)", {{"server", src}}) += 1;
+           }
 
 // Whole-file transfer vs. partial access. The document schema is identical; only
 // xrootd.transfer.kind differs (see wholeFileClose). A write needs to have ended

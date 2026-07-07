@@ -1812,8 +1812,125 @@ TEST(XrdMonCollect, SessionDiscAndActiveGauge)
   std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
   EXPECT_NE(out.find("xrootd_collector_sessions_total{server=\"h:1\"} 1"),
             std::string::npos) << out;
-  // One file opened, none closed -> active gauge is 1.
-  EXPECT_NE(out.find("xrootd_collector_active_transfers{server=\"h:1\"} 1"),
+  // The file was opened but its close was never seen; the server reports a
+  // session's closes before its disconnect, so the disconnect sweeps the
+  // leaked open out of the table instead of inflating the gauge forever.
+  EXPECT_NE(out.find("xrootd_collector_active_transfers{server=\"h:1\"} 0"),
+            std::string::npos) << out;
+  EXPECT_NE(out.find("xrootd_collector_stale_opens_total{server=\"h:1\"} 1"),
+            std::string::npos) << out;
+  EXPECT_EQ(dec.GetStats().staleOpens, 1u);
+}
+
+// A leaked open with no disconnect (its user map was lost too) is expired by
+// the file TTL, but only for servers that report in-flight snapshots (isXfr):
+// there a live transfer refreshes its entry every interval, so an untouched
+// entry can only be a leak.
+TEST(XrdMonCollect, FileTTLExpiresLeakedOpens)
+{
+  XrdMetrics::Collector collector("xrootd");
+  XrdMonDecode dec([](const std::string&){}, nullptr,
+                   false, false, false, false, &collector.subsystem("collector"));
+  dec.SetFileTTL(600);
+
+  // One packet: an open (file 100, user 7) and an in-flight snapshot for it
+  // (marks the server as xfr-reporting). No close ever arrives.
+  { W body; body.u32(100); body.u64(123456); body.u32(7);
+    std::string lfn = "/store/leak.root"; body.raw(lfn); body.u8(0);
+    auto payload = todRec(kOpenT, 42);
+    auto r = rec(1 /*isOpen*/, 0x03 /*hasLFN|hasRW*/, body.b);
+    payload.insert(payload.end(), r.begin(), r.end());
+    W xfr; xfr.u32(100); xfr.u64(0); xfr.u64(0); xfr.u64(0);
+    auto xr = rec(3 /*isXfr*/, 0, xfr.b);
+    payload.insert(payload.end(), xr.begin(), xr.end());
+    auto pkt = packet('f', kStod, payload);
+    dec.Process("h:1", (const char*)pkt.data(), pkt.size()); }
+
+  // Not stale yet: a sweep "now" keeps the entry.
+  dec.ReapServers(time(nullptr));
+  EXPECT_EQ(dec.GetStats().staleOpens, 0u);
+
+  // An hour later the entry is well past the 600s TTL.
+  dec.ReapServers(time(nullptr) + 3600);
+  EXPECT_EQ(dec.GetStats().staleOpens, 1u);
+
+  std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
+  EXPECT_NE(out.find("xrootd_collector_active_transfers{server=\"h:1\"} 0"),
+            std::string::npos) << out;
+  EXPECT_NE(out.find("xrootd_collector_stale_opens_total{server=\"h:1\"} 1"),
+            std::string::npos) << out;
+}
+
+// Without xfr reporting the TTL must not touch anything: a long-running
+// transfer is indistinguishable from a leak.
+TEST(XrdMonCollect, FileTTLSkipsServersWithoutXfr)
+{
+  XrdMonDecode dec([](const std::string&){});
+  dec.SetFileTTL(600);
+
+  { W body; body.u32(100); body.u64(123456); body.u32(7);
+    std::string lfn = "/store/longrunning.root"; body.raw(lfn); body.u8(0);
+    auto payload = todRec(kOpenT, 42);
+    auto r = rec(1 /*isOpen*/, 0x03, body.b);
+    payload.insert(payload.end(), r.begin(), r.end());
+    auto pkt = packet('f', kStod, payload);
+    dec.Process("h:1", (const char*)pkt.data(), pkt.size()); }
+
+  dec.ReapServers(time(nullptr) + 3600);
+  EXPECT_EQ(dec.GetStats().staleOpens, 0u);
+}
+
+// Reaping the last incarnation of a sender parks its active_transfers gauge
+// at zero, so a restarted (or retired) server does not strand a nonzero
+// series in the metrics output forever.
+TEST(XrdMonCollect, ReapZeroesActiveTransfersGauge)
+{
+  XrdMetrics::Collector collector("xrootd");
+  XrdMonDecode dec([](const std::string&){}, nullptr,
+                   false, false, false, false, &collector.subsystem("collector"));
+  dec.SetServerTTL(60);
+
+  { W body; body.u32(100); body.u64(123456); body.u32(7);
+    std::string lfn = "/store/f.root"; body.raw(lfn); body.u8(0);
+    auto payload = todRec(kOpenT, 42);
+    auto r = rec(1 /*isOpen*/, 0x03, body.b);
+    payload.insert(payload.end(), r.begin(), r.end());
+    auto pkt = packet('f', kStod, payload);
+    dec.Process("h:1", (const char*)pkt.data(), pkt.size()); }
+
+  {std::string out; XrdMetrics::PrometheusTextSerializer ser(out);
+   collector.serialize(ser);
+   EXPECT_NE(out.find("xrootd_collector_active_transfers{server=\"h:1\"} 1"),
+             std::string::npos) << out;
+  }
+
+  dec.ReapServers(time(nullptr) + 3600);
+  EXPECT_EQ(dec.GetStats().reaped, 1u);
+
+  {std::string out; XrdMetrics::PrometheusTextSerializer ser(out);
+   collector.serialize(ser);
+   EXPECT_NE(out.find("xrootd_collector_active_transfers{server=\"h:1\"} 0"),
+             std::string::npos) << out;
+  }
+}
+
+// A close with no matching open is visible next to the gauge as a counter,
+// so correlation loss (dropped open packets) can be monitored.
+TEST(XrdMonCollect, OrphanCloseCountsMetric)
+{
+  XrdMetrics::Collector collector("xrootd");
+  XrdMonDecode dec([](const std::string&){}, nullptr,
+                   false, false, false, false, &collector.subsystem("collector"));
+
+  { W body; body.u32(100); body.u64(1000); body.u64(0); body.u64(0);
+    auto payload = todRec(kCloseT, 42);
+    auto r = rec(0 /*isClose*/, 0, body.b);
+    payload.insert(payload.end(), r.begin(), r.end());
+    auto pkt = packet('f', kStod, payload);
+    dec.Process("h:1", (const char*)pkt.data(), pkt.size()); }
+
+  std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
+  EXPECT_NE(out.find("xrootd_collector_orphan_closes_total{server=\"h:1\"} 1"),
             std::string::npos) << out;
 }
 

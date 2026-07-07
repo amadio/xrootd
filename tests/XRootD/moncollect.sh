@@ -140,7 +140,9 @@ function setup_moncollect() {
 	# the 'io' destination in moncollect.cfg); --spans turns concluded operations
 	# and each I/O op into OpenTelemetry span documents, so the test can assert
 	# both the correlation ids and the session -> file -> I/O span nesting.
-	xrdmoncollect -p "${COLLECTOR_PORT}" -o "${COLLECTOR_OUT}" \
+	# -c /dev/null keeps a host's /etc/xrootd/xrdmoncollect.cfg (auto-loaded
+	# when present) from leaking admin settings into the test.
+	xrdmoncollect -c /dev/null -p "${COLLECTOR_PORT}" -o "${COLLECTOR_OUT}" \
 	              --flush-secs 1 --flush-count 1 --traces --spans ${OTLP_ARGS} \
 	              --dataset '/(test-[A-Za-z0-9]+)/' \
 	              > "${PWD}/${NAME}/collector.log" 2>&1 < /dev/null &

@@ -21,7 +21,11 @@ TOKEN_FILE="${PWD}/${NAME}/shovel.token"
 # lands in ${NAME}/ so the harness teardown kills it; fds are redirected (and
 # the job detached) so it does not hold open the test runner's stdout pipe.
 function start_central() {
-	xrdmoncollect --tcp-port "${CENTRAL_TCP_PORT}" --tcp-token "@${TOKEN_FILE}" \
+	# -c /dev/null keeps a host's /etc/xrootd/xrdmoncollect.cfg (auto-loaded
+	# when present) out of the test: an admin config supplying e.g. a UDP port
+	# would make this TCP-only collector bind (and possibly fail on) it.
+	xrdmoncollect -c /dev/null \
+	              --tcp-port "${CENTRAL_TCP_PORT}" --tcp-token "@${TOKEN_FILE}" \
 	              -o "${CENTRAL_OUT}" --flush-secs 1 --flush-count 1 \
 	              >> "${PWD}/${NAME}/central.log" 2>&1 < /dev/null &
 	echo $! > "${CENTRAL_PID}"
@@ -38,7 +42,7 @@ function setup_shovel() {
 	# server starts, so the first monitor datagram already has a full path.
 	start_central
 
-	xrdmoncollect -p "${SHOVEL_UDP_PORT}" \
+	xrdmoncollect -c /dev/null -p "${SHOVEL_UDP_PORT}" \
 	              --shovel "127.0.0.1:${CENTRAL_TCP_PORT}" \
 	              --shovel-token "@${TOKEN_FILE}" \
 	              --cache-dir "${SPOOL_DIR}" \

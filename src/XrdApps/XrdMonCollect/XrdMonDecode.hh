@@ -329,7 +329,8 @@ struct OpenFile
    std::string lfn;
    uint32_t    user = 0;  // user dictid (0 if user monitoring off)
    int64_t     fsz  = 0;  // file size at open
-   int32_t     tOpen = 0; // window time of the open packet
+   double      tOpen = 0; // open time, interpolated within the open packet's
+                          // reporting window (fractional Unix seconds)
    bool        rw   = false;
    LruIt       lru;       // back-reference into the LRU index
 };
@@ -375,12 +376,12 @@ void     DecodeFStream(const std::string& src, int32_t stod, Server& srv,
                        const unsigned char* p, int len);
 void     EmitClose(const std::string& src, int32_t stod, Server& srv,
                    uint32_t fileID, unsigned char recFlag,
-                   const unsigned char* rec, int recSize, int32_t tWin);
+                   const unsigned char* rec, int recSize, double tRec);
 void     EmitDisc(const std::string& src, int32_t stod, Server& srv,
-                  uint32_t userID, int32_t tWin);
+                  uint32_t userID, double tRec);
 void     EmitError(const std::string& src, int32_t stod, Server& srv,
                    unsigned char recFlag, const unsigned char* rec,
-                   int recSize, int32_t tWin);
+                   int recSize, double tRec);
 //! Fill the terminal-error attributes (error.type carries the server's verbatim
 //! reason, plus vendor xrootd.error.code, xrootd.operation.state, and — unless
 //! already set — xrootd.operation.name) into the event `attributes` object from
@@ -462,17 +463,19 @@ void     otelResource(nlohmann::json& j, const std::string& src, int32_t stod,
                       const Server& srv);
 //! Set the log-record envelope: instrumentation scope, event.name, severity,
 //! and the @timestamp/timeUnixNano/observedTimeUnixNano fields. `tSecs` is the
-//! event time in Unix seconds (0 to omit the event-time fields); `error` picks
-//! ERROR vs INFO severity.
-void     otelBegin(nlohmann::json& j, const char* eventName, int32_t tSecs,
+//! event time in Unix seconds, possibly fractional for interpolated record
+//! times (0 to omit the event-time fields); `error` picks ERROR vs INFO
+//! severity.
+void     otelBegin(nlohmann::json& j, const char* eventName, double tSecs,
                    bool error);
 //! Emit a companion OTLP span document derived from an already-built log
 //! document `src`, reusing its resource/attributes/traceId/spanId and replacing
 //! the log envelope with the span fields (name/kind/start-end/status). `tBeg`/
-//! `tEnd` are Unix seconds; `parentSpanId` links to the enclosing span (empty
-//! for a trace root). No-op unless span emission is enabled.
-void     emitSpan(const nlohmann::json& src, const char* name, int32_t tBeg,
-                  int32_t tEnd, const std::string& parentSpanId);
+//! `tEnd` are Unix seconds (fractional allowed); `parentSpanId` links to the
+//! enclosing span (empty for a trace root). No-op unless span emission is
+//! enabled.
+void     emitSpan(const nlohmann::json& src, const char* name, double tBeg,
+                  double tEnd, const std::string& parentSpanId);
 //! Fill the identity attributes (user.*, client.*, wlcg.*, xrootd.*) into the
 //! event `attributes` object from the user dictionary entry (and the token and
 //! activity streams keyed by the same dictid). Returns the resolved VO (token

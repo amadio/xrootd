@@ -20,6 +20,7 @@
 /******************************************************************************/
 
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <algorithm>
 #include <cstdio>
@@ -97,16 +98,21 @@ const char* errCatName(int c)
          }
 }
 
-// Format a Unix time as an ISO-8601 UTC string. Zero/negative => empty.
+// Format a Unix time as an ISO-8601 UTC string with millisecond precision.
+// Record times interpolated within a reporting window (see DecodeFStream)
+// carry sub-second estimates; whole-second inputs render as ".000".
+// Zero/negative => empty.
 //
-std::string isoTime(int32_t t)
+std::string isoTime(double t)
 {
    if (t <= 0) return "";
    time_t tt = (time_t)t;
+   int    ms = (int)((t - (double)tt) * 1000.0);
    struct tm tmv;
-   char buf[32];
+   char buf[40];
    gmtime_r(&tt, &tmv);
-   strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tmv);
+   std::size_t n = strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tmv);
+   snprintf(buf + n, sizeof(buf) - n, ".%03dZ", ms);
    return buf;
 }
 
@@ -236,13 +242,19 @@ std::string fileSpanId(const std::string& src, int32_t stod, uint32_t fileID)
    return spanIdOf(src + "|" + std::to_string(stod) + "|f"
                        + std::to_string(fileID));
 }
-// Unix seconds -> OTLP nanoseconds as a decimal string (OTLP encodes 64-bit
-// times as strings; a JSON number would lose the low digits). Empty for t<=0.
+// Unix seconds (possibly fractional, for interpolated record times) -> OTLP
+// nanoseconds as a decimal string (OTLP encodes 64-bit times as strings; a
+// JSON number would lose the low digits). The whole and fractional parts are
+// converted separately so the epoch magnitude does not eat the sub-second
+// digits. Empty for t<=0.
 //
-std::string unixNano(int64_t secs)
+std::string unixNano(double secs)
 {
    if (secs <= 0) return "";
-   return std::to_string((uint64_t)secs * 1000000000ULL);
+   uint64_t whole = (uint64_t)secs;
+   uint64_t ns    = whole * 1000000000ULL
+                  + (uint64_t)((secs - (double)whole) * 1e9);
+   return std::to_string(ns);
 }
 }
 
@@ -480,7 +492,7 @@ void XrdMonDecode::otelResource(json& j, const std::string& src, int32_t stod,
 /*                            o t e l B e g i n                               */
 /******************************************************************************/
 
-void XrdMonDecode::otelBegin(json& j, const char* eventName, int32_t tSecs,
+void XrdMonDecode::otelBegin(json& j, const char* eventName, double tSecs,
                              bool error)
 {
    j["scope"]["name"]    = "xrdmoncollect";
@@ -505,8 +517,8 @@ void XrdMonDecode::otelBegin(json& j, const char* eventName, int32_t tSecs,
 /*                             e m i t S p a n                                */
 /******************************************************************************/
 
-void XrdMonDecode::emitSpan(const json& src, const char* name, int32_t tBeg,
-                            int32_t tEnd, const std::string& parentSpanId)
+void XrdMonDecode::emitSpan(const json& src, const char* name, double tBeg,
+                            double tEnd, const std::string& parentSpanId)
 {
    if (!emitSpans || !doc) return;
 
@@ -1007,7 +1019,7 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
                   f.lfn   = e.value("lfn", std::string());
                   f.user  = e.value("user", 0u);
                   f.fsz   = e.value("fsz", (int64_t)0);
-                  f.tOpen = e.value("topen", 0);
+                  f.tOpen = e.value("topen", 0.0);
                   f.rw    = e.value("rw", false);
                   uint32_t k32 = (uint32_t)std::stoul(id);
                   std::size_t w = bytesOf(f);
@@ -1604,7 +1616,23 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
                                  Server& srv, const unsigned char* p, int len)
 {
    int     off  = 0;
-   int32_t tWin = 0;
+   int32_t tWin = 0;   // isTime tEnd: when the packet was flushed (window end)
+   int32_t tBeg = 0;   // isTime tBeg: when the first record entered the buffer
+   int     nTot = 0;   // isTime nRecs[1]: number of records after the TOD
+   int     kRec = 0;   // 0-based index of the current record among those
+
+// The server appends records to its buffer in time order between tBeg (first
+// record) and tWin (flush), so a record's own time can be estimated by linear
+// interpolation over its position in the packet. Without this every record
+// would be stamped with the flush time and any open/close pair reported in
+// one window would compute a zero duration. Falls back to the window end when
+// the TOD carries no usable range (foreign producers, single record).
+//
+   auto recTime = [&]() -> double
+        {if (tBeg <= 0 || tWin < tBeg || nTot <= 1) return (double)tWin;
+         int k = kRec < nTot ? kRec : nTot - 1;
+         return (double)tBeg + (double)(tWin - tBeg) * k / (nTot - 1);
+        };
 
    while(off + 8 <= len)
         {const unsigned char* rec = p + off;
@@ -1624,9 +1652,13 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
 
          switch(recType)
                {case XrdXrootdMonFileHdr::isTime:
-                     // Hdr(8) + tBeg(4) + tEnd(4) + sID(8)
+                     // Hdr(8) + tBeg(4) + tEnd(4) + sID(8); Hdr.nRecs[1]
+                     // (bytes 6-7) counts the records that follow the TOD.
                      if (recSize >= 24)
-                        {tWin    = ri32(rec + 12);   // tEnd
+                        {tBeg    = ri32(rec + 8);
+                         tWin    = ri32(rec + 12);   // tEnd
+                         nTot    = rd16(rec + 6);
+                         kRec    = 0;
                          srv.sID = ri64(rec + 16);
                         }
                      break;
@@ -1636,7 +1668,7 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
                       uint32_t fileID = rd32(rec + 4);
                       OpenFile of;
                       of.fsz   = ri64(rec + 8);
-                      of.tOpen = tWin;
+                      of.tOpen = recTime();
                       of.rw    = (recFlag & XrdXrootdMonFileHdr::hasRW) != 0;
                       if (recFlag & XrdXrootdMonFileHdr::hasLFN && recSize > 20)
                          {of.user = rd32(rec + 16);
@@ -1654,7 +1686,7 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
                      {stats.closes++;
                       uint32_t fileID = rd32(rec + 4);
                       EmitClose(src, stod, srv, fileID, recFlag, rec, recSize,
-                                tWin);
+                                recTime());
                      }
                      break;
 
@@ -1673,20 +1705,21 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
                 case XrdXrootdMonFileHdr::isDisc:
                      {stats.discs++;
                       uint32_t userID = rd32(rec + 4);
-                      EmitDisc(src, stod, srv, userID, tWin);
+                      EmitDisc(src, stod, srv, userID, recTime());
                      }
                      break;
 
                 case XrdXrootdMonFileHdr::isError:
                      // Terminal report for a failed/aborted operation that never
                      // produced an isClose (e.g. a failed open).
-                     EmitError(src, stod, srv, recFlag, rec, recSize, tWin);
+                     EmitError(src, stod, srv, recFlag, rec, recSize, recTime());
                      break;
 
                 default:
                      break;
                }
 
+         if (recType != XrdXrootdMonFileHdr::isTime) kRec++;
          off += recSize;
         }
 
@@ -1705,13 +1738,13 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
 /******************************************************************************/
 
 void XrdMonDecode::EmitDisc(const std::string& src, int32_t stod, Server& srv,
-                            uint32_t userID, int32_t tWin)
+                            uint32_t userID, double tRec)
 {
    if (!emitSessions) return;             // session documents disabled
 
    json j;
    otelResource(j, src, stod, srv);
-   otelBegin(j, "xrootd.session", tWin, false);
+   otelBegin(j, "xrootd.session", tRec, false);
    json& a = j["attributes"];
    otelIdentity(a, srv, userID);
 
@@ -1740,7 +1773,7 @@ void XrdMonDecode::EmitDisc(const std::string& src, int32_t stod, Server& srv,
 //
    int32_t sBeg = (uit != srv.users.end() && uit->second.sFirst > 0)
                 ? uit->second.sFirst : 0;
-   emitSpan(j, "session", sBeg, tWin, std::string());
+   emitSpan(j, "session", sBeg, tRec, std::string());
 }
 
 /******************************************************************************/
@@ -1749,7 +1782,7 @@ void XrdMonDecode::EmitDisc(const std::string& src, int32_t stod, Server& srv,
 
 void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
                              uint32_t fileID, unsigned char recFlag,
-                             const unsigned char* rec, int recSize, int32_t tWin)
+                             const unsigned char* rec, int recSize, double tRec)
 {
 // Always-present transfer byte totals (XrdXrootdMonStatXFR after the 8-byte hdr).
 //
@@ -1758,13 +1791,13 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
    int64_t rvBytes = ri64(rec + 16);
    int64_t wrBytes = ri64(rec + 24);
 
-   int durSecs = -1;
+   double durSecs = -1;
    std::string vo;
    bool     haveOpen = false;  // matched the open record (so fsz is known)
    int64_t  openFsz  = 0;      // file size captured at open
    uint32_t openUser = 0;      // user dictid from the open (for session rollup)
    std::string openLfn;        // lfn from the open (for the session rollup)
-   int32_t  openTBeg = 0;      // open time (for the file-operation span start)
+   double   openTBeg = 0;      // open time (for the file-operation span start)
 
 // Terminal status is needed up front: it drives the log severity and the
 // whole-file-vs-access decision. "forced" (disconnect-driven) is not a failure
@@ -1779,7 +1812,7 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
 //
    json j;
    otelResource(j, src, stod, srv);
-   otelBegin(j, "xrootd.transfer", tWin, hasErr);
+   otelBegin(j, "xrootd.transfer", tRec, hasErr);
    json& a = j["attributes"];
 
    a["xrootd.transfer.forced_close"] = forced;
@@ -1806,8 +1839,13 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
        a["file.size"] = of.fsz;
        a["xrootd.file.read_write"] = of.rw;
        if (of.tOpen > 0) a["xrootd.transfer.start_time"] = isoTime(of.tOpen);
-       if (of.tOpen > 0 && tWin > 0) {durSecs = tWin - of.tOpen;
-                                      a["xrootd.transfer.duration"] = durSecs;}
+       // Both ends are interpolated within their reporting windows, so the
+       // difference is an estimate with fractional seconds; clamp reordering
+       // artifacts to zero and round to milliseconds.
+       if (of.tOpen > 0 && tRec > 0)
+          {durSecs = std::max(0.0, tRec - of.tOpen);
+           durSecs = std::round(durSecs * 1000.0) / 1000.0;
+           a["xrootd.transfer.duration"] = durSecs;}
 
        vo = otelIdentity(a, srv, of.user);
 
@@ -1850,7 +1888,8 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
    if (haveOpen)
       {const bool    write = wrBytes > 0;
        const int64_t moved = write ? wrBytes : rdBytes + rvBytes;
-       foldSession(srv, openUser, openLfn, moved, write, whole, hasErr, tWin);
+       foldSession(srv, openUser, openLfn, moved, write, whole, hasErr,
+                   (int32_t)tRec);
       }
 
 // Optional op-count detail (XrdXrootdMonStatOPS) when "ops" was configured.
@@ -1948,10 +1987,10 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
    if (doc) doc(j.dump());
 
 // Companion span for this file operation (open -> close), child of the session
-// span. Start at the open time when known, else the close window.
+// span. Start at the open time when known, else the close time.
 //
    emitSpan(j, (wrBytes > 0) ? "write" : "read",
-            openTBeg > 0 ? openTBeg : tWin, tWin,
+            openTBeg > 0 ? openTBeg : tRec, tRec,
             spanIdOf(sessKey(src, stod, openUser) + "|session"));
 }
 
@@ -1986,7 +2025,7 @@ std::string XrdMonDecode::otelError(json& a, const unsigned char* err,
 
 void XrdMonDecode::EmitError(const std::string& src, int32_t stod, Server& srv,
                              unsigned char recFlag, const unsigned char* rec,
-                             int recSize, int32_t tWin)
+                             int recSize, double tRec)
 {
 // Self-contained terminal report for an operation that never produced an
 // isClose (e.g. a failed/denied open). Layout: Hdr(8) + ufn{user(4)+lfn} +
@@ -1997,7 +2036,7 @@ void XrdMonDecode::EmitError(const std::string& src, int32_t stod, Server& srv,
 
    json j;
    otelResource(j, src, stod, srv);
-   otelBegin(j, "xrootd.transfer", tWin, true);   // a terminal error: ERROR
+   otelBegin(j, "xrootd.transfer", tRec, true);   // a terminal error: ERROR
    json& a = j["attributes"];
 
    uint32_t user = 0;
@@ -2018,7 +2057,7 @@ void XrdMonDecode::EmitError(const std::string& src, int32_t stod, Server& srv,
 //
    std::string sess = sessKey(src, stod, user);
    j["traceId"] = traceIdOf(sess);
-   j["spanId"]  = spanIdOf(sess + "|err|" + std::to_string(tWin));
+   j["spanId"]  = spanIdOf(sess + "|err|" + std::to_string((int64_t)tRec));
    a["session.id"] = j["traceId"];   // semconv: queryable session correlator
 
    if (metrics)
@@ -2034,7 +2073,7 @@ void XrdMonDecode::EmitError(const std::string& src, int32_t stod, Server& srv,
 // Companion span for the failed operation (zero-duration, ERROR status), child
 // of the session span.
 //
-   emitSpan(j, cat.empty() ? "operation" : cat.c_str(), tWin, tWin,
+   emitSpan(j, cat.empty() ? "operation" : cat.c_str(), tRec, tRec,
             spanIdOf(sess + "|session"));
 }
 

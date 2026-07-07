@@ -13,6 +13,11 @@ def main():
     outfile = sys.argv[2]
 
     class Handler(BaseHTTPRequestHandler):
+        # HTTP/1.1 so "Expect: 100-continue" gets its interim response (the
+        # default HTTP/1.0 never answers it, stalling clients that send it —
+        # e.g. EL8 curl for any body > 1KB — for their 1s expect timeout).
+        protocol_version = "HTTP/1.1"
+
         def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)

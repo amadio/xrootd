@@ -115,10 +115,21 @@ This is the point where host tuning and XRootD configuration interact, and it is
 the subtlest lever for minimizing loss specifically.
 
 XRootD sends each monitoring report as **a single UDP datagram**, whose payload
-size is set by `mbuff` on the `xrootd.monitor` directive. On a standard 1500-byte
-MTU, the usable UDP payload is only **1472 bytes** (1500 − 20 IP − 8 UDP). A
-larger `mbuff` (e.g. the common `mbuff 8k`) therefore forces the datagram to be
-**IP-fragmented** into multiple frames.
+size is set by `mbuff` on the `xrootd.monitor` directive (and per stream by
+`fbsz`, `rbuff`, `gbuff`). On a standard 1500-byte MTU, the usable UDP payload
+is only **1472 bytes** over IPv4 (1500 − 20 IP − 8 UDP) and **1452 bytes over
+IPv6** (1500 − 40 IPv6 − 8 UDP). A larger `mbuff` (e.g. the common `mbuff 8k`)
+therefore forces the datagram to be **IP-fragmented** into multiple frames.
+
+> **IPv6 pitfall:** buffer sizes chosen against the IPv4 limit — `1472` is a
+> popular choice — exceed the IPv6 payload limit by 20 bytes, so on an IPv6
+> path *every full packet* is fragmented into a 1452-byte fragment plus a tiny
+> trailer fragment. IPv6 routers never fragment in-network and middleboxes
+> widely drop IPv6 fragments, so this configuration silently loses a large
+> share of the busiest (fullest) monitoring packets. In the collector this
+> shows up as `packets_lost_total` (pseq gaps), orphan closes, and an
+> `active_transfers` gauge that keeps growing as opens outlive their lost
+> closes. Use ≤ 1400 for dual-stack safety.
 
 Fragmentation hurts a lossy transport in two compounding ways:
 
@@ -133,9 +144,10 @@ Two coherent strategies — choose based on the network you control:
 
 **Strategy A — no fragmentation (recommended for a pure loss-minimization goal
 on standard networks).** Keep each datagram within one frame by setting `mbuff`
-below the payload limit (≈1400 on 1500 MTU, leaving headroom). Cost: more packets
-per second and higher softirq load, but every lost packet loses only one small
-record buffer, with zero fragment amplification.
+below the payload limit (≈1400 on 1500 MTU, leaving headroom and staying under
+the 1452-byte IPv6 limit on dual-stack paths). Cost: more packets per second
+and higher softirq load, but every lost packet loses only one small record
+buffer, with zero fragment amplification.
 
 **Strategy B — jumbo frames end-to-end.** With MTU 9000, an 8 KiB `mbuff`
 datagram fits in a single frame, giving both packing efficiency and no

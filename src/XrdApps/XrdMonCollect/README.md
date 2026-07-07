@@ -94,7 +94,19 @@ an incarnation):
 - `--max-entries` adds an optional hard entry-count backstop (off by default).
 - `--server-ttl` (default 86400s; `0` = never) reclaims whole incarnations idle
   past the TTL, so dead incarnations from restarts and rolling upgrades do not
-  accumulate.
+  accumulate. Reaping the last incarnation of a sender also parks its
+  `active_transfers` gauge at zero, so a restarted server does not strand a
+  nonzero series.
+- A client disconnect sweeps that user's open-file entries whose close was
+  never seen (the server reports a session's closes before its `isDisc`, so a
+  leftover entry means the close record was lost). Swept entries are counted
+  in `xrootd_collector_stale_opens_total{server}`.
+- `--file-ttl` (default `0` = off) expires open-file entries untouched for the
+  given period, covering leaks whose disconnect was also lost. It only applies
+  to servers that report in-flight snapshots (`xfr` on `xrootd.monitor
+  fstat`), where a live transfer refreshes its entry every interval — so a
+  long-running transfer is never mistaken for a leak. Set it to at least 3× the
+  server's xfr reporting period (`xfr count × flush interval`).
 
 The consequences of eviction/loss for the *output* (orphan closes, documents
 missing a field) are covered under [Limitations](#limitations).
@@ -347,7 +359,10 @@ Several opt-in streams add finer-grained events:
   (`attributes["event.name"]` = `xrootd.session`) is emitted on each client
   disconnect (`isDisc`). The session `attributes` carry running totals
   (`xrootd.session.files`, `.transfers`, `.accesses`, `.read_bytes`,
-  `.write_bytes`, `.errors`, `.start_time`/`.end_time`/`.duration`) and a capped
+  `.write_bytes`, `.errors`, `.start_time`/`.end_time`/`.duration` — the
+  session spans login to disconnect: the start is the `u` login record's
+  arrival when that is consistent with the server-reported activity times,
+  else the first folded close; the end is the disconnect) and a capped
   `xrootd.session.recent_files` list (the most recent closed files, each with
   `file.path`, `xrootd.transfer.kind`, `xrootd.operation.name`, `xrootd.bytes`). The
   totals cover every closed file; only the `recent_files` list is bounded, so a
@@ -504,7 +519,7 @@ shows a fully-populated successful whole-file read (server configured with
     "xrootd.server.incarnation": 1700000000
   },
   "scope": { "name": "xrdmoncollect", "version": "v6.1.0" },
-  "@timestamp": "2026-07-02T10:00:32Z",
+  "@timestamp": "2026-07-02T10:00:32.000Z",
   "timeUnixNano": "1751450432000000000",
   "observedTimeUnixNano": "1751450432100000000",
   "severityNumber": 9, "severityText": "INFO",
@@ -542,8 +557,8 @@ shows a fully-populated successful whole-file read (server configured with
     "xrootd.operation.state": "Successful",
     "xrootd.transfer.open_seen": true,
     "xrootd.transfer.forced_close": false,
-    "xrootd.transfer.start_time": "2026-07-02T09:55:32Z",
-    "xrootd.transfer.duration": 300,
+    "xrootd.transfer.start_time": "2026-07-02T09:55:32.000Z",
+    "xrootd.transfer.duration": 300.25,
     "xrootd.transfer.read_bytes": 805306368,
     "xrootd.transfer.readv_bytes": 268435456,
     "xrootd.transfer.write_bytes": 0,
@@ -589,7 +604,7 @@ above):
 {
   "resource": { "service.name": "xrootd", "server.address": "srv1.example.org" },
   "scope": { "name": "xrdmoncollect", "version": "v6.1.0" },
-  "@timestamp": "2026-07-02T10:02:07Z",
+  "@timestamp": "2026-07-02T10:02:07.000Z",
   "timeUnixNano": "1751450527000000000",
   "observedTimeUnixNano": "1751450527100000000",
   "severityNumber": 17, "severityText": "ERROR",
@@ -624,7 +639,7 @@ the error fields (the error-category byte, `read` here, feeds the
 {
   "resource": { "service.name": "xrootd", "server.address": "srv1.example.org" },
   "scope": { "name": "xrdmoncollect", "version": "v6.1.0" },
-  "@timestamp": "2026-07-02T10:03:12Z",
+  "@timestamp": "2026-07-02T10:03:12.000Z",
   "timeUnixNano": "1751450592000000000",
   "observedTimeUnixNano": "1751450592100000000",
   "severityNumber": 17, "severityText": "ERROR",
@@ -648,8 +663,8 @@ the error fields (the error-category byte, `read` here, feeds the
     "error.type": "Unable to readv /store/data/Run2026A-PromptReco/file.root; illegal seek",
     "xrootd.transfer.open_seen": true,
     "xrootd.transfer.forced_close": false,
-    "xrootd.transfer.start_time": "2026-07-02T10:02:52Z",
-    "xrootd.transfer.duration": 20,
+    "xrootd.transfer.start_time": "2026-07-02T10:02:52.000Z",
+    "xrootd.transfer.duration": 20.5,
     "xrootd.transfer.read_bytes": 4096,
     "xrootd.transfer.readv_bytes": 0,
     "xrootd.transfer.write_bytes": 0
@@ -690,7 +705,7 @@ on the wire. Mapping (and the server config each needs):
 | user | `user.name` (token `&n=` preferred over descriptor) / `user.id` (token `&s=`, else login DN `&n=`) | `u` / `T` token |
 | vo | `wlcg.vo` | `T` token, else `… auth` (`&o=` from a VO-bearing method: gsi/sss/ztn/http(s)) |
 | activity | `scitags.experiment`/`scitags.activity` (names), `scitags.*_id` (numeric), `user.roles` | `U` SciTags + `--scitags` registry; `T` token for role |
-| start_time / end_time | `xrootd.transfer.start_time` / `.end_time` | f-stream `FileTOD` window |
+| start_time / end_time | `xrootd.transfer.start_time` / `.end_time` | f-stream `FileTOD` window, interpolated per record |
 | bytes | `xrootd.transfer.{read,readv,write}_bytes` | `fstat … xfr` |
 | is_local (LAN/WAN) | `xrootd.transfer.is_local` | derived: client vs server domain (needs `=` ident) |
 
@@ -814,11 +829,23 @@ spec](https://xrootd.web.cern.ch/doc/dev6/xrd_monitoring.htm).
 
 | Source | Canonical key |
 | :-- | :-- |
-| record window time | `@timestamp`, `timeUnixNano` |
+| record time (interpolated, see below) | `@timestamp`, `timeUnixNano` |
 | receipt time | `observedTimeUnixNano` |
 | error flag | `severityNumber` / `severityText` |
 | record kind | `eventName` (+ `attributes.event.name`) |
 | correlation | `traceId`, `spanId` (+ `attributes.session.id`) |
+
+**Record times are interpolated within their reporting window.** The wire
+carries only window boundaries (the f-stream `isTime` record's `tBeg`/`tEnd`
+plus its record count; the t-stream's `WINDOW` marks), but records are
+appended to the server's buffer in time order, so each record's time is
+estimated by linear interpolation over its position in the packet. Event
+times, `xrootd.transfer.start_time`, span start/end and
+`xrootd.transfer.duration` (a fractional-seconds number) therefore carry
+sub-window, millisecond-formatted *estimates* — accurate to well under the
+flush interval, rather than collapsing onto the window boundary (which used
+to make every open/close pair reported in one window compute a zero
+duration). The window endpoints themselves have one-second wire granularity.
 
 **`u` — user login (`MAPUSER`), descriptor `<prot>/<user>.<pid>:<sfd>@<host>` + CGI:**
 
@@ -869,7 +896,7 @@ spec](https://xrootd.web.cern.ch/doc/dev6/xrd_monitoring.htm).
 
 | Record | Wire field | Canonical key |
 | :-- | :-- | :-- |
-| `isTime` | tEnd / sID | envelope time / `resource.xrootd.server.id` |
+| `isTime` | tBeg / tEnd / nRecs / sID | per-record time interpolation / `resource.xrootd.server.id` |
 | `isOpen` | fsz / RW / lfn / user | `attributes.file.size`, `.xrootd.file.read_write`, `.file.*`, → identity |
 | `isClose` (`xfr`) | read/readv/write bytes | `attributes.xrootd.transfer.{read,readv,write}_bytes` |
 | `isClose` (`ops`) | op counts, readv segs, min/max | `attributes.xrootd.transfer.{read,readv,write}_{ops,min,max}`, `.readv_segs` |
@@ -1050,6 +1077,11 @@ xrdmoncollect -p <port> [-b <bindaddr>] [-o <file>] [--bulk <index>]
   --max-entries <n>  optional hard cap on correlation entries (0=off)
   --server-ttl <s>   reclaim a server incarnation idle for >s seconds
                      (default 86400; 0=never)
+  --file-ttl <s>     expire an open-file entry untouched for >s seconds (a
+                     leaked open whose close record was lost; default 0=off).
+                     Only applied to servers reporting in-flight snapshots
+                     ("xfr" on xrootd.monitor fstat); set it to at least 3x
+                     the server's xfr reporting period
   --scitags <src>  SciTags registry (file path or http(s):// URL) mapping
                    experiment/activity ids to names
   --scitags-refresh <s> re-fetch a URL registry every <s> seconds (default 3600)
@@ -1135,15 +1167,17 @@ explicitly:
 
 ```
 xrootd.monitor all auth flush io 60s fstat 60s lfn ops ssq xfr 10 \
-               mbuff 1472 fbsz 1472 rbuff 1472 gbuff 1472 window 15s \
+               mbuff 1400 fbsz 1400 rbuff 1400 gbuff 1400 window 15s \
                dest files fstat io info redir user <collector-host>:9930
 ```
 
-For a 1500-byte MTU, 1472 leaves room for the IPv4+UDP headers (28 bytes);
-use 1452 when the path is IPv6 (40+8). Do not go far below that: a single
-fstat record must fit the buffer, and a close record carrying a long LFN plus
-an error message can reach several hundred bytes — records that do not fit
-are dropped by the server.
+For a 1500-byte MTU the payload limit is 1472 bytes over IPv4 (28 bytes of
+headers) but only **1452 over IPv6** (40+8) — so the once-popular `1472`
+fragments *every full packet* on an IPv6 path, and IPv6 fragments are widely
+dropped by middleboxes. Use 1400 for dual-stack safety. Do not go far below
+that: a single fstat record must fit the buffer, and a close record carrying
+a long LFN plus an error message can reach several hundred bytes — records
+that do not fit are dropped by the server.
 
 **`flush`/`window` bound latency, not loss.** `flush <t>` forces the trace
 buffer out even when not full, `fstat <t>` is the file-stats reporting
@@ -1362,6 +1396,8 @@ xrootd_collector_vo_transfers_total{server="...",vo="..."}
 xrootd_collector_locality_transfers_total{server="...",locality="local|remote"}
 xrootd_collector_sessions_total{server="..."}
 xrootd_collector_active_transfers{server="..."}   (gauge)
+xrootd_collector_stale_opens_total{server="..."}  (opens dropped: close lost)
+xrootd_collector_orphan_closes_total{server="..."} (closes without an open)
 xrootd_collector_transfer_size_bytes        (histogram)
 xrootd_collector_transfer_duration_seconds  (histogram)
 xrootd_collector_packets_total              (and other decoder statistics)
@@ -1449,15 +1485,30 @@ the collector; a **Server** variable multi-selects the reporting servers.
   `xrootd_collector_evicted_total` and the live budget utilisation is the
   `xrootd_collector_state_bytes` gauge; reclaimed incarnations are counted in
   `xrootd_collector_reaped_servers_total`.
-- UDP is lossy: a lost open record yields an orphan close; a lost dictionary
+- UDP is lossy: a lost open record yields an orphan close
+  (`xrootd_collector_orphan_closes_total{server}`); a lost close leaves a
+  stale open, reclaimed at that user's disconnect or by `--file-ttl` and
+  counted in `xrootd_collector_stale_opens_total{server}`; a lost dictionary
   record yields a document without identity/path. The server stamps every
   datagram to one destination with a single sequence number (header `pseq`), so
   the collector estimates loss from forward gaps in it —
   `xrootd_collector_packets_lost_total{server}` and the `-v` `lost=` count.
-  (Reordering, a small backward step, is not counted as loss.) The
+  (Reordering, a small backward step, is not counted as loss. A disconnect
+  overtaking its session's final closes can make the sweep drop opens whose
+  closes arrive right after, turning them into orphan closes — already their
+  fate had the reorder hit the closes directly.) A frequent root cause of
+  systematic loss is IP fragmentation of full monitoring packets — buffer
+  sizes above 1452 bytes fragment on 1500-MTU IPv6 paths (see
+  [NETWORK_TUNING.md](NETWORK_TUNING.md), section 4). The
   [shoveler chain](#shoveler-mode-reliable-tcp-transport) confines this to the
   local hop; its own TCP leg is lossless except for the un-acked kernel-buffer
   window when the collector dies abruptly (see the caveat there).
+- Sub-window record times (event times, transfer start/duration, span
+  start/end) are linear interpolation estimates over each record's position in
+  its reporting window, not measured values; only the window boundaries are on
+  the wire (with one-second granularity). Durations of transfers much shorter
+  than the flush interval are therefore approximate, but no longer collapse to
+  zero.
 - The `f` stream drives the transfer correlation state. The `t` (per-I/O trace)
   records reuse that state read-only to stamp each record with its file's
   `traceId`/`spanId` (see `--traces`), but do not themselves build correlation

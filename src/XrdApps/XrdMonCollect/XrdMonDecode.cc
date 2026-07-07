@@ -720,7 +720,8 @@ void XrdMonDecode::foldSession(Server& srv, uint32_t userID,
 /*                          o t e l S e s s i o n                             */
 /******************************************************************************/
 
-void XrdMonDecode::otelSession(json& a, const UserInfo& u)
+void XrdMonDecode::otelSession(json& a, const UserInfo& u, double sBeg,
+                               double sEnd)
 {
    a["xrootd.session.files"]     = u.sFiles;
    a["xrootd.session.transfers"] = u.sTransfers;
@@ -728,10 +729,12 @@ void XrdMonDecode::otelSession(json& a, const UserInfo& u)
    if (u.sErrors)     a["xrootd.session.errors"]      = u.sErrors;
    if (u.sReadBytes)  a["xrootd.session.read_bytes"]  = u.sReadBytes;
    if (u.sWriteBytes) a["xrootd.session.write_bytes"] = u.sWriteBytes;
-   if (u.sFirst > 0)  a["xrootd.session.start_time"]  = isoTime(u.sFirst);
-   if (u.sLast  > 0)  a["xrootd.session.end_time"]    = isoTime(u.sLast);
-   if (u.sFirst > 0 && u.sLast >= u.sFirst)
-      a["xrootd.session.duration"] = u.sLast - u.sFirst;
+   if (sEnd <= 0) sEnd = (double)u.sLast;
+   if (sBeg > 0)  a["xrootd.session.start_time"]  = isoTime(sBeg);
+   if (sEnd > 0)  a["xrootd.session.end_time"]    = isoTime(sEnd);
+   if (sBeg > 0 && sEnd >= sBeg)
+      a["xrootd.session.duration"] =
+         std::round((sEnd - sBeg) * 1000.0) / 1000.0;
 
    if (!u.sRecent.empty())
       {json files = json::array();
@@ -850,7 +853,8 @@ bool XrdMonDecode::SaveState(const std::string& path) const
                      {"vo",   u.vo},        {"role",   u.role},
                      {"groups", u.groups},  {"cver",   u.clientVer},
                      {"app",  u.appName},   {"info",   u.appInfo},
-                     {"site", u.site},      {"ipv",    u.ipVersion}};
+                     {"site", u.site},      {"ipv",    u.ipVersion},
+                     {"conn", (int64_t)u.connT}};
            if (u.sFiles || u.sErrors)
               {json& ss = e["session"];
                ss = {{"files", u.sFiles},     {"xfers", u.sTransfers},
@@ -990,6 +994,7 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
                   u.appInfo    = e.value("info",   std::string());
                   u.site       = e.value("site",   std::string());
                   u.ipVersion  = e.value("ipv",    0);
+                  u.connT      = (time_t)e.value("conn", (int64_t)0);
                   if (auto sn = e.find("session"); sn != e.end())
                      {u.sFiles      = sn->value("files", 0u);
                       u.sTransfers  = sn->value("xfers", 0u);
@@ -1442,6 +1447,7 @@ void XrdMonDecode::DecodeMap(unsigned char code, Server& srv,
    if (code == XROOTD_MON_MAPUSER)
       {stats.mapUser++;
        UserInfo u;
+       u.connT = time(nullptr);   // the map is sent at login: arrival ~ connect
        u.raw = first;
        // Descriptor: <prot>/<user>.<pid>:<sfd>@<host>
        auto slash = first.find('/');
@@ -1809,9 +1815,20 @@ void XrdMonDecode::EmitDisc(const std::string& src, int32_t stod, Server& srv,
 
 // Attach the session's aggregated file activity (counters plus a capped recent-
 // file list) accumulated from every close that named this user (see foldSession).
+// The session begins at the login (the 'u' map record's collector arrival) when
+// that does not contradict the server-reported activity times (clock skew,
+// state restored from an older run); else at the first folded close.
 //
    auto uit = srv.users.find(userID);
-   if (uit != srv.users.end()) otelSession(a, uit->second);
+   double sBeg = 0;
+   if (uit != srv.users.end())
+      {const UserInfo& u = uit->second;
+       sBeg = (double)u.sFirst;
+       if (u.connT > 0 && (sBeg <= 0 || (double)u.connT <= sBeg)
+                       && (tRec <= 0 || (double)u.connT <= tRec))
+          sBeg = (double)u.connT;
+       otelSession(a, u, sBeg, tRec);
+      }
 
 // The session document is the root span of the client's trace (login ->
 // disconnect); each per-file operation carries the same traceId.
@@ -1827,11 +1844,9 @@ void XrdMonDecode::EmitDisc(const std::string& src, int32_t stod, Server& srv,
 
    if (doc) doc(j.dump());
 
-// The session span is the trace root (no parent), spanning the folded activity
-// from the first close to this disconnect.
+// The session span is the trace root (no parent), spanning from the login
+// (or first close, as resolved above) to this disconnect.
 //
-   int32_t sBeg = (uit != srv.users.end() && uit->second.sFirst > 0)
-                ? uit->second.sFirst : 0;
    emitSpan(j, "session", sBeg, tRec, std::string());
 }
 
@@ -2181,8 +2196,6 @@ void XrdMonDecode::EmitError(const std::string& src, int32_t stod, Server& srv,
 void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
                                  Server& srv, const unsigned char* p, int len)
 {
-   int32_t tWin = 0;
-
 // The "t" stream is an array of fixed 16-byte XrdXrootdMonTrace records. The
 // first byte discriminates the record; values with the high bit clear are I/O
 // (read/write) entries, the rest are markers (open/close/disc/window/...).
@@ -2191,15 +2204,43 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
 //
    if (len % 16) Malformed(src, XROOTD_MON_MAPTRCE, "trailing_bytes");
 
+// Pre-pass: estimate each record's time. WINDOW marks bound the records
+// between them (arg2 is the start of the window that follows, arg1 the end of
+// the one that precedes), and records are appended in time order, so each
+// segment's records are spread linearly across its window instead of all
+// collapsing onto the window boundary.
+//
+   const int nRec = len / 16;
+   std::vector<double> tOf((size_t)nRec, 0.0);
+   {int     segFirst = 0;   // first record index of the open segment
+    int32_t segBeg   = 0;   // its window start (0 before the first mark)
+    auto fill = [&](int i0, int i1, double t0, double t1)
+        {if (t0 <= 0) t0 = t1;
+         if (t1 <  t0) t1 = t0;
+         int n = i1 - i0;
+         for (int k = 0; k < n; k++)
+             tOf[i0 + k] = n > 1 ? t0 + (t1 - t0) * k / (n - 1) : t0;
+        };
+    for (int i = 0; i < nRec; i++)
+        {const unsigned char* r = p + i * 16;
+         if (r[0] != XROOTD_MON_WINDOW) continue;
+         fill(segFirst, i, segBeg, ri32(r + 8));   // arg1: previous window end
+         segBeg   = ri32(r + 12);                  // arg2: next window start
+         segFirst = i + 1;
+        }
+    fill(segFirst, nRec, segBeg, segBeg);          // records after the last mark
+   }
+
    for (int off = 0; off + 16 <= len; off += 16)
        {const unsigned char* a0 = p + off;       // arg0 (8)
         const unsigned char* a1 = p + off + 8;   // arg1 (4)
         const unsigned char* a2 = p + off + 12;  // arg2 (4)
         unsigned char disc = a0[0];
+        double tRec = tOf[off / 16];
 
         stats.traces++;
 
-        if (disc == XROOTD_MON_WINDOW) {tWin = ri32(a2); continue;}
+        if (disc == XROOTD_MON_WINDOW) continue;
 
         if (!traces) continue;   // only counting unless trace emission is on
 
@@ -2293,15 +2334,16 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
             a["session.id"] = tid;
            }
 
-        otelBegin(j, ev, tWin, false);
+        otelBegin(j, ev, tRec, false);
         if (doc) doc(j.dump());
 
 // With --spans, an I/O op also appears as a child span under the file's transfer
 // span (emitSpan is a no-op otherwise); ev is "xrootd.<op>", so ev+7 names the
-// span with the bare operation.
+// span with the bare operation. I/O entries are instants: the span is
+// zero-length at the record's (interpolated) time.
 //
         if (ioOp && fileID)
-           emitSpan(j, ev + 7, tWin, tWin, fileSpanId(src, stod, fileID));
+           emitSpan(j, ev + 7, tRec, tRec, fileSpanId(src, stod, fileID));
        }
 }
 

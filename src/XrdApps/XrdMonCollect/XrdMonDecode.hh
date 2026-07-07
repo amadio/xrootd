@@ -263,6 +263,10 @@ struct UserInfo
    std::string appInfo;    // &y= xrd.info
    std::string site;       // &S= client-advertised site (xrd.site)
    int         ipVersion = 0; // &I= IP protocol (4 or 6); 0 = unknown
+   time_t      connT = 0;  // login time: the 'u' map record's arrival at the
+                           // collector (sent by the server at login), so the
+                           // session span can start at the connect rather than
+                           // at the first file close
    LruIt       lru;        // back-reference into the LRU index
 
    // Session activity rollup. A session is the lifetime of one user dictid
@@ -517,7 +521,11 @@ void     foldSession(Server& srv, uint32_t userID, const std::string& lfn,
                      int32_t tWin);
 //! Fill the xrootd.session.* attributes (totals plus the capped recent-file
 //! list) into the event `attributes` object from a user's session rollup.
-void     otelSession(nlohmann::json& attrs, const UserInfo& u);
+//! Fill the session rollup attributes. `sBeg`/`sEnd` bound the session
+//! (login/connect to disconnect, as resolved by EmitDisc); `sEnd` falls back
+//! to the last folded close when 0.
+void     otelSession(nlohmann::json& attrs, const UserInfo& u, double sBeg,
+                     double sEnd);
 
 std::unordered_map<std::string, Server> servers;
 // Previous cumulative values for g-stream providers that report running

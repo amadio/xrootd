@@ -161,6 +161,12 @@ void usage(const char* prog)
      "  --max-entries <n> optional hard cap on correlation entries (0=off)\n"
      "  --server-ttl <s> reclaim a server incarnation idle for >s seconds\n"
      "                   (default 86400; 0=never)\n"
+     "  --file-ttl <s>   expire an open-file entry untouched for >s seconds\n"
+     "                   (a leaked open whose close record was lost; default\n"
+     "                   0=off). Only applied to servers reporting in-flight\n"
+     "                   snapshots (\"xfr\" on xrootd.monitor fstat), which\n"
+     "                   refresh live transfers every interval; set it to at\n"
+     "                   least 3x the server's xfr reporting period\n"
      "  --state-file <f> save the correlation state to <f> on shutdown and\n"
      "                   reload it on startup (default: $STATE_DIRECTORY/\n"
      "                   xrdmoncollect-state.json under systemd, else off;\n"
@@ -664,6 +670,8 @@ int main(int argc, char* argv[])
    size_t      maxMemory  = 256ull << 20;   // ~256 MiB correlation-state budget
    size_t      maxEntries = 0;              // optional hard entry cap (off)
    long        serverTtl  = 86400;          // reap incarnations idle > 24h
+   long        fileTtl    = 0;              // expire stale open-file entries
+                                            // (0 = off; needs "xfr" reporting)
    std::string stateFile;                   // state snapshot path (off if empty)
    long        stateTtl   = 900;            // max snapshot age to reload (15m)
    std::string osUrl, osUser, osPass, osToken;
@@ -780,6 +788,7 @@ int main(int argc, char* argv[])
        if (!mm.empty()) maxMemory = parseSize(mm.c_str());
        maxEntries  = (size_t)cfg.GetInteger(sec, "max-entries", (long)maxEntries);
        serverTtl   = cfg.GetInteger(sec, "server-ttl", serverTtl);
+       fileTtl     = cfg.GetInteger(sec, "file-ttl", fileTtl);
        stateFile   = cfg.Get(sec, "state-file", stateFile);
        std::string sttl = cfg.Get(sec, "state-ttl", "");
        if (!sttl.empty()) stateTtl = parseDuration(sttl.c_str());
@@ -810,7 +819,7 @@ int main(int argc, char* argv[])
       OPT_FLUSH_COUNT,
       OPT_FLUSH_SECS, OPT_RCVBUF, OPT_QUEUE_DEPTH,
       OPT_METRICS_PORT, OPT_MAX_MEMORY, OPT_MAX_ENTRIES,
-      OPT_SERVER_TTL, OPT_STATE_FILE, OPT_STATE_TTL,
+      OPT_SERVER_TTL, OPT_FILE_TTL, OPT_STATE_FILE, OPT_STATE_TTL,
       OPT_SCITAGS, OPT_SCITAGS_REFRESH, OPT_DATASET,
       OPT_NO_RESOLVE,
       OPT_SESSIONS, OPT_SPANS, OPT_TRACES, OPT_GSTREAM, OPT_REDIRECTS, OPT_DEBUG
@@ -844,6 +853,7 @@ int main(int argc, char* argv[])
       {"max-memory",      required_argument, nullptr, OPT_MAX_MEMORY},
       {"max-entries",     required_argument, nullptr, OPT_MAX_ENTRIES},
       {"server-ttl",      required_argument, nullptr, OPT_SERVER_TTL},
+      {"file-ttl",        required_argument, nullptr, OPT_FILE_TTL},
       {"state-file",      required_argument, nullptr, OPT_STATE_FILE},
       {"state-ttl",       required_argument, nullptr, OPT_STATE_TTL},
       {"scitags",         required_argument, nullptr, OPT_SCITAGS},
@@ -913,6 +923,7 @@ int main(int argc, char* argv[])
          case OPT_MAX_MEMORY:    maxMemory    = parseSize(optarg);    break;
          case OPT_MAX_ENTRIES:   maxEntries   = (size_t)atol(optarg); break;
          case OPT_SERVER_TTL:    serverTtl    = atol(optarg);         break;
+         case OPT_FILE_TTL:      fileTtl      = atol(optarg);         break;
          case OPT_STATE_FILE:    stateFile    = optarg;               break;
          case OPT_STATE_TTL:     stateTtl     = parseDuration(optarg); break;
          case OPT_SCITAGS:       scitags      = optarg;               break;
@@ -1236,6 +1247,7 @@ int main(int argc, char* argv[])
    decoder.SetMaxBytes(maxMemory);
    decoder.SetMaxEntries(maxEntries);
    decoder.SetServerTTL(serverTtl);
+   decoder.SetFileTTL(fileTtl);
    decoder.SetResolveHosts(resolve);
    decoder.SetEmitSessions(sessions);
    decoder.SetEmitSpans(spans);

@@ -227,6 +227,10 @@ bool XrdMonOtlp::post(const std::string& url, const std::string& body,
 
    struct curl_slist* hdrs = nullptr;
    hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+   // Suppress Expect: 100-continue (older curl sends it for bodies > 1KB):
+   // a receiver that never answers the interim response stalls every POST by
+   // curl's 1s expect timeout, throttling the export pipeline.
+   hdrs = curl_slist_append(hdrs, "Expect:");
    if (!authHdr.empty()) hdrs = curl_slist_append(hdrs, authHdr.c_str());
 
    int  backoff = 1;

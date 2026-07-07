@@ -211,7 +211,7 @@ The directives below go into the xrootd config file on **every data server**
 all.sitename EXAMPLE-SITE
 
 xrootd.monitor all auth flush io 60s fstat 60s lfn ops ssq xfr 10 \
-               mbuff 1472 fbsz 1472 rbuff 1472 gbuff 1472 window 15s \
+               mbuff 1400 fbsz 1400 rbuff 1400 gbuff 1400 window 15s \
                dest files fstat io info redir user localhost:9930
 ```
 
@@ -229,10 +229,11 @@ What matters and why:
 - `ops ssq` — operation counts and sum-of-squares statistics on close.
 - **Buffer sizes**: every buffer becomes one UDP datagram. A datagram larger
   than the path MTU is IP-fragmented and **one lost fragment discards the
-  whole datagram** — silently. `1472` fits a 1500-byte MTU for IPv4+UDP
-  (use `1452` for IPv6). This matters even on localhost once a shoveler
-  relays the datagrams onward, because oversized datagrams also stress the
-  receive path.
+  whole datagram** — silently. On a 1500-byte MTU the limit is `1472` for
+  IPv4+UDP but only `1452` for IPv6 — the once-popular `1472` fragments
+  every full packet on an IPv6 path, so use `1400` for dual-stack safety.
+  This matters even on localhost once a shoveler relays the datagrams
+  onward, because oversized datagrams also stress the receive path.
 - **`fbsz` must be set explicitly on servers older than XRootD 6.1**: the
   fstat buffer did not follow `mbuff` and defaulted to 65472 bytes — 44 IP
   fragments per datagram on a 1500-MTU path. The fstat stream is what

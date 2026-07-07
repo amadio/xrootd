@@ -91,6 +91,13 @@ port = 9930
 # max-entries = 0
 # server-ttl = 86400
 
+# Expire an open-file entry untouched for this many seconds: a leaked open
+# whose close record was lost, e.g. to UDP packet loss (0 = off). Only applied
+# to servers reporting in-flight snapshots ("xfr" on xrootd.monitor fstat),
+# which refresh live transfers every interval; set it to at least 3x the
+# server's xfr reporting period (xfr count x flush interval).
+# file-ttl = 7200
+
 # Correlation-state persistence: save the state to this file on shutdown and
 # reload it on startup, so a clean restart does not open a blind window while
 # the dictionaries repopulate. A snapshot older than state-ttl (s/m/h/d

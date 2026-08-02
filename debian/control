@@ -39,6 +39,8 @@ Build-Depends:
  libisal-dev [!i386 !hppa !hurd-i386 !powerpc !x32],
  bsdutils,
  coreutils,
+ fio,
+ git,
  jq,
  krb5-admin-server,
  krb5-kdc,

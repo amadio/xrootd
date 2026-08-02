@@ -29,6 +29,17 @@ if(BUILD_SCITOKENS AND HAVE_SCITOKEN_CONFIG_SET_STR)
   list(APPEND httpnoclient_FIXTURES SciTokens)
 endif()
 
+# The fio I/O engine test requires the engine (ENABLE_FIO_ENGINE) and the fio
+# binary to be available. Skip cleanly otherwise.
+if(ENABLE_FIO_ENGINE)
+  find_program(FIO_EXECUTABLE fio)
+  if(FIO_EXECUTABLE)
+    list(APPEND XROOTD_CONFIGS fio)
+  else()
+    message(STATUS "fio executable not found: skipping XRootD::fio test")
+  endif()
+endif()
+
 # The cache test requires the XRootD::host fixture to be running to
 # act as an origin
 list(APPEND cache_FIXTURES XRootD::host)

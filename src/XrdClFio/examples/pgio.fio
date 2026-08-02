@@ -1,0 +1,22 @@
+# Use XRootD PgRead/PgWrite (per-4KB-page CRC32C checksums) instead of plain
+# Read/Write. Block sizes that are a multiple of 4 KiB work best.
+#
+#   export XRD_FIO_ENGINE=/path/to/build/lib/fio-xrootd.so
+#   fio pgio.fio
+
+[global]
+ioengine=external:${XRD_FIO_ENGINE}
+filename=root\://localhost\:1094//fiobench/pgio.bin
+size=512m
+bs=64k
+xrd_pgio=1
+
+[pgwrite]
+rw=write
+iodepth=8
+stonewall
+
+[pgread]
+rw=randread
+iodepth=16
+stonewall

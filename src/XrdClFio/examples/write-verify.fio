@@ -1,0 +1,18 @@
+# Write then read back with CRC32C verification. Exercises data integrity
+# through the asynchronous submit/complete path.
+#
+#   export XRD_FIO_ENGINE=/path/to/build/lib/fio-xrootd.so
+#   fio write-verify.fio
+
+[global]
+ioengine=external:${XRD_FIO_ENGINE}
+filename=root\://localhost\:1094//fiobench/verify.bin
+size=256m
+bs=64k
+
+[write-verify]
+rw=write
+iodepth=8
+verify=crc32c
+do_verify=1
+verify_fatal=1

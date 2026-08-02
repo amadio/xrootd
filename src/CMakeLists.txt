@@ -75,6 +75,10 @@ add_subdirectory( XrdClHttp )
 add_subdirectory( XrdClS3 )
 add_subdirectory( XrdEc )
 
+if( ENABLE_FIO_ENGINE )
+  add_subdirectory( XrdClFio )
+endif()
+
 if( NOT XRDCL_ONLY )
   add_library(XrdServer SHARED)
 

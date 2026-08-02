@@ -1,0 +1,15 @@
+# Mixed random read/write (70% reads) against an XRootD server.
+#
+#   export XRD_FIO_ENGINE=/path/to/build/lib/fio-xrootd.so
+#   fio randrw.fio
+
+[global]
+ioengine=external:${XRD_FIO_ENGINE}
+filename=root\://localhost\:1094//fiobench/data.bin
+size=1g
+bs=64k
+
+[randrw]
+rw=randrw
+rwmixread=70
+iodepth=16

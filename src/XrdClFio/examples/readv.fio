@@ -1,0 +1,18 @@
+# Coalesce queued reads into a single XRootD VectorRead per submit batch.
+# Useful for measuring vectored-read throughput. Increasing iodepth (and
+# iodepth_batch) makes each VectorRead carry more chunks.
+#
+#   export XRD_FIO_ENGINE=/path/to/build/lib/fio-xrootd.so
+#   fio readv.fio
+
+[global]
+ioengine=external:${XRD_FIO_ENGINE}
+filename=root\://localhost\:1094//fiobench/data.bin
+size=1g
+bs=64k
+xrd_readv=1
+
+[readv]
+rw=randread
+iodepth=32
+iodepth_batch=32

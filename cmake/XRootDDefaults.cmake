@@ -20,6 +20,7 @@ option( ENABLE_XRDEC     "Enable erasure coding component (deprecated)."        
 option( ENABLE_ASAN      "Enable adress sanitizer."                                       FALSE )
 option( ENABLE_TSAN      "Enable thread sanitizer."                                       FALSE )
 option( ENABLE_XRDOSSARC "Enable XrdOssArc plugin."                                       TRUE  )
+option( ENABLE_FIO_ENGINE "Build the fio I/O engine for XRootD (needs FIO_SOURCE_DIR)."   FALSE )
 cmake_dependent_option( ENABLE_SCITOKENS "Enable SciTokens plugin." TRUE "NOT XRDCL_ONLY" FALSE )
 cmake_dependent_option( ENABLE_MACAROONS "Enable Macaroons plugin." TRUE "NOT XRDCL_ONLY" FALSE )
 option( FORCE_ENABLED    "Fail build if enabled components cannot be built."              FALSE )

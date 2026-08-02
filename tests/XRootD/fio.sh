@@ -5,12 +5,13 @@
 # started by test.sh, exercising read/write, random/mixed patterns, data
 # verification, the PgRead/PgWrite CRC path, VectorRead coalescing and fsync.
 
-function setup_fio() {
-	require_commands fio
-}
-
 function test_fio() {
 	local ENGINE="${BINARY_DIR}/lib/fio-xrootd.so"
+
+	# Use the fio the engine was built against (its FIO_IOOPS_VERSION must
+	# match); CMake passes it via $FIO, otherwise fall back to PATH.
+	local FIO="${FIO:-fio}"
+	require_commands "${FIO}"
 
 	if [[ ! -f "${ENGINE}" ]]; then
 		error "fio engine not found: ${ENGINE} (build with -DENABLE_FIO_ENGINE=ON)"
@@ -25,42 +26,42 @@ function test_fio() {
 
 	echo
 	echo "engine: ${ENGINE}"
-	echo "fio:    $(fio --version)"
+	echo "fio:    $("${FIO}" --version)"
 	echo
 
 	# Sequential async write, then random read of the same file.
-	assert fio --name=write --ioengine="external:${ENGINE}" \
+	assert "${FIO}" --name=write --ioengine="external:${ENGINE}" \
 		--filename="${URL}/seq.dat" --rw=write --bs=1m --size=32m --iodepth=8
 
-	assert fio --name=randread --ioengine="external:${ENGINE}" \
+	assert "${FIO}" --name=randread --ioengine="external:${ENGINE}" \
 		--filename="${URL}/seq.dat" --rw=randread --bs=64k --size=32m --iodepth=16
 
 	# End-to-end data integrity through the asynchronous path: fio writes
 	# checksummed blocks and reads them back to verify.
-	assert fio --name=verify --ioengine="external:${ENGINE}" \
+	assert "${FIO}" --name=verify --ioengine="external:${ENGINE}" \
 		--filename="${URL}/verify.dat" --rw=write --bs=64k --size=16m \
 		--iodepth=8 --verify=crc32c --do_verify=1 --verify_fatal=1
 
 	# Mixed random read/write.
-	assert fio --name=randrw --ioengine="external:${ENGINE}" \
+	assert "${FIO}" --name=randrw --ioengine="external:${ENGINE}" \
 		--filename="${URL}/randrw.dat" --rw=randrw --rwmixread=70 \
 		--bs=64k --size=16m --iodepth=8
 
 	# PgRead/PgWrite with server-side CRC32C page checksums.
-	assert fio --name=pgwrite --ioengine="external:${ENGINE}" \
+	assert "${FIO}" --name=pgwrite --ioengine="external:${ENGINE}" \
 		--filename="${URL}/pgio.dat" --rw=write --bs=64k --size=16m \
 		--iodepth=8 --xrd_pgio=1
-	assert fio --name=pgread --ioengine="external:${ENGINE}" \
+	assert "${FIO}" --name=pgread --ioengine="external:${ENGINE}" \
 		--filename="${URL}/pgio.dat" --rw=randread --bs=64k --size=16m \
 		--iodepth=8 --xrd_pgio=1
 
 	# VectorRead coalescing of queued reads.
-	assert fio --name=readv --ioengine="external:${ENGINE}" \
+	assert "${FIO}" --name=readv --ioengine="external:${ENGINE}" \
 		--filename="${URL}/seq.dat" --rw=randread --bs=64k --size=32m \
 		--iodepth=16 --xrd_readv=1
 
 	# Periodic fsync during a write workload.
-	assert fio --name=fsync --ioengine="external:${ENGINE}" \
+	assert "${FIO}" --name=fsync --ioengine="external:${ENGINE}" \
 		--filename="${URL}/fsync.dat" --rw=write --bs=64k --size=16m \
 		--iodepth=8 --fsync=8
 }

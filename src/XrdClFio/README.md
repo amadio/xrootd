@@ -9,22 +9,34 @@ worker threads.
 
 ## Requirements
 
-* A **configured** fio source tree (so that `config-host.h` and the fio headers
-  exist). The engine is compiled against those headers and is pinned to that
-  fio's `FIO_IOOPS_VERSION`.
-* The `fio` binary you run **must be the same version** the engine was built
-  against; fio refuses to load an engine with a mismatched I/O-ops version.
+fio ships no development headers (there is no `fio-devel`/`fio-dev` package), and
+its engine ABI is version-locked via `FIO_IOOPS_VERSION`. The engine must
+therefore be compiled against fio's **source headers at the same version** as the
+`fio` binary that will load it; fio refuses an engine with a mismatched I/O-ops
+version.
 
 ## Building
 
-The engine is off by default. Enable it and point CMake at your fio checkout:
+The engine is off by default. Enable it with `-DENABLE_FIO_ENGINE=ON`:
+
+```sh
+cmake -S xrootd -B build -DENABLE_FIO_ENGINE=ON
+cmake --build build --target fio-xrootd
+# -> build/lib/fio-xrootd.so
+```
+
+With no `FIO_SOURCE_DIR` given, CMake locates the installed `fio`, queries its
+version, and fetches the matching fio source (a shallow `git clone`) to build
+against. To build against an existing, already-configured fio checkout instead
+(offline, or a custom version), pass it explicitly:
 
 ```sh
 cd /path/to/fio && ./configure          # once, to generate config-host.h
 cmake -S xrootd -B build -DENABLE_FIO_ENGINE=ON -DFIO_SOURCE_DIR=/path/to/fio
-cmake --build build --target fio-xrootd
-# -> build/lib/fio-xrootd.so
 ```
+
+The engine is skipped (with a message, not an error) if `fio`/`git` are missing,
+under sanitizer builds, or on non-Linux platforms.
 
 ## Running
 

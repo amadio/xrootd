@@ -120,6 +120,16 @@ higher precedence than `almalinux.cmake`. The default `config.cmake` file will
 enable as many options as possible without failing if the dependencies are not
 installed, so it should be sufficient in most cases.
 
+The default `config.cmake` also enables `ENABLE_FIO_ENGINE`, which builds the
+fio I/O engine for XRootD (see [src/XrdClFio/README.md](../src/XrdClFio/README.md))
+and runs the `XRootD::fio` integration test. Because fio ships no development
+headers, and the engine is version-locked to the `fio` binary, CMake fetches the
+fio source matching the installed `fio` (a shallow `git clone` during
+configuration) to build against. This step requires `fio` and `git` to be
+installed (they are listed as test dependencies in the spec and `debian/control`
+files); if either is missing, or on non-Linux/sanitizer builds, the engine and
+its test are skipped with a message rather than failing the configuration.
+
 The behavior of the [test.cmake](../test.cmake) script can also be influenced
 by environment variables like `CC`, `CXX`, `CXXFLAGS`, `CMAKE_ARGS`, `CMAKE_GENERATOR`,
 `CMAKE_BUILD_PARALLEL_LEVEL`, `CTEST_PARALLEL_LEVEL`, and `CTEST_CONFIGURATION_TYPE`.

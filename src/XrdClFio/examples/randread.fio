@@ -1,0 +1,19 @@
+# Random read at high queue depth against an XRootD server.
+#
+# Set XRD_FIO_ENGINE to the path of the built engine, e.g.:
+#   export XRD_FIO_ENGINE=/path/to/build/lib/fio-xrootd.so
+#   fio randread.fio
+#
+# NOTE: fio splits filenames on ':', so the colons in a root:// URL must be
+# escaped with a backslash. Adjust host/port/path as needed.
+
+[global]
+ioengine=external:${XRD_FIO_ENGINE}
+filename=root\://localhost\:1094//fiobench/data.bin
+size=1g
+bs=128k
+direct=1
+
+[randread]
+rw=randread
+iodepth=32

@@ -1,0 +1,18 @@
+# Sequential write against an XRootD server.
+#
+#   export XRD_FIO_ENGINE=/path/to/build/lib/fio-xrootd.so
+#   fio seqwrite.fio
+#
+# Colons in the root:// URL must be escaped with a backslash (fio splits
+# filenames on ':'). The file is created automatically (MakePath is on by
+# default); set xrd_recreate=1 to always start from a fresh file.
+
+[global]
+ioengine=external:${XRD_FIO_ENGINE}
+filename=root\://localhost\:1094//fiobench/data.bin
+size=1g
+bs=1m
+
+[seqwrite]
+rw=write
+iodepth=8

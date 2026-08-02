@@ -18,6 +18,7 @@ option( PYPI_BUILD       "The project is being built for PyPI release"          
 option( ENABLE_VOMS      "Enable VOMS plug-in if possible."                               TRUE )
 option( ENABLE_XRDEC     "Enable erasure coding component (deprecated)."                  FALSE )
 option( ENABLE_XRDOSSARC "Enable XrdOssArc plugin."                                       TRUE  )
+option( ENABLE_FIO_ENGINE "Build the fio I/O engine for XRootD (needs FIO_SOURCE_DIR)."   FALSE )
 cmake_dependent_option( ENABLE_SCITOKENS "Enable SciTokens plugin." TRUE "NOT XRDCL_ONLY" FALSE )
 cmake_dependent_option( ENABLE_MACAROONS "Enable Macaroons plugin." TRUE "NOT XRDCL_ONLY" FALSE )
 option( FORCE_ENABLED    "Fail build if enabled components cannot be built."              FALSE )

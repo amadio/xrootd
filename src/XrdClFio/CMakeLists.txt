@@ -112,12 +112,16 @@ target_include_directories(fio-xrootd
 #   a type that embeds a C++ handler; the list node is the first member so the
 #   offset is 0 and the computation is correct in practice.
 # -Wno-missing-field-initializers: the option table uses designated initializers.
+# -Wno-pointer-arith: fio's parse.h (td_var) does void* arithmetic, a GNU
+#   extension flagged by older compilers (e.g. GCC 8 on AlmaLinux 8); it is in
+#   fio's headers, not ours, so silence it for this target.
 target_compile_options(fio-xrootd
   PRIVATE
     -D_GNU_SOURCE
     -include ${FIO_SOURCE_DIR}/config-host.h
     -Wno-invalid-offsetof
     -Wno-missing-field-initializers
+    -Wno-pointer-arith
 )
 
 target_link_libraries(fio-xrootd PRIVATE XrdCl)

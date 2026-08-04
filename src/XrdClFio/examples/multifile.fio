@@ -1,0 +1,31 @@
+# Spread a workload over several files against an XRootD cluster.
+#
+# Set XRD_FIO_ENGINE to the path of the built engine, e.g.:
+#   export XRD_FIO_ENGINE=/path/to/build/lib/fio-xrootd.so
+#   fio multifile.fio
+#
+# Point filename_format at a single redirector/manager URL: the cluster places
+# the generated files on different data servers, so one job drives I/O across
+# more than one node. nrfiles controls how many files are created; fio splits
+# `size` evenly across them and $jobnum/$filenum keep the names unique.
+#
+# NOTE: unlike filename=, filename_format= is used verbatim, so its colons must
+# NOT be escaped. (The engine tolerates both, but leave them bare here.) The URL
+# must live in filename_format, not directory= (fio stats directory= locally).
+
+[global]
+ioengine=external:${XRD_FIO_ENGINE}
+filename_format=root://localhost:1094//fiobench/f.$jobnum.$filenum
+nrfiles=4
+size=256m
+bs=1m
+direct=1
+
+[seqwrite]
+rw=write
+iodepth=8
+
+[randread]
+stonewall
+rw=randread
+iodepth=32

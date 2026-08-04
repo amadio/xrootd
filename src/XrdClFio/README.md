@@ -62,6 +62,47 @@ List the engine options with:
 fio --enghelp=/path/to/build/lib/fio-xrootd.so
 ```
 
+## Using multiple files
+
+The engine drives each fio file independently (its own `XrdCl::File`), so a
+single job can read/write several targets concurrently — useful for simulating
+I/O that spans more than one node in an XRootD cluster. There are two ways to
+supply more than one file.
+
+**Explicit list — `filename=`.** Separate URLs with `:`. Because fio itself
+splits `filename` on `:`, every colon *inside* each URL must be backslash-escaped
+(the list separators are the unescaped ones):
+
+```
+filename='root\://host1\:1094//data/a:root\://host2\:1094//data/b'
+```
+
+This targets two specific hosts. fio divides `size` across the files.
+
+**Generated set — `filename_format=` + `nrfiles=`.** Give a template and a file
+count; fio expands `$jobname`/`$jobnum`/`$filenum` to name each file:
+
+```
+filename_format=root://redirector:1094//data/f.$jobnum.$filenum
+nrfiles=8
+```
+
+Point the template at a single **redirector/manager** URL: the cluster places
+the generated files on different data servers, so one job produces I/O across
+several nodes without naming them. This is the recommended way to simulate
+cluster-wide activity.
+
+Two caveats specific to `filename_format`:
+
+* Unlike `filename=`, the format string is used **verbatim** — its colons must
+  **not** be escaped. (The engine strips a `\` before a `:` either way, so an
+  escaped format still works, but keep them bare.)
+* The URL must live in `filename_format` (or `filename`), **not** in
+  `directory=`. fio validates `directory=` with a local `stat()` at startup,
+  which fails for a `root://` URL.
+
+See `examples/multifile.fio`.
+
 ## Engine options
 
 | Option              | Type | Default | Description                                                        |
@@ -173,5 +214,5 @@ kept out of the installed packages (see the version-lock rationale above).
 ## Example job files
 
 `examples/`: `seqwrite.fio`, `randread.fio`, `randrw.fio`, `write-verify.fio`,
-`pgio.fio`, `readv.fio`. Set `XRD_FIO_ENGINE` and adjust the `filename` URL, then
-run e.g. `fio examples/randread.fio`.
+`pgio.fio`, `readv.fio`, `multifile.fio`. Set `XRD_FIO_ENGINE` and adjust the
+`filename`/`filename_format` URL, then run e.g. `fio examples/randread.fio`.

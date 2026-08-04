@@ -187,6 +187,24 @@ struct xrd_iou {
 	std::vector<uint32_t> cksums;   // per-page CRC32C for PgWrite
 };
 
+// Normalize a fio file name into an XRootD URL. fio's filename= list is split
+// on ':' and the '\' of an escaped "\:" is stripped, so those names arrive
+// already clean. filename_format=, by contrast, is stored verbatim (never split
+// or unescaped), so a user who escapes its colons the same way leaves literal
+// backslashes behind. Drop a '\' that precedes a ':' so both directives accept
+// the same URL syntax; on an already-clean name this is a no-op.
+static std::string xrd_url(const char *name)
+{
+	std::string url;
+	url.reserve(strlen(name));
+	for (const char *p = name; *p; ++p) {
+		if (p[0] == '\\' && p[1] == ':')
+			continue;
+		url += *p;
+	}
+	return url;
+}
+
 // Translate an XRootDStatus into a POSIX errno for fio.
 static inline int xrd_errno(const XrdCl::XRootDStatus &st)
 {
@@ -523,15 +541,17 @@ static int fio_xrd_open(struct thread_data *td, struct fio_file *f)
 		flags = XrdCl::OpenFlags::Read;
 	}
 
+	const std::string url = xrd_url(f->file_name);
+
 	XrdCl::File *file = new XrdCl::File();
-	XrdCl::XRootDStatus st = file->Open(f->file_name, flags, mode);
+	XrdCl::XRootDStatus st = file->Open(url, flags, mode);
 
 	// For write workloads without recreate, the file may simply not exist yet:
 	// retry with New so it is created (New alone would fail if it existed).
 	if (!st.IsOK() && writing && !o->recreate) {
 		delete file;
 		file = new XrdCl::File();
-		st = file->Open(f->file_name, flags | XrdCl::OpenFlags::New, mode);
+		st = file->Open(url, flags | XrdCl::OpenFlags::New, mode);
 	}
 
 	if (!st.IsOK()) {
@@ -563,7 +583,7 @@ static int fio_xrd_close(struct thread_data *td, struct fio_file *f)
 
 static int fio_xrd_get_file_size(struct thread_data *td, struct fio_file *f)
 {
-	XrdCl::URL url(f->file_name);
+	XrdCl::URL url(xrd_url(f->file_name));
 	if (!url.IsValid()) {
 		log_err("fio: xrootd: invalid URL: %s\n", f->file_name);
 		return 1;
@@ -583,7 +603,7 @@ static int fio_xrd_get_file_size(struct thread_data *td, struct fio_file *f)
 
 static int fio_xrd_unlink(struct thread_data *td, struct fio_file *f)
 {
-	XrdCl::URL url(f->file_name);
+	XrdCl::URL url(xrd_url(f->file_name));
 	if (!url.IsValid())
 		return 1;
 

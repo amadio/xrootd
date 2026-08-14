@@ -399,7 +399,7 @@ install -m 644 -p config/%{name}-filecache-standalone.cfg \
 install -m 644 -p config/%{name}-http.cfg \
 	%{buildroot}%{_sysconfdir}/%{name}/%{name}-http.cfg
 install -m 644 -p src/XrdApps/XrdMonCollect/xrdmoncollect.cfg.example \
-	%{buildroot}%{_sysconfdir}/%{name}/xrdmoncollect.cfg
+	%{buildroot}%{_sysconfdir}/%{name}/xrdmoncollect.cfg.example
 
 # Client config
 mkdir -p %{buildroot}%{_sysconfdir}/%{name}/client.plugins.d
@@ -520,6 +520,7 @@ fi
 %{_sysusersdir}/%{name}.conf
 %config(noreplace) %{_sysconfdir}/logrotate.d/%{name}
 %dir %{_sysconfdir}/%{name}/config.d
+%attr(-,xrootd,xrootd) %{_sysconfdir}/%{name}/*.cfg.example
 %attr(-,xrootd,xrootd) %config(noreplace) %{_sysconfdir}/%{name}/*.cfg
 %attr(-,xrootd,xrootd) %{_localstatedir}/log/%{name}
 %attr(-,xrootd,xrootd) %{_localstatedir}/spool/%{name}

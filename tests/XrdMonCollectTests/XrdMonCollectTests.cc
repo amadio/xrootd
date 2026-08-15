@@ -2914,6 +2914,41 @@ TEST_F(StateFile, ClockOffsetSurvivesReload)
   EXPECT_EQ(a["xrootd.session.duration"].get<double>(), 60.0);
 }
 
+// A restored offset is not re-derived, so a corrupted snapshot can carry one
+// large enough to push a session time off the epoch -- where isoTime renders an
+// empty string, and an empty string in a date field is exactly what a strict
+// consumer rejects. The session must still be datable.
+TEST_F(StateFile, AbsurdRestoredClockOffsetStillDatesSessions)
+{
+  dec.SetEmitSessions(true);
+  feedUserN(dec, "h:1", 7);
+  ASSERT_TRUE(dec.SaveState(path));
+
+  { json st;                             // corrupt the saved offset
+    { std::ifstream in(path); in >> st; }
+    for (auto& [key, o] : st.at("servers").items()) o["clkoff"] = -2000000000;
+    std::ofstream out(path); out << st.dump(); }
+
+  std::vector<std::string> docs;
+  XrdMonDecode dec2([&](const std::string& d){ docs.push_back(d); });
+  dec2.SetEmitSessions(true);
+  dec2.SetEmitSpans(true);
+  std::string note;
+  ASSERT_TRUE(dec2.LoadState(path, 900, note));
+
+  { auto payload = discRec(7);           // no TOD, so no time on the wire
+    auto pkt = packet('f', kStod, payload);
+    dec2.Process("h:1", (const char*)pkt.data(), pkt.size()); }
+
+  json j = sessionDoc(docs);
+  ASSERT_FALSE(j.is_null());
+  const json& a = j["attributes"];
+  EXPECT_NE(a["xrootd.session.start_time"].get<std::string>(), "");
+  EXPECT_NE(a["xrootd.session.end_time"].get<std::string>(), "");
+  EXPECT_GE(a["xrootd.session.duration"].get<double>(), 0.0);
+  ASSERT_TRUE(sessionSpan(docs).contains("startTimeUnixNano"));
+}
+
 TEST_F(StateFile, StaleSnapshotStartsFresh)
 {
   feedUserMap();

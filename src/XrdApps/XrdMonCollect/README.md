@@ -519,6 +519,142 @@ document on the serializer thread — never in the UDP receive path — so the
 cost is negligible at realistic close rates; keep it anchored and simple. A
 path the pattern does not match simply gets no `xrootd.dataset`.
 
+### Document filtering (`[filter "…"]`)
+
+A site's monitoring stream usually carries a good deal of activity that is
+essential to its administrators but noise to everyone else: on an EOS instance,
+FST-to-FST replication, draining, balancing and the namespace's own accesses.
+Filter rules let the collector drop that traffic, or merely tag it so a
+dashboard can exclude it while the records stay available.
+
+Rules live in the collector's configuration file, one `[filter "<name>"]`
+section per rule. There is no command-line equivalent:
+
+```ini
+[xrdmoncollect]
+port = 9930
+
+# Tag this instance's internal traffic, but keep it.
+[filter "eos-internal"]
+user     = daemon, root, ~^[0-9]+$
+authprot = sss
+action   = tag
+label    = internal
+
+# Drop the namespace's own bookkeeping accesses outright.
+[filter "eos-proc"]
+path   = /eos/*/proc/*
+action = drop
+
+# ... but never drop anything belonging to a real VO user.
+[filter "keep-vo"]
+vo     = ~.+
+action = keep
+```
+
+> **Keys must start in column 1.** The INI parser treats an indented line as a
+> continuation of the preceding key's value, so indenting a rule's keys folds
+> everything after the first one into that first key. The collector rejects the
+> recognisable cases at start-up rather than loading a rule that matches
+> nothing, but the safe habit is simply not to indent.
+
+**Reserved keys.** `action` is `tag` (the default), `drop` or `keep`; `label` is
+the tag applied by a matching rule, defaulting to the rule's own name. Every
+other key is a match condition, and an unrecognised one is a start-up error —
+a rule that silently matches nothing is indistinguishable from one that works
+until documents start going missing.
+
+**Matching.** Conditions within a rule are ANDed. A value is a comma-separated
+OR-list (a repeated key works too, and is equivalent), and each alternative is
+
+* an **exact** string by default, so `daemon` never matches `mydaemon`;
+* a **glob** when it contains `*` or `?` — `fnmatch(3)` with no flags, so `*`
+  crosses `/` and `path = /eos/*/proc/*` reads as written;
+* a **POSIX extended regular expression** when it starts with `~`, compiled
+  once at start-up (an uncompilable one is rejected there) and matched
+  unanchored, so anchor it yourself: `~^[0-9]+$` for a bare numeric uid.
+
+A leading `!` on the whole value negates the condition.
+
+A condition whose field the document does not carry **never matches, negated or
+not**. That is what keeps `user = daemon` from firing on a server-identity
+document, which has no user at all — so read `user = !daemon` as "has a user
+and it is not daemon", not "has no daemon user". Both polarities failing open
+is the safe default for a drop rule.
+
+**Resolution is independent of rule order.** Every rule is evaluated; each
+matching rule contributes its label to `xrootd.filter.labels` (a sorted,
+de-duplicated string array under `attributes`); and the document is dropped only
+when some matching rule says `drop` and none says `keep`. So `keep` beats
+`drop` beats `tag`, however the rules happen to be written. A dropped document
+is still labelled internally, so a `keep`-rescued one records why it matched.
+
+**Condition keys.** Short names for the fields worth filtering on; anything else
+in the document is reachable as a raw `attributes.<key>` or `resource.<key>`
+path (for example `attributes.xrootd.session.files`).
+
+| key | document field | key | document field |
+|---|---|---|---|
+| `user` | `user.name` | `path` | `file.path` |
+| `userid` | `user.id` | `dir` | `file.directory` |
+| `role` | `user.roles` *(array)* | `filename` | `file.name` |
+| `vo` | `wlcg.vo` | `ext` | `file.extension` |
+| `groups` | `wlcg.groups` | `dataset` | `xrootd.dataset` |
+| `authprot` | `xrootd.auth.method` | `event` | `event.name` |
+| `proto` | `network.protocol.name` | `op` | `xrootd.operation.name` |
+| `scheme` | `url.scheme` | `state` | `xrootd.operation.state` |
+| `client` | `client.address` | `kind` | `xrootd.transfer.kind` |
+| `clientip` | `network.peer.address` | `error` | `error.type` |
+| `clientsite` | `xrootd.client.site` | `provider` | `xrootd.gstream.provider` |
+| `app` | `user_agent.name` | `target` | `xrootd.redirect.target.address` |
+| `appver` | `user_agent.version` | `session` | `session.id` |
+| `appinfo` | `user_agent.original` | `severity` | `severityText` *(top level)* |
+| `appid` | `xrootd.app` | `server` | `server.address` *(resource)* |
+| `experiment` | `scitags.experiment` | `site` | `xrootd.server.site` *(resource)* |
+| `activity` | `scitags.activity` | `instance` | `service.instance.id` *(resource)* |
+| | | `program` | `xrootd.server.program` *(resource)* |
+| | | `version` | `service.version` *(resource)* |
+
+An array field (`role`) matches when any element does; numbers and booleans are
+matched as their printed form (`attributes.xrootd.error.code = 3011`,
+`attributes.xrootd.transfer.open_seen = true`); objects never match.
+
+**What filtering does not touch.** Rules run on the finished document,
+immediately before it reaches the sinks, and after everything else in the
+pipeline. So a dropped document is still fully accounted for in the Prometheus
+series ([Metrics](#metrics)) and still folded into its session rollup — the
+aggregate view of the cluster stays complete while the document stream is
+cleaned up. `filtered_documents_total` counts what was suppressed, and the
+`-v` exit summary reports it as `filtered=`. Filtering also does not reduce
+the collector's memory use: the correlation state is built either way, so
+`--max-memory` should be sized as if no filter were configured.
+
+A few consequences worth knowing:
+
+* Rules apply to **all sinks at once** — the file/`--bulk` output, OpenSearch,
+  OTLP and `--forward`. There is no per-sink filtering.
+* A dropped log document takes its companion `--spans` span with it, and a
+  tagged one passes the label on to its span, so a trace is never left with a
+  parentless child.
+* Identity attributes (`user`, `vo`, `authprot`, `client`, …) are attached to
+  the transfer, error, redirect and session documents, but **not** to the
+  per-I/O `--traces` records or to `xrootd.gstream` documents, which carry no
+  identity. With `--traces` enabled, suppressing a session's I/O records needs a
+  second rule keyed on something they do carry, such as `path`/`dir` or
+  `event = ~^xrootd\.(read|write|readv)$`.
+* Filtering on session-level identity keeps a whole trace together, since the
+  same identity is present on the session document and on each of its file
+  operations. A rule that matches only some of them will leave a partial trace.
+* `--debug` raw record dumps bypass the filter entirely; they are a decoder
+  dump, not a document stream.
+
+At start-up the collector reports the rules it loaded, whether or not `-v` was
+given:
+
+```
+xrdmoncollect: 3 filter rule(s) loaded (1 tag, 1 drop, 1 keep)
+```
+
 ### Output document
 
 The per-transfer document uses the OpenTelemetry-aligned schema described under
@@ -1104,7 +1240,8 @@ xrdmoncollect -p <port> [-b <bindaddr>] [-o <file>] [--bulk <index>]
               [--shovel <host:port> [--shovel-token <t>] [--spool-max <sz>]]
               [--flush-count <n>] [--flush-secs <n>] [--debug] [-v]
 
-  -c <file>        load options from an INI config file (see Configuration)
+  -c <file>        load options from an INI config file, plus any
+                   [filter "<name>"] document rules (see Configuration)
   -p <port>        UDP port to listen on (long form: --udp-port; required
                    unless --tcp-port is given)
   -b <bindaddr>    address to bind (default: all interfaces, dual-stack)
@@ -1187,6 +1324,11 @@ forward = logstash.example.org:5044
 metrics-port = 9931
 max-memory = 256M
 ```
+
+The file may additionally carry any number of `[filter "<name>"]` sections,
+which drop or tag emitted documents and have no command-line equivalent — see
+[Document filtering](#document-filtering-filter-). Any other section is
+ignored with a warning.
 
 ### Server configuration
 

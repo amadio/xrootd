@@ -133,3 +133,51 @@ port = 9930
 # Debugging: also emit one JSON object per decoded record; print stats on exit.
 # debug = false
 # verbose = false
+
+# Document filtering. Each [filter "<name>"] section is one rule, matched
+# against every finished document just before it reaches the sinks: a rule
+# either drops the document or tags it with a label for filtering downstream.
+# Metrics are unaffected — a dropped document is still counted in the
+# Prometheus series, so the aggregate view of the cluster stays complete.
+#
+# Reserved keys: action (tag | drop | keep; default tag) and label (default:
+# the rule name). Every other key is a match condition; an unknown one is a
+# start-up error. Conditions AND together; a value is a comma-separated OR-list
+# whose alternatives are an exact string, a glob (when it contains * or ?), or
+# a POSIX extended regex (when it starts with ~). A leading ! negates.
+#
+# A key naming a field the document does not carry never matches, negated or
+# not, so an identity rule cannot fire on a server-identity document.
+#
+# Rules are evaluated in no particular order: every matching rule contributes
+# its label, and the document is dropped only if some matching rule says drop
+# and none says keep.
+#
+# Condition keys: user userid role vo groups authprot proto scheme client
+# clientip clientsite app appver appinfo appid experiment activity path dir
+# filename ext dataset event op state kind error provider target session
+# severity server site instance program version -- or a raw
+# attributes.<key> / resource.<key> path for anything else in the document.
+#
+# IMPORTANT: keys must start in column 1. An indented line is appended to the
+# preceding key's value (INI multi-line continuation), which would silently
+# fold the rest of the rule into the first key; the collector rejects the
+# recognisable cases at start-up, but do not indent.
+#
+# Tag an EOS instance's internal traffic instead of dropping it, so dashboards
+# can exclude it while the raw records stay available:
+# [filter "eos-internal"]
+# user     = daemon, root, ~^[0-9]+$
+# authprot = sss
+# action   = tag
+# label    = internal
+#
+# Drop the namespace's own bookkeeping accesses outright:
+# [filter "eos-proc"]
+# path   = /eos/*/proc/*
+# action = drop
+#
+# ... but never drop anything belonging to a real VO user (keep beats drop):
+# [filter "keep-vo"]
+# vo     = ~.+
+# action = keep

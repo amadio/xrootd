@@ -384,6 +384,33 @@ state-ttl = 15m
 # traces = false           # raw I/O trace documents
 # gstream = false          # plugin (pfc/tpc/tcpmon...) records
 # redirects = false        # redirect events
+
+# --- Document filtering (optional) ----------------------------------------
+# Each [filter "<name>"] section drops or tags documents just before they
+# reach the sinks. Metrics are unaffected, so the aggregate view of the
+# cluster stays complete while the document stream is cleaned up. Keys must
+# start in column 1 (an indented line continues the previous key's value).
+# See "Document filtering" in the README for the full key list.
+#
+# [filter "eos-internal"]
+# user     = daemon, root, ~^[0-9]+$
+# authprot = sss
+# action   = tag
+# label    = internal
+#
+# [filter "eos-proc"]
+# path   = /eos/*/proc/*
+# action = drop
+```
+
+Tagging rather than dropping is the safer default for a first deployment: the
+records still reach the index, and a dashboard can exclude them with a
+`attributes.xrootd.filter.labels: internal` filter. Once the label is seen to
+match exactly what was intended, switch the rule's `action` to `drop` to save
+the ingest volume. The collector reports the rules it loaded at start-up:
+
+```
+xrdmoncollect: 2 filter rule(s) loaded (1 tag, 1 drop, 0 keep)
 ```
 
 TLS note: `otlp-url` is HTTPS. If Alloy uses the self-signed certificate

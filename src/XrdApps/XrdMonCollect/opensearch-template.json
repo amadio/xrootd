@@ -131,6 +131,7 @@
                   }
                 },
                 "dataset":         { "type": "keyword" },
+                "filter": { "properties": { "labels": { "type": "keyword" } } },
                 "auth":   { "properties": { "method": { "type": "keyword" } } },
                 "client": {
                   "properties": {

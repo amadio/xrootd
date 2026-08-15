@@ -490,6 +490,59 @@ forward = logstash.example.org:5044
 max-memory = 256M
 .fi
 .RE
+.SS Document filtering
+The configuration file may also carry any number of \fB[filter "\fIname\fB"]\fR
+sections, each one a rule matched against every finished document just before it
+reaches the output sinks. A matching rule either suppresses the document or tags
+it with a label, so activity that is uninteresting to end users (a storage
+instance's own internal traffic, say) can be dropped at the collector or merely
+marked for filtering downstream. There is no command-line equivalent.
+.P
+.RS 5
+.nf
+[filter "eos-internal"]
+user     = daemon, root, ~^[0-9]+$
+authprot = sss
+action   = tag
+label    = internal
+
+[filter "eos-proc"]
+path   = /eos/*/proc/*
+action = drop
+.fi
+.RE
+.P
+Within a rule, \fBaction\fR (\fBtag\fR, the default, \fBdrop\fR or \fBkeep\fR)
+and \fBlabel\fR (default: the rule name) are reserved; every other key is a
+match condition, and an unrecognised one is a start-up error. Conditions are
+ANDed. A value is a comma-separated OR-list whose alternatives are matched as an
+exact string, as a glob when they contain \fB*\fR or \fB?\fR, or as a POSIX
+extended regular expression when they begin with \fB~\fR; a leading \fB!\fR
+negates the condition. A condition naming a field the document does not carry
+never matches, negated or not.
+.P
+Rules are evaluated in no particular order: every matching rule contributes its
+label to the \fBxrootd.filter.labels\fR attribute, and the document is dropped
+only when some matching rule says \fBdrop\fR and none says \fBkeep\fR.
+.P
+Condition keys are \fBuser\fR, \fBuserid\fR, \fBrole\fR, \fBvo\fR, \fBgroups\fR,
+\fBauthprot\fR, \fBproto\fR, \fBscheme\fR, \fBclient\fR, \fBclientip\fR,
+\fBclientsite\fR, \fBapp\fR, \fBappver\fR, \fBappinfo\fR, \fBappid\fR,
+\fBexperiment\fR, \fBactivity\fR, \fBpath\fR, \fBdir\fR, \fBfilename\fR,
+\fBext\fR, \fBdataset\fR, \fBevent\fR, \fBop\fR, \fBstate\fR, \fBkind\fR,
+\fBerror\fR, \fBprovider\fR, \fBtarget\fR, \fBsession\fR, \fBseverity\fR,
+\fBserver\fR, \fBsite\fR, \fBinstance\fR, \fBprogram\fR and \fBversion\fR, or a
+raw \fBattributes.\fIkey\fR / \fBresource.\fIkey\fR path for any other field.
+.P
+Filtering applies to the emitted documents only: a dropped document is still
+counted in the Prometheus series and still folded into its session rollup, so
+the aggregate view of the cluster remains complete. The number suppressed is
+exported as \fBfiltered_documents_total\fR and reported as \fBfiltered=\fR in
+the \fB-v\fR exit summary.
+.P
+Note that a filter key must start in column 1: an indented line is appended to
+the preceding key's value by the INI parser's multi-line continuation, which
+would fold the rest of the rule into its first key.
 .SH SYSTEMD INTEGRATION
 The bundled \fBxrdmoncollect.service\fR unit runs the collector as
 \fBType=notify\fR: the daemon signals readiness once its listeners and worker

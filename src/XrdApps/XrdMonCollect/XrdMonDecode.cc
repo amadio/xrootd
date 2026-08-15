@@ -1919,6 +1919,13 @@ XrdMonDecode::sessionSpanOf(int32_t stod, const Server& srv, const UserInfo* u,
    s.end = tRec;
    if (s.end <= 0 && u) s.end = (double)u->sLast;
    if (s.end <= 0) s.end = toServerClock(srv, (double)Now());
+// The offset is estimated from what the server reports, so a producer sending
+// nonsense window times could drive it far enough negative to push the end off
+// the epoch. isoTime renders a non-positive time as an empty string, which is
+// what a strict consumer chokes on -- the very failure being fixed here -- so
+// fall back to this collector's own clock, which is always sane.
+//
+   if (s.end <= 0) s.end = (double)Now();
 
 // A candidate is admissible only within [incarnation start, disconnect]. The
 // header's stod is the server's own process start time, so no session it

@@ -359,10 +359,8 @@ Several opt-in streams add finer-grained events:
   (`attributes["event.name"]` = `xrootd.session`) is emitted on each client
   disconnect (`isDisc`). The session `attributes` carry running totals
   (`xrootd.session.files`, `.transfers`, `.accesses`, `.read_bytes`,
-  `.write_bytes`, `.errors`, `.start_time`/`.end_time`/`.duration` — the
-  session spans login to disconnect: the start is the `u` login record's
-  arrival when that is consistent with the server-reported activity times,
-  else the first folded close; the end is the disconnect) and a capped
+  `.write_bytes`, `.errors`, `.start_time`/`.end_time`/`.duration` — see
+  [Session times](#session-times) below) and a capped
   `xrootd.session.recent_files` list (the most recent closed files, each with
   `file.path`, `xrootd.transfer.kind`, `xrootd.operation.name`, `xrootd.bytes`). The
   totals cover every closed file; only the `recent_files` list is bounded, so a
@@ -372,6 +370,31 @@ Several opt-in streams add finer-grained events:
   default** — when disabled no rollup is accumulated and no `session` document is
   produced, saving the per-session memory and receive-thread work for
   deployments that only consume the per-transfer/access documents.
+
+  <a id="session-times"></a>
+  **Session times.** `xrootd.session.start_time`, `.end_time` and `.duration`
+  are **always present** on a session document, and the duration is never
+  negative. The end is the disconnect. The start is harder: the wire carries no
+  time on any dictionary record, so the login can only be timed by the
+  collector, whose clock is not the reporting server's. The collector therefore
+  estimates the offset between the two per server incarnation (from the window
+  ends the `f` stream already carries) and resolves the start from the best
+  evidence available, reporting which in
+  `xrootd.session.start_time_source`:
+
+  | `start_time_source` | Derived from | Accuracy |
+  | :-- | :-- | :-- |
+  | `login` | the `t`-stream disconnect's connect duration, subtracted from its time | exact; the server measured it |
+  | `connect` | the `u` login record's arrival, translated into the server's clock | true login, within the receive batching interval |
+  | `first_activity` | the earliest record naming the session (open, transfer snapshot, error, close) | exact, but misses the login and authentication |
+  | `disconnect` | the disconnect itself | none: the session is reported as an instant |
+
+  Candidates are admitted only within the session's own
+  `[incarnation start, disconnect]` range, so a badly skewed clock degrades the
+  start to a later rung rather than producing a wrong or missing one. The
+  companion counter `xrootd_collector_session_starts_total{server,source}`
+  makes the mix visible: a server reporting mostly `disconnect` is losing `u`
+  records, or its `xrootd.monitor` destination lacks the `user` flag.
 - `--spans` additionally emits an OpenTelemetry **span** document alongside each
   concluded-operation log: a file-operation span per close or failed operation
   (spanning open → close, with `status` `STATUS_CODE_OK`/`STATUS_CODE_ERROR`) and,
@@ -682,6 +705,52 @@ collector — the `xrootd.transfer.*` byte totals are still reported. Empty/zero
 fields are omitted, so a given document only carries what the server actually
 reported.
 
+And a `session` document (`--sessions`), emitted when the client disconnects,
+rolling up everything it did — the root of its trace:
+
+```json
+{
+  "@timestamp": "2026-07-02T10:14:07.000Z",
+  "eventName": "xrootd.session",
+  "severityText": "INFO",
+  "traceId": "9f1c8b0d4e2a6f37c1a8b0d4e2a6f371",
+  "spanId": "3c1a8b0d4e2a6f37",
+  "resource": {
+    "service.name": "xrootd",
+    "server.address": "eos-node-12.example.org"
+  },
+  "attributes": {
+    "event.name": "xrootd.session",
+    "session.id": "9f1c8b0d4e2a6f37c1a8b0d4e2a6f371",
+    "user.name": "alice",
+    "client.address": "wn.example.org",
+    "wlcg.vo": "cms",
+    "xrootd.session.start_time": "2026-07-02T09:55:30.000Z",
+    "xrootd.session.end_time": "2026-07-02T10:14:07.000Z",
+    "xrootd.session.duration": 1117.0,
+    "xrootd.session.start_time_source": "login",
+    "xrootd.session.files": 2,
+    "xrootd.session.transfers": 1,
+    "xrootd.session.accesses": 1,
+    "xrootd.session.read_bytes": 1073745920,
+    "xrootd.session.recent_files": [
+      { "file.path": "/store/data/Run2026A-PromptReco/file.root",
+        "xrootd.transfer.kind": "transfer",
+        "xrootd.operation.name": "read",
+        "xrootd.bytes": 1073741824 },
+      { "file.path": "/store/data/Run2026A-PromptReco/other.root",
+        "xrootd.transfer.kind": "access",
+        "xrootd.operation.name": "read",
+        "xrootd.bytes": 4096 }
+    ]
+  }
+}
+```
+
+The three time fields and `start_time_source` are always present (see
+[Session times](#session-times)); the counters are always present but the byte
+totals, like everywhere else, are omitted when zero.
+
 ### WLCG field mapping
 
 The schema covers the WLCG transfer-monitoring fields that XRootD currently puts
@@ -903,7 +972,7 @@ duration). The window endpoints themselves have one-second wire granularity.
 | `isClose` (`ssq`) | Σx² | `attributes.xrootd.transfer.{read,readv,rsegs,write}_sumsq` |
 | `isClose` | derived | `.kind`, `.operation.name`, `.operation.state`, `.open_seen`, `.forced_close`, `.duration`, `.is_local` |
 | `isClose`/`isError` | error text / code | `attributes.error.type`, `.xrootd.error.code` |
-| `isDisc` | session rollup | `attributes.xrootd.session.{files,transfers,accesses,errors,read_bytes,write_bytes,start_time,end_time,duration,recent_files}` |
+| `isDisc` | session rollup | `attributes.xrootd.session.{files,transfers,accesses,errors,read_bytes,write_bytes,start_time,end_time,duration,start_time_source,recent_files}` |
 
 **`t` — trace stream (`MAPTRCE`, `--traces`):**
 
@@ -913,7 +982,7 @@ duration). The window endpoints themselves have one-second wire granularity.
 | readv / readu | file dictid | `attributes.file.*`, `.xrootd.file.id`; `xrootd.readv` |
 | open | fsz | `attributes.file.size`; `xrootd.open` |
 | close | read/write bytes | `attributes.xrootd.transfer.{read,write}_bytes`; `xrootd.close` |
-| disc | duration, user | `attributes.xrootd.session.duration` + identity; `xrootd.disconnect` |
+| disc | duration, user | `attributes.xrootd.session.{start_time,end_time,duration}` + identity; `xrootd.disconnect`. Also dates the session document's login exactly (see [Session times](#session-times)) |
 | appid | 12-byte app id | `attributes.xrootd.app`; `xrootd.appid` |
 | window | time | (sets envelope time; no document) |
 
@@ -1395,6 +1464,7 @@ xrootd_collector_write_bytes_total{server="..."}
 xrootd_collector_vo_transfers_total{server="...",vo="..."}
 xrootd_collector_locality_transfers_total{server="...",locality="local|remote"}
 xrootd_collector_sessions_total{server="..."}
+xrootd_collector_session_starts_total{server="...",source="login|connect|first_activity|disconnect"}
 xrootd_collector_active_transfers{server="..."}   (gauge)
 xrootd_collector_stale_opens_total{server="..."}  (opens dropped: close lost)
 xrootd_collector_orphan_closes_total{server="..."} (closes without an open)

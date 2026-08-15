@@ -298,6 +298,9 @@ struct UserInfo
    uint32_t sErrors     = 0;  // closes that ended in error
    int64_t  sReadBytes  = 0;  // read + readv bytes across the session
    int64_t  sWriteBytes = 0;  // write bytes across the session
+   int32_t  sLogin      = 0;  // exact login time in the server's own clock,
+                              // from the trace stream's disconnect record
+                              // (its time less the connect duration it carries)
    int32_t  sFirst      = 0;  // earliest server-reported time of any record
                               // naming this session (open, transfer snapshot,
                               // close or error): the session's first observed
@@ -323,6 +326,7 @@ struct UserInfo
    //
    void adopt(UserInfo&& p)
         {if (p.connT > 0 && (connT <= 0 || p.connT < connT)) connT = p.connT;
+         sLogin      = p.sLogin;
          sFiles      = p.sFiles;
          sTransfers  = p.sTransfers;
          sAccesses   = p.sAccesses;
@@ -574,11 +578,17 @@ void     foldSession(Server& srv, uint32_t userID, const std::string& lfn,
 //! record that names its user dictid. No-op when the dictid is unknown.
 void     NoteActive(Server& srv, uint32_t userID, double tRec);
 
+//! Record a session's exact login time from a trace-stream disconnect: `tRec`
+//! is the record's time and `csec` the connect duration it carries, both in the
+//! server's clock. No-op when the dictid is unknown.
+void     NoteLogin(Server& srv, uint32_t userID, double tRec, int32_t csec);
+
 //! A session's resolved bounds, in the reporting server's clock, plus how the
-//! begin was arrived at. `src` is one of "connect" (the login record's
-//! arrival, translated out of this collector's clock), "first_activity" (the
-//! earliest record naming the session) or "disconnect" (nothing else was
-//! available, so the session is reported as an instant). It is emitted as
+//! begin was arrived at. `src` is one of "login" (exact, from the trace
+//! stream's connect duration), "connect" (the login record's arrival,
+//! translated out of this collector's clock), "first_activity" (the earliest
+//! record naming the session) or "disconnect" (nothing else was available, so
+//! the session is reported as an instant). It is emitted as
 //! xrootd.session.start_time_source so a consumer can tell a measured start
 //! from an estimated one.
 struct SessionSpan

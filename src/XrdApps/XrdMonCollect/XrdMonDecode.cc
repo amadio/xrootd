@@ -742,6 +742,26 @@ void XrdMonDecode::NoteActive(Server& srv, uint32_t userID, double tRec)
 }
 
 /******************************************************************************/
+/*                            N o t e L o g i n                               */
+/******************************************************************************/
+
+void XrdMonDecode::NoteLogin(Server& srv, uint32_t userID, double tRec,
+                             int32_t csec)
+{
+   if (!emitSessions || !userID || tRec <= 0 || csec < 0) return;
+   auto uit = srv.users.find(userID);
+   if (uit == srv.users.end()) return;   // no session to hang it on
+
+// The server measured this duration itself, so the difference is a login time
+// in the server's own clock with no estimation anywhere. A duplicated record
+// must not be able to push the login later.
+//
+   const int32_t t = (int32_t)(tRec - (double)csec);
+   if (t > 0 && (uit->second.sLogin == 0 || t < uit->second.sLogin))
+      uit->second.sLogin = t;
+}
+
+/******************************************************************************/
 /*                          o t e l S e s s i o n                             */
 /******************************************************************************/
 
@@ -887,11 +907,15 @@ bool XrdMonDecode::SaveState(const std::string& path) const
                      {"app",  u.appName},   {"info",   u.appInfo},
                      {"site", u.site},      {"ipv",    u.ipVersion},
                      {"conn", (int64_t)u.connT}};
-           if (u.sFiles || u.sErrors)
+           // A session that has opened but not yet closed anything still knows
+           // when it began, and that is exactly the session whose start used to
+           // go missing, so the times alone are enough to write the block.
+           if (u.sFiles || u.sErrors || u.sLogin || u.sFirst)
               {json& ss = e["session"];
                ss = {{"files", u.sFiles},     {"xfers", u.sTransfers},
                      {"accs",  u.sAccesses},  {"errs",  u.sErrors},
                      {"rb",    u.sReadBytes}, {"wb",    u.sWriteBytes},
+                     {"login", u.sLogin},
                      {"first", u.sFirst},     {"last",  u.sLast}};
                json& fr = ss["recent"] = json::array();
                for (const auto& f : u.sRecent)
@@ -1039,6 +1063,7 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
                       u.sErrors     = sn->value("errs",  0u);
                       u.sReadBytes  = sn->value("rb", (int64_t)0);
                       u.sWriteBytes = sn->value("wb", (int64_t)0);
+                      u.sLogin      = sn->value("login", 0);
                       u.sFirst      = sn->value("first", 0);
                       u.sLast       = sn->value("last",  0);
                       if (auto fr = sn->find("recent"); fr != sn->end())
@@ -1906,17 +1931,21 @@ XrdMonDecode::sessionSpanOf(int32_t stod, const Server& srv, const UserInfo* u,
    const double floor = stod > 0 ? (double)stod : 0;
    auto ok = [&](double t) {return t > 0 && t >= floor && t <= s.end;};
 
+   const double login = u ? (double)u->sLogin : 0;
    const double conn  = (u && u->connT > 0)
                       ? toServerClock(srv, (double)u->connT) : 0;
    const double first = u ? (double)u->sFirst : 0;
 
-// Best evidence first. The login record's arrival is a true login, but sampled
-// from this collector's clock; the first observed activity is exact but late,
-// missing the login and the authentication that precede it. When both are
-// admissible the earlier wins: the login precedes any activity by definition,
-// and admission has already bounded it.
+// Best evidence first. The trace stream's disconnect carries the server's own
+// connect duration, so it needs no estimation at all; the login record's
+// arrival is a true login, but sampled from this collector's clock; the first
+// observed activity is exact but late, missing the login and the authentication
+// that precede it. When the middle two are both admissible the earlier wins:
+// the login precedes any activity by definition, and admission has already
+// bounded it.
 //
-   if      (ok(conn) && ok(first)) {s.beg = std::min(conn, first);
+   if      (ok(login))            {s.beg = login; s.src = "login";}
+   else if (ok(conn) && ok(first)) {s.beg = std::min(conn, first);
                                     s.src = conn <= first ? "connect"
                                                           : "first_activity";}
    else if (ok(conn))             {s.beg = conn;  s.src = "connect";}
@@ -2384,6 +2413,15 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
 
         if (disc == XROOTD_MON_WINDOW) continue;
 
+// A disconnect here carries the connect duration the server measured itself,
+// which dates the session's login exactly and in the server's own clock. Take
+// it before the emission gate: it costs a subtraction and a lookup, and the
+// session document it improves is produced from the f stream, which a site can
+// well be running without the (much higher volume) trace emission.
+//
+        if (disc == XROOTD_MON_DISC)
+           NoteLogin(srv, rd32(a2), tRec, ri32(a1));
+
         if (!traces) continue;   // only counting unless trace emission is on
 
         json j;
@@ -2427,8 +2465,17 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
                  break;
             case XROOTD_MON_DISC:
                  {ev = "xrootd.disconnect";
-                  a["xrootd.session.duration"] = ri32(a1);
                   discUser = rd32(a2);
+                  // The connect duration bounds the session at both ends, so
+                  // report them the same way the session document does -- same
+                  // keys, same types, so the two producers do not disagree.
+                  const int32_t csec = ri32(a1);
+                  const double  beg  = tRec - (double)csec;
+                  if (csec >= 0 && tRec > 0)
+                     {if (beg > 0) a["xrootd.session.start_time"] = isoTime(beg);
+                      a["xrootd.session.end_time"] = isoTime(tRec);
+                     }
+                  a["xrootd.session.duration"] = csec < 0 ? 0.0 : (double)csec;
                   otelIdentity(a, srv, discUser);
                  }
                  break;

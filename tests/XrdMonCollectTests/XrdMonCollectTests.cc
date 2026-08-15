@@ -1867,6 +1867,13 @@ TEST(XrdMonCollect, SessionDiscAndActiveGauge)
 // The session document and its root span begin at the login (the 'u' map
 // record's arrival, sent by the server at connect time), not at the first
 // file close, so the trace covers the whole session.
+//
+// The collector clock is driven explicitly: the login is stamped when the 'u'
+// map is decoded and the rest of the session arrives over the following minute,
+// which is what lets the login be the earliest thing known about the session.
+// Decoding the whole session in one instant (as a test without a clock does)
+// leaves the collector unable to tell the login from the first activity, and it
+// then reports the tighter of the two -- see SessionStartsAtFirstActivity.
 TEST(XrdMonCollect, SessionStartsAtLogin)
 {
   std::vector<std::string> docs;
@@ -1875,6 +1882,8 @@ TEST(XrdMonCollect, SessionStartsAtLogin)
   dec.SetEmitSpans(true);
 
   const time_t now = time(nullptr);   // login stamped on the map's arrival
+  time_t clock = now;
+  dec.SetClock([&]{ return clock; });
 
   { W body; body.u32(7);
     std::string info = "xroot/bob.1:2@cli.example.org\n";
@@ -1883,7 +1892,9 @@ TEST(XrdMonCollect, SessionStartsAtLogin)
     auto pkt = packet('u', kStod, pl);
     dec.Process("h:1", (const char*)pkt.data(), pkt.size()); }
 
-  // Open at now+10, close at now+30 (folds into the session), disc at now+60.
+  // Open at now+10, close at now+30 (folds into the session), disc at now+60,
+  // each packet arriving when its window ends (server and collector agree).
+  clock = now + 10;
   { W body; body.u32(100); body.u64(1000); body.u32(7);
     std::string lfn = "/store/f.root"; body.raw(lfn); body.u8(0);
     auto payload = todRec((int32_t)(now + 10), 42);
@@ -1891,12 +1902,14 @@ TEST(XrdMonCollect, SessionStartsAtLogin)
     payload.insert(payload.end(), r.begin(), r.end());
     auto pkt = packet('f', kStod, payload);
     dec.Process("h:1", (const char*)pkt.data(), pkt.size()); }
+  clock = now + 30;
   { W body; body.u32(100); body.u64(1000); body.u64(0); body.u64(0);
     auto payload = todRec((int32_t)(now + 30), 42);
     auto r = rec(0 /*isClose*/, 0, body.b);
     payload.insert(payload.end(), r.begin(), r.end());
     auto pkt = packet('f', kStod, payload);
     dec.Process("h:1", (const char*)pkt.data(), pkt.size()); }
+  clock = now + 60;
   { W disc; disc.u32(7);
     auto payload = todRec((int32_t)(now + 60), 42);
     auto dr = rec(4 /*isDisc*/, 0, disc.b);
@@ -1917,21 +1930,298 @@ TEST(XrdMonCollect, SessionStartsAtLogin)
   ASSERT_TRUE(haveSess);
   ASSERT_TRUE(haveSpan);
 
-  // Duration spans login -> disconnect (~60s; the login stamp may lag the
-  // captured `now` by a second), not first close -> last close (which would
-  // be 0 here: only one close was folded).
-  double dur = sess["attributes"]["xrootd.session.duration"].get<double>();
-  EXPECT_GE(dur, 58.0);
-  EXPECT_LE(dur, 62.0);
-  EXPECT_EQ(sess["attributes"]["xrootd.session.end_time"],
-            isoOf(now + 60));
+  // Duration spans login -> disconnect (60s), not first close -> last close
+  // (which would be 0 here: only one close was folded), nor first open ->
+  // disconnect (50s), and the document says which of those it is.
+  EXPECT_EQ(sess["attributes"]["xrootd.session.start_time"], isoOf(now));
+  EXPECT_EQ(sess["attributes"]["xrootd.session.duration"].get<double>(), 60.0);
+  EXPECT_EQ(sess["attributes"]["xrootd.session.end_time"], isoOf(now + 60));
+  EXPECT_EQ(sess["attributes"]["xrootd.session.start_time_source"], "connect");
 
   // The root span covers the same login -> disconnect range.
   uint64_t sBeg = std::stoull(span["startTimeUnixNano"].get<std::string>());
   uint64_t sEnd = std::stoull(span["endTimeUnixNano"].get<std::string>());
   EXPECT_EQ(sEnd, (uint64_t)(now + 60) * 1000000000ULL);
-  EXPECT_GE(sEnd - sBeg, 58000000000ULL);
-  EXPECT_LE(sEnd - sBeg, 62000000000ULL);
+  EXPECT_EQ(sBeg, (uint64_t)now * 1000000000ULL);
+}
+
+namespace {
+// Defined with the other session helpers below (same anonymous namespace).
+void feedUserN(XrdMonDecode& dec, const std::string& src, uint32_t dictid);
+
+// Pull the session log document (not its span) out of a decoder's output.
+json sessionDoc(const std::vector<std::string>& docs)
+{
+   for (const auto& d : docs)
+      {json x = json::parse(d);
+       if (!x.contains("kind") && x.contains("attributes")
+       &&  x["attributes"].value("event.name", std::string()) == "xrootd.session")
+          return x;
+      }
+   return json();
+}
+
+// The session span (the trace root), which carries the same resolved bounds.
+json sessionSpan(const std::vector<std::string>& docs)
+{
+   for (const auto& d : docs)
+      {json x = json::parse(d);
+       if (x.contains("kind") && x.value("name", std::string()) == "session")
+          return x;
+      }
+   return json();
+}
+
+// One 'f' packet: a TOD window ending at `win` followed by `body` records.
+void feedF(XrdMonDecode& dec, const std::string& src, int32_t win,
+           const std::vector<unsigned char>& body)
+{
+   auto payload = todRec(win, 42);
+   payload.insert(payload.end(), body.begin(), body.end());
+   auto pkt = packet('f', kStod, payload);
+   dec.Process(src, (const char*)pkt.data(), pkt.size());
+}
+
+std::vector<unsigned char> openRec(uint32_t fileID, uint32_t user,
+                                   const std::string& lfn)
+{
+   W b; b.u32(fileID); b.u64(1000); b.u32(user); b.raw(lfn); b.u8(0);
+   return rec(1 /*isOpen*/, 0x03, b.b);
+}
+
+std::vector<unsigned char> closeRec(uint32_t fileID)
+{
+   W b; b.u32(fileID); b.u64(1000); b.u64(0); b.u64(0);
+   return rec(0 /*isClose*/, 0, b.b);
+}
+
+std::vector<unsigned char> discRec(uint32_t user)
+{
+   W b; b.u32(user);
+   return rec(4 /*isDisc*/, 0, b.b);
+}
+}
+
+// The reported failure: the collector's clock runs far ahead of the reporting
+// server's and the session closed no files, so the login stamp used to be
+// discarded outright and the document went out with no start time at all (and
+// the root span with no startTimeUnixNano, which is not a valid OTLP span).
+// The login is now translated into the server's clock instead of being dropped.
+TEST(XrdMonCollect, SessionStartTimeAlwaysPresent)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetEmitSessions(true);
+  dec.SetEmitSpans(true);
+
+  feedUserN(dec, "h:1", 7);            // stamped on the real (2020s) clock
+  feedF(dec, "h:1", kOpenT, discRec(7));   // server windows back in 2023
+
+  json j = sessionDoc(docs);
+  ASSERT_FALSE(j.is_null());
+  const json& a = j["attributes"];
+  ASSERT_TRUE(a.contains("xrootd.session.start_time")) << j.dump();
+  ASSERT_TRUE(a.contains("xrootd.session.end_time"));
+  ASSERT_TRUE(a.contains("xrootd.session.duration"));
+  EXPECT_GE(a["xrootd.session.duration"].get<double>(), 0.0);
+  // The login lands on the server's clock, not two years into its future.
+  EXPECT_EQ(a["xrootd.session.start_time"], isoOf(kOpenT));
+  EXPECT_EQ(a["xrootd.session.start_time_source"], "connect");
+
+  json sp = sessionSpan(docs);
+  ASSERT_FALSE(sp.is_null());
+  ASSERT_TRUE(sp.contains("startTimeUnixNano")) << sp.dump();
+  EXPECT_LE(std::stoull(sp["startTimeUnixNano"].get<std::string>()),
+            std::stoull(sp["endTimeUnixNano"].get<std::string>()));
+}
+
+// A disconnect for a dictid whose 'u' map was never seen (lost datagram, user
+// monitoring off, entry evicted) still yields a complete session document: the
+// rollup reads as zero rather than the whole xrootd.session.* block vanishing,
+// and the start falls back to the disconnect itself.
+TEST(XrdMonCollect, SessionSurvivesLostUserMap)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetEmitSessions(true);
+  dec.SetEmitSpans(true);
+
+  feedF(dec, "h:1", kCloseT, discRec(7));   // no 'u' map for dictid 7
+
+  json j = sessionDoc(docs);
+  ASSERT_FALSE(j.is_null());
+  const json& a = j["attributes"];
+  EXPECT_EQ(a["xrootd.session.files"], 0);
+  EXPECT_EQ(a["xrootd.session.transfers"], 0);
+  EXPECT_EQ(a["xrootd.session.accesses"], 0);
+  EXPECT_EQ(a["xrootd.session.start_time"], isoOf(kCloseT));
+  EXPECT_EQ(a["xrootd.session.end_time"],   isoOf(kCloseT));
+  EXPECT_EQ(a["xrootd.session.duration"].get<double>(), 0.0);
+  EXPECT_EQ(a["xrootd.session.start_time_source"], "disconnect");
+
+  ASSERT_TRUE(sessionSpan(docs).contains("startTimeUnixNano"));
+}
+
+// When the login stamp is not the earliest thing known about a session, the
+// first *activity* dates it -- and that is the open, not the close: an open
+// precedes its close by the whole transfer.
+TEST(XrdMonCollect, SessionStartsAtFirstActivity)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetEmitSessions(true);
+
+  const time_t now = time(nullptr);
+  time_t clock = now;
+  dec.SetClock([&]{ return clock; });
+
+  // Activity is reported before the 'u' map arrives (a retransmitted login),
+  // so the login stamp postdates the session's first observed record.
+  const int32_t W = (int32_t)now;
+  feedF(dec, "h:1", W, openRec(100, 7, "/store/f.root"));
+  clock = now + 50;
+  feedUserN(dec, "h:1", 7);                       // connT = now + 50
+  clock = now + 60;
+  feedF(dec, "h:1", W + 60, closeRec(100));
+  clock = now + 100;
+  feedF(dec, "h:1", W + 100, discRec(7));
+
+  json j = sessionDoc(docs);
+  ASSERT_FALSE(j.is_null());
+  const json& a = j["attributes"];
+  EXPECT_EQ(a["xrootd.session.start_time_source"], "first_activity");
+  EXPECT_EQ(a["xrootd.session.start_time"], isoOf(W));        // the open...
+  EXPECT_NE(a["xrootd.session.start_time"], isoOf(W + 60));   // ...not the close
+  EXPECT_EQ(a["xrootd.session.duration"].get<double>(), 100.0);
+}
+
+// The login stamp comes off this collector's clock while every other session
+// time comes off the reporting server's. Translating between them is what makes
+// the login usable; without it a skewed server loses the start entirely.
+TEST(XrdMonCollect, SessionClockSkewTranslatesLoginTime)
+{
+  for (int32_t skew : {(int32_t)100000, (int32_t)-100000})
+     {std::vector<std::string> docs;
+      XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+      dec.SetEmitSessions(true);
+
+      const time_t now = time(nullptr);
+      time_t clock = now;
+      dec.SetClock([&]{ return clock; });
+
+      feedUserN(dec, "h:1", 7);                     // connT = now
+      clock = now + 10;
+      feedF(dec, "h:1", (int32_t)now + 10 + skew, openRec(100, 7, "/f.root"));
+      clock = now + 60;
+      feedF(dec, "h:1", (int32_t)now + 60 + skew, discRec(7));
+
+      json j = sessionDoc(docs);
+      ASSERT_FALSE(j.is_null()) << "skew " << skew;
+      const json& a = j["attributes"];
+      EXPECT_EQ(a["xrootd.session.start_time_source"], "connect") << "skew " << skew;
+      EXPECT_EQ(a["xrootd.session.start_time"], isoOf(now + skew)) << "skew " << skew;
+      EXPECT_EQ(a["xrootd.session.end_time"],   isoOf(now + 60 + skew));
+      EXPECT_EQ(a["xrootd.session.duration"].get<double>(), 60.0) << "skew " << skew;
+     }
+}
+
+// The window end is seen after a delay that is never negative, so it is a lower
+// bound on the offset and the running maximum converges on it. A mean would sit
+// a whole batching interval low and a minimum would track the worst delay.
+TEST(XrdMonCollect, ClockOffsetTracksMaximumNotMean)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetEmitSessions(true);
+
+  const time_t now = time(nullptr);
+  dec.SetClock([&]{ return now; });      // collector clock stands still
+
+  feedUserN(dec, "h:1", 7);              // connT = now
+  // Windows observed 10s, 5s and 10s ahead: offset is 10, not 5 and not ~8.3.
+  feedF(dec, "h:1", (int32_t)now + 10, {});
+  feedF(dec, "h:1", (int32_t)now +  5, {});
+  feedF(dec, "h:1", (int32_t)now + 10, discRec(7));
+
+  json j = sessionDoc(docs);
+  ASSERT_FALSE(j.is_null());
+  const json& a = j["attributes"];
+  EXPECT_EQ(a["xrootd.session.start_time_source"], "connect");
+  EXPECT_EQ(a["xrootd.session.start_time"], isoOf(now + 10));
+  EXPECT_EQ(a["xrootd.session.duration"].get<double>(), 0.0);
+}
+
+// An 'f' packet whose TOD was lost leaves every record in it with no time. The
+// session still has to be dated, or the document goes out with no @timestamp
+// and the span with no start.
+TEST(XrdMonCollect, SessionWithoutTodStillTimestamped)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetEmitSessions(true);
+  dec.SetEmitSpans(true);
+
+  const time_t now = time(nullptr);
+  dec.SetClock([&]{ return now; });
+
+  feedUserN(dec, "h:1", 7);
+  { auto payload = discRec(7);           // no TOD record in the packet
+    auto pkt = packet('f', kStod, payload);
+    dec.Process("h:1", (const char*)pkt.data(), pkt.size()); }
+
+  json j = sessionDoc(docs);
+  ASSERT_FALSE(j.is_null());
+  EXPECT_TRUE(j.contains("@timestamp"));
+  EXPECT_TRUE(j.contains("timeUnixNano"));
+  const json& a = j["attributes"];
+  EXPECT_EQ(a["xrootd.session.start_time"], isoOf(now));
+  EXPECT_EQ(a["xrootd.session.end_time"],   isoOf(now));
+  ASSERT_TRUE(sessionSpan(docs).contains("startTimeUnixNano"));
+}
+
+// Whatever the inputs, a session document always carries the three time fields,
+// the start never follows the end, and the duration is exactly their difference.
+TEST(XrdMonCollect, SessionStartNeverAfterEnd)
+{
+  struct Case {const char* name; bool user; bool activity; int32_t skew;};
+  const Case cases[] = {
+     {"no user map",        false, false,       0},
+     {"login only",         true,  false,       0},
+     {"login and activity", true,  true,        0},
+     {"server far behind",  true,  true,  -200000},
+     {"server far ahead",   true,  true,   200000},
+  };
+
+  for (const Case& c : cases)
+     {std::vector<std::string> docs;
+      XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+      dec.SetEmitSessions(true);
+
+      const time_t now = time(nullptr);
+      time_t clock = now;
+      dec.SetClock([&]{ return clock; });
+
+      if (c.user) feedUserN(dec, "h:1", 7);
+      if (c.activity)
+         {clock = now + 10;
+          feedF(dec, "h:1", (int32_t)now + 10 + c.skew,
+                openRec(100, 7, "/f.root"));
+         }
+      clock = now + 60;
+      feedF(dec, "h:1", (int32_t)now + 60 + c.skew, discRec(7));
+
+      json j = sessionDoc(docs);
+      ASSERT_FALSE(j.is_null()) << c.name;
+      const json& a = j["attributes"];
+      ASSERT_TRUE(a.contains("xrootd.session.start_time")) << c.name;
+      ASSERT_TRUE(a.contains("xrootd.session.end_time"))   << c.name;
+      ASSERT_TRUE(a.contains("xrootd.session.duration"))   << c.name;
+      const std::string beg = a["xrootd.session.start_time"];
+      const std::string end = a["xrootd.session.end_time"];
+      EXPECT_FALSE(beg.empty()) << c.name;
+      EXPECT_LE(beg, end) << c.name;   // ISO-8601 UTC sorts lexicographically
+      EXPECT_GE(a["xrootd.session.duration"].get<double>(), 0.0) << c.name;
+     }
 }
 
 // A leaked open with no disconnect (its user map was lost too) is expired by
@@ -2497,6 +2787,43 @@ TEST_F(StateFile, CloseCorrelatesAfterReload)
   EXPECT_EQ(s.opens, 1u);       // stats restored from the snapshot...
   EXPECT_EQ(s.closes, 1u);      // ...and advanced by the post-reload close
   EXPECT_EQ(s.orphanCls, 0u);
+}
+
+// The clock offset describes this collector and this server incarnation, so it
+// is still valid after a restart -- and it has to survive, or a disconnect
+// arriving before the first new window would have its login mistranslated.
+TEST_F(StateFile, ClockOffsetSurvivesReload)
+{
+  const time_t now = time(nullptr);
+  const int32_t skew = 100000;
+
+  time_t clock = now;
+  dec.SetClock([&]{ return clock; });
+  dec.SetEmitSessions(true);
+
+  feedUserN(dec, "h:1", 7);                                  // connT = now
+  clock = now + 10;
+  feedF(dec, "h:1", (int32_t)now + 10 + skew, {});           // offset acquired
+  ASSERT_TRUE(dec.SaveState(path));
+
+  std::vector<std::string> docs;
+  XrdMonDecode dec2([&](const std::string& d){ docs.push_back(d); });
+  dec2.SetEmitSessions(true);
+  time_t clock2 = now + 60;
+  dec2.SetClock([&]{ return clock2; });
+  std::string note;
+  ASSERT_TRUE(dec2.LoadState(path, 900, note));
+
+  // The disconnect is the first packet after the restart, so the restored
+  // offset is the only thing that can place the login on the server's clock.
+  feedF(dec2, "h:1", (int32_t)now + 60 + skew, discRec(7));
+
+  json j = sessionDoc(docs);
+  ASSERT_FALSE(j.is_null());
+  const json& a = j["attributes"];
+  EXPECT_EQ(a["xrootd.session.start_time_source"], "connect");
+  EXPECT_EQ(a["xrootd.session.start_time"], isoOf(now + skew));
+  EXPECT_EQ(a["xrootd.session.duration"].get<double>(), 60.0);
 }
 
 TEST_F(StateFile, StaleSnapshotStartsFresh)

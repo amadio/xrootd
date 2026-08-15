@@ -159,6 +159,15 @@ void SetEmitSessions(bool v) {emitSessions = v;}
 //! rollup, so it is only meaningful together with SetEmitSessions.
 void SetEmitSpans(bool v) {emitSpans = v;}
 
+//! Override the wall clock the decoder samples. Map records carry no time of
+//! their own, so their arrival has to be timed here; the same clock anchors the
+//! per-incarnation offset estimate (NoteClock) and the `observedTime` of every
+//! document. Replaying a captured stream against the real clock therefore dates
+//! it as if it had just arrived — supply the capture's clock instead. Tests use
+//! this to drive sessions whose login and disconnect are hours apart. Passing an
+//! empty function restores time(nullptr).
+void SetClock(std::function<time_t()> f) {nowFn = std::move(f);}
+
 //! Load a SciTags registry (scitags.org schema: a top-level "experiments"
 //! array of {expId, expName, activities:[{activityId, activityName}]}). When
 //! loaded, the numeric SciTags experiment/activity ids carried on the 'U'
@@ -289,7 +298,10 @@ struct UserInfo
    uint32_t sErrors     = 0;  // closes that ended in error
    int64_t  sReadBytes  = 0;  // read + readv bytes across the session
    int64_t  sWriteBytes = 0;  // write bytes across the session
-   int32_t  sFirst      = 0;  // window time of the first folded close
+   int32_t  sFirst      = 0;  // earliest server-reported time of any record
+                              // naming this session (open, transfer snapshot,
+                              // close or error): the session's first observed
+                              // activity, which bounds the login from above
    int32_t  sLast       = 0;  // window time of the most recent folded close
    std::deque<FileSummary> sRecent;  // capped most-recent file summaries
 
@@ -405,11 +417,26 @@ struct Server
    // counters as permanent phantom gaps.
    std::unordered_map<std::string, int> lastPseq;
    time_t  lastSeen = 0;     // wall-clock of the last packet (for idle reaping)
+   // Offset from this collector's clock to the reporting server's, in seconds:
+   // serverTime ~= collectorTime + clkOff (0 also means "assume synchronised").
+   // Map records carry no time of their own, so a login can only be stamped
+   // with the collector's clock; this converts that stamp into the clock the
+   // f/t-stream window times are expressed in. See NoteClock.
+   int32_t clkOff = 0;
+   time_t  clkAt  = 0;       // when the current estimate was taken
    bool    sawXfr = false;   // this incarnation reports in-flight snapshots
                              // ("xfr" configured), so the file TTL is safe
 };
 
 Server&  ServerFor(const std::string& src, int32_t stod);
+//! The decoder's view of the wall clock (see SetClock).
+time_t   Now() const {return nowFn ? nowFn() : time(nullptr);}
+//! Fold one f-stream window end into the incarnation's clock-offset estimate.
+void     NoteClock(Server& srv, int32_t tEnd);
+//! Convert a time sampled from this collector's clock into the reporting
+//! server's, using the offset NoteClock maintains.
+double   toServerClock(const Server& srv, double t) const
+            {return t + (double)srv.clkOff;}
 //! Count one structural problem in a packet from `src`: bumps the aggregate
 //! stats.malformed and the labeled malformed_total{server,stream,reason}
 //! metric series (stream is derived from the header code byte).
@@ -543,12 +570,38 @@ std::string otelIdentity(nlohmann::json& attrs, const Server& srv,
 void     foldSession(Server& srv, uint32_t userID, const std::string& lfn,
                      int64_t bytes, bool write, bool whole, bool error,
                      int32_t tWin);
+//! Record the earliest server-reported activity seen for a session, from any
+//! record that names its user dictid. No-op when the dictid is unknown.
+void     NoteActive(Server& srv, uint32_t userID, double tRec);
+
+//! A session's resolved bounds, in the reporting server's clock, plus how the
+//! begin was arrived at. `src` is one of "connect" (the login record's
+//! arrival, translated out of this collector's clock), "first_activity" (the
+//! earliest record naming the session) or "disconnect" (nothing else was
+//! available, so the session is reported as an instant). It is emitted as
+//! xrootd.session.start_time_source so a consumer can tell a measured start
+//! from an estimated one.
+struct SessionSpan
+{
+   double      beg = 0;
+   double      end = 0;
+   const char* src = "disconnect";
+};
+
+//! Resolve a session's bounds at its disconnect. Always returns a usable pair
+//! with `beg <= end`: candidates are admitted only inside [stod, end], the
+//! incarnation's own start time being a floor no session can predate, and the
+//! disconnect itself is the last resort. `u` may be null when the login record
+//! was never seen (or has been evicted).
+SessionSpan sessionSpanOf(int32_t stod, const Server& srv, const UserInfo* u,
+                          double tRec) const;
+
 //! Fill the xrootd.session.* attributes (totals plus the capped recent-file
 //! list) into the event `attributes` object from a user's session rollup.
-//! Fill the session rollup attributes. `sBeg`/`sEnd` bound the session
-//! (login/connect to disconnect, as resolved by EmitDisc); `sEnd` falls back
-//! to the last folded close when 0.
-void     otelSession(nlohmann::json& attrs, const UserInfo& u, double sBeg,
+//! `sBeg`/`sEnd` come from sessionSpanOf and are always emitted, so the
+//! session start, end and duration are present on every session document.
+//! `u` may be null: the rollup then reads as zero rather than being omitted.
+void     otelSession(nlohmann::json& attrs, const UserInfo* u, double sBeg,
                      double sEnd);
 
 std::unordered_map<std::string, Server> servers;
@@ -558,6 +611,7 @@ std::unordered_map<std::string, Server> servers;
 std::unordered_map<std::string, uint64_t> gsPrev;
 DocSink  doc;
 RawSink  raw;
+std::function<time_t()> nowFn;   // wall-clock source; empty = time(nullptr)
 bool     dumpRaw;
 bool     traces;
 bool     gstream;

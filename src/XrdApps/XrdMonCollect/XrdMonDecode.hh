@@ -38,6 +38,8 @@
 
 namespace XrdMetrics { class Subsystem; }
 
+class XrdMonFilter;
+
 //-----------------------------------------------------------------------------
 //! XrdMonDecode decodes XRootD detailed-monitoring UDP packets
 //! (xrootd.monitor) and correlates the "f" (file-stats) stream against the
@@ -77,6 +79,8 @@ struct Stats
    uint64_t xfrs      = 0;   // 'f' in-flight transfer snapshot records
    uint64_t discs     = 0;   // 'f' session disconnect records
    uint64_t docs      = 0;   // transfer documents emitted
+   uint64_t filtered  = 0;   // documents of any type suppressed by a filter
+                             // rule before reaching the sink
    uint64_t failed    = 0;   // 'f' failed/aborted operation records (isError +
                              // hasERR closes)
    uint64_t orphanCls = 0;   // closes with no matching open
@@ -223,6 +227,16 @@ bool LoadState(const std::string& path, long maxAgeSec, std::string& note);
 //! Returns false (leaving no pattern set) when the expression does not
 //! compile.
 bool SetDatasetRegex(const std::string& pattern);
+
+//! Attach a document filter, applied to each finished document immediately
+//! before it is handed to the sink: a matching rule either tags the document
+//! with a label or suppresses it entirely. Everything upstream of the emission
+//! — correlation state, the session rollups and the Prometheus aggregation —
+//! runs regardless, so filtering changes what is exported, never what is
+//! measured. The filter must outlive the decoder and must not be modified once
+//! attached (it is read from the decode thread without locking). A null
+//! pointer disables filtering.
+void SetFilter(const XrdMonFilter* f) {filter = f;}
 
 private:
 
@@ -562,6 +576,13 @@ void     otelBegin(nlohmann::json& j, const char* eventName, double tSecs,
 //! enabled.
 void     emitSpan(const nlohmann::json& src, const char* name, double tBeg,
                   double tEnd, const std::string& parentSpanId);
+//! Serialize one finished document and hand it to the sink, applying the
+//! filter first: a matching rule may tag `j` in place or suppress it. The
+//! single emission funnel for every document the decoder produces.
+//! @return true when the document reached the sink. Callers guard the
+//!         companion emitSpan() on this, so a suppressed log never leaves a
+//!         parentless span behind.
+bool     emitDoc(nlohmann::json& j);
 //! Fill the identity attributes (user.*, client.*, wlcg.*, xrootd.*) into the
 //! event `attributes` object from the user dictionary entry (and the token and
 //! activity streams keyed by the same dictid). Returns the resolved VO (token
@@ -627,6 +648,7 @@ bool     traces;
 bool     gstream;
 bool     redirects;
 XrdMetrics::Subsystem* metrics;
+const XrdMonFilter*    filter = nullptr;  // document filter (see SetFilter)
 
 // Process-wide LRU index over all evictable correlation entries, bounding the
 // resident state by an approximate byte budget (maxBytes; 0 = unbounded) with

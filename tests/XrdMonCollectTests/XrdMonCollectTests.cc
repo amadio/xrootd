@@ -2129,6 +2129,49 @@ TEST(XrdMonCollect, SessionAggregatesFileActivity)
   EXPECT_EQ(json::parse(docs[2])["attributes"]["xrootd.transfer.kind"], "access");
 }
 
+// A 'u' map re-sent for a dictid whose session is already under way is a
+// retransmit of the same login (the server mints dictids from a monotonic
+// counter), so it must refresh the identity without discarding the rollup or
+// the set of files still awaiting their close.
+TEST(XrdMonCollect, RepeatedUserMapKeepsSessionState)
+{
+  XrdMetrics::Collector collector("xrootd");
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); }, nullptr,
+                   false, false, false, false, &collector.subsystem("collector"));
+  dec.SetEmitSessions(true);
+
+  feedUserN(dec, "h:1", 7);
+  openClose(dec, "h:1", 1, 7, 1000, 1000, 0, "/a.root");   // folds one file
+
+  // A second file is opened and left open: it lives in the user's openFiles.
+  { W body; body.u32(2); body.u64(1000); body.u32(7);
+    std::string lfn = "/b.root"; body.raw(lfn); body.u8(0);
+    auto payload = todRec(kOpenT, 42);
+    auto r = rec(1 /*isOpen*/, 0x01 | 0x02, body.b);
+    payload.insert(payload.end(), r.begin(), r.end());
+    auto pkt = packet('f', kStod, payload);
+    dec.Process("h:1", (const char*)pkt.data(), pkt.size()); }
+
+  feedUserN(dec, "h:1", 7);                                // the retransmit
+  feedDisc(dec, "h:1", 7);
+
+  json j = json::parse(docs.back());
+  EXPECT_EQ(j["attributes"]["event.name"], "xrootd.session");
+  EXPECT_EQ(j["attributes"]["user.name"], "u7");           // identity refreshed
+  EXPECT_EQ(j["attributes"]["xrootd.session.files"], 1);   // rollup survived
+  ASSERT_TRUE(j["attributes"].contains("xrootd.session.recent_files"));
+  ASSERT_EQ(j["attributes"]["xrootd.session.recent_files"].size(), 1u);
+  EXPECT_EQ(j["attributes"]["xrootd.session.recent_files"][0]["file.path"], "/a.root");
+
+  // openFiles survived too, so the disconnect still sweeps the leaked open
+  // instead of stranding it in the file table.
+  std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
+  EXPECT_NE(out.find("xrootd_collector_stale_opens_total{server=\"h:1\"} 1"),
+            std::string::npos) << out;
+  EXPECT_EQ(dec.GetStats().staleOpens, 1u);
+}
+
 // The recent-file list is capped while the running totals cover every file.
 TEST(XrdMonCollect, SessionRecentFilesCapped)
 {

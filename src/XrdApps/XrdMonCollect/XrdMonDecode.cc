@@ -200,6 +200,12 @@ bool wholeFileClose(bool haveOpen, int64_t fsz, int64_t rdBytes,
 // list is bounded, keeping a long-lived session's memory in check.
 constexpr std::size_t kSessionFilesMax = 64;
 
+// How long a clock-offset estimate is held before it is re-acquired from
+// scratch (see NoteClock). Long enough that the running maximum sees many
+// packets, short enough that a stepped or drifting server clock cannot leave a
+// stale extreme in place indefinitely.
+constexpr long kClockWindow = 3600;
+
 // FNV-1a hash used to synthesize deterministic OpenTelemetry trace/span ids from
 // the monitoring stream's own correlation keys (server incarnation, user dictid,
 // file id). Deterministic ids let a downstream tracing backend stitch a client
@@ -432,7 +438,7 @@ XrdMonDecode::Server& XrdMonDecode::ServerFor(const std::string& src,
    key += '|';
    key += std::to_string(stod);
    Server& srv = servers[key];
-   srv.lastSeen = time(nullptr);   // for idle-incarnation reaping
+   srv.lastSeen = Now();   // for idle-incarnation reaping
 
 // Record the sender's hostname once per server incarnation (cached in the
 // Server), so the per-document otelResource() stays lookup-free. Only a loopback
@@ -501,7 +507,7 @@ void XrdMonDecode::otelBegin(json& j, const char* eventName, double tSecs,
       {j["@timestamp"]   = isoTime(tSecs);
        j["timeUnixNano"] = unixNano(tSecs);
       }
-   j["observedTimeUnixNano"] = unixNano((int64_t)time(nullptr));
+   j["observedTimeUnixNano"] = unixNano((int64_t)Now());
    j["severityNumber"] = error ? 17 : 9;               // OTel SeverityNumber
    j["severityText"]   = error ? "ERROR" : "INFO";
    // The event name lives in the top-level EventName LogRecord field (its
@@ -703,7 +709,6 @@ void XrdMonDecode::foldSession(Server& srv, uint32_t userID,
    if (whole) u.sTransfers++; else u.sAccesses++;
    if (error) u.sErrors++;
    if (write) u.sWriteBytes += bytes; else u.sReadBytes += bytes;
-   if (u.sFirst == 0 || (tWin > 0 && tWin < u.sFirst)) u.sFirst = tWin;
    if (tWin > u.sLast) u.sLast = tWin;
 
    u.sRecent.push_back(UserInfo::FileSummary{lfn, bytes, write, whole});
@@ -717,28 +722,54 @@ void XrdMonDecode::foldSession(Server& srv, uint32_t userID,
 }
 
 /******************************************************************************/
+/*                           N o t e A c t i v e                              */
+/******************************************************************************/
+
+void XrdMonDecode::NoteActive(Server& srv, uint32_t userID, double tRec)
+{
+   if (!emitSessions || !userID || tRec <= 0) return;
+   auto uit = srv.users.find(userID);
+   if (uit == srv.users.end()) return;
+
+// The session was demonstrably alive at this record, so it bounds the login
+// from above. An open is the earliest thing the f stream reports for a file
+// and precedes its close by the whole transfer, which is why this is tracked
+// over every record naming the session rather than over closes alone.
+//
+   const int32_t t = (int32_t)tRec;
+   if (uit->second.sFirst == 0 || t < uit->second.sFirst)
+      uit->second.sFirst = t;
+}
+
+/******************************************************************************/
 /*                          o t e l S e s s i o n                             */
 /******************************************************************************/
 
-void XrdMonDecode::otelSession(json& a, const UserInfo& u, double sBeg,
+void XrdMonDecode::otelSession(json& a, const UserInfo* u, double sBeg,
                                double sEnd)
 {
-   a["xrootd.session.files"]     = u.sFiles;
-   a["xrootd.session.transfers"] = u.sTransfers;
-   a["xrootd.session.accesses"]  = u.sAccesses;
-   if (u.sErrors)     a["xrootd.session.errors"]      = u.sErrors;
-   if (u.sReadBytes)  a["xrootd.session.read_bytes"]  = u.sReadBytes;
-   if (u.sWriteBytes) a["xrootd.session.write_bytes"] = u.sWriteBytes;
-   if (sEnd <= 0) sEnd = (double)u.sLast;
-   if (sBeg > 0)  a["xrootd.session.start_time"]  = isoTime(sBeg);
-   if (sEnd > 0)  a["xrootd.session.end_time"]    = isoTime(sEnd);
-   if (sBeg > 0 && sEnd >= sBeg)
-      a["xrootd.session.duration"] =
-         std::round((sEnd - sBeg) * 1000.0) / 1000.0;
+// The rollup reads as zero rather than being omitted when the login record was
+// never seen: a consumer gets the same field set from every session document.
+//
+   a["xrootd.session.files"]     = u ? u->sFiles     : 0u;
+   a["xrootd.session.transfers"] = u ? u->sTransfers : 0u;
+   a["xrootd.session.accesses"]  = u ? u->sAccesses  : 0u;
+   if (u && u->sErrors)     a["xrootd.session.errors"]      = u->sErrors;
+   if (u && u->sReadBytes)  a["xrootd.session.read_bytes"]  = u->sReadBytes;
+   if (u && u->sWriteBytes) a["xrootd.session.write_bytes"] = u->sWriteBytes;
 
-   if (!u.sRecent.empty())
+// sessionSpanOf guarantees a usable, ordered pair, so the three time fields are
+// unconditional: a consumer never has to handle their absence, and the root
+// span always carries a start.
+//
+   a["xrootd.session.start_time"] = isoTime(sBeg);
+   a["xrootd.session.end_time"]   = isoTime(sEnd);
+   a["xrootd.session.duration"]   =
+      std::round(std::max(0.0, sEnd - sBeg) * 1000.0) / 1000.0;
+
+   if (u && !u->sRecent.empty())
       {json files = json::array();
-       for (const auto& f : u.sRecent)
+       for (const auto& f : u->sRecent)
           {json fj;
            fj["file.path"]            = f.lfn;
            fj["xrootd.transfer.kind"]   = f.whole ? "transfer" : "access";
@@ -836,6 +867,7 @@ bool XrdMonDecode::SaveState(const std::string& path) const
        o["sid"]  = s.sID;
        o["pseq"] = s.lastPseq;   // per-stream-class map
        o["seen"] = (int64_t)s.lastSeen;
+       o["clkoff"] = s.clkOff;
        o["resolved"] = s.resolved;
        if (!s.resolvedHost.empty()) o["rhost"]    = s.resolvedHost;
        if (!s.identRaw.empty())     o["identraw"] = s.identRaw;
@@ -962,6 +994,11 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
            if (auto ps = o.find("pseq"); ps != o.end() && ps->is_object())
               srv.lastPseq = ps->get<std::unordered_map<std::string, int>>();
            srv.lastSeen = (time_t)seen;
+           // A restored offset still describes this collector and this server
+           // incarnation, so it is usable before the first new window arrives.
+           // Restart its window here, as the file TTL clock is restarted below.
+           if (auto co = o.find("clkoff"); co != o.end())
+              {srv.clkOff = co->get<int32_t>(); srv.clkAt = Now();}
            srv.resolved = o.value("resolved", false);
            srv.resolvedHost = o.value("rhost", std::string());
            srv.identRaw     = o.value("identraw", std::string());
@@ -1025,7 +1062,7 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
                   f.user  = e.value("user", 0u);
                   f.fsz   = e.value("fsz", (int64_t)0);
                   f.tOpen = e.value("topen", 0.0);
-                  f.lastSeen = time(nullptr);   // restart the TTL clock
+                  f.lastSeen = Now();   // restart the TTL clock
                   f.rw    = e.value("rw", false);
                   uint32_t k32 = (uint32_t)std::stoul(id);
                   // Rebuild the per-user open-file index (users are restored
@@ -1447,7 +1484,7 @@ void XrdMonDecode::DecodeMap(unsigned char code, Server& srv,
    if (code == XROOTD_MON_MAPUSER)
       {stats.mapUser++;
        UserInfo u;
-       u.connT = time(nullptr);   // the map is sent at login: arrival ~ connect
+       u.connT = Now();   // the map is sent at login: arrival ~ connect
        u.raw = first;
        // Descriptor: <prot>/<user>.<pid>:<sfd>@<host>
        auto slash = first.find('/');
@@ -1594,7 +1631,7 @@ void XrdMonDecode::DecodeIdent(const std::string& src, int32_t stod,
 
    json j;
    otelResource(j, src, stod, srv);
-   otelBegin(j, "xrootd.server_ident", (int32_t)time(nullptr), false);
+   otelBegin(j, "xrootd.server_ident", (int32_t)Now(), false);
    if (doc) doc(j.dump());
 }
 
@@ -1667,6 +1704,32 @@ void XrdMonDecode::DecodeFrm(const std::string& src, int32_t stod, Server& srv,
 }
 
 /******************************************************************************/
+/*                            N o t e C l o c k                               */
+/******************************************************************************/
+
+void XrdMonDecode::NoteClock(Server& srv, int32_t tEnd)
+{
+   if (tEnd <= 0) return;
+
+// A window end was stamped by the server when it flushed the packet, and is
+// seen here after a delay d >= 0 (flight time, plus the receive loop's batching
+// before this decode). So (tEnd - now) == offset - d is a *lower* bound on the
+// true offset and the noise is one-sided: the running maximum converges on the
+// offset from below, where a minimum would track the worst delay and a moving
+// average would sit a whole batching interval low. The estimate is deliberately
+// unbounded in magnitude -- a server years out of step is exactly the case that
+// must be corrected; plausibility is enforced where the result is used, by
+// clamping candidates into the session's own [incarnation start, disconnect]
+// range, not by capping the offset here.
+//
+   const time_t now = Now();
+   const long   raw = (long)tEnd - (long)now;
+
+   if (!srv.clkAt || raw > (long)srv.clkOff || now - srv.clkAt > kClockWindow)
+      {srv.clkOff = (int32_t)raw; srv.clkAt = now;}
+}
+
+/******************************************************************************/
 /*                        D e c o d e F S t r e a m                           */
 /******************************************************************************/
 
@@ -1718,6 +1781,8 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
                          nTot    = rd16(rec + 6);
                          kRec    = 0;
                          srv.sID = ri64(rec + 16);
+                         // The window end pairs the server's clock with ours.
+                         NoteClock(srv, tWin);
                         }
                      break;
 
@@ -1727,7 +1792,7 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
                       OpenFile of;
                       of.fsz   = ri64(rec + 8);
                       of.tOpen = recTime();
-                      of.lastSeen = time(nullptr);
+                      of.lastSeen = Now();
                       of.rw    = (recFlag & XrdXrootdMonFileHdr::hasRW) != 0;
                       if (recFlag & XrdXrootdMonFileHdr::hasLFN && recSize > 20)
                          {of.user = rd32(rec + 16);
@@ -1741,6 +1806,10 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
                          {auto uit = srv.users.find(of.user);
                           if (uit != srv.users.end())
                              uit->second.openFiles.insert(fileID);
+                          // The open is the earliest thing reported for a file,
+                          // so it is the tightest bound on the session start
+                          // short of the login itself.
+                          NoteActive(srv, of.user, of.tOpen);
                          }
                       std::size_t w = bytesOf(of);
                       lruPut(&srv, Dict::Files, srv.files, fileID, fileID,
@@ -1767,7 +1836,10 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
                       auto fit = srv.files.find(fileID);
                       if (fit != srv.files.end())
                          {Touch(fit->second.lru);
-                          fit->second.lastSeen = time(nullptr);
+                          fit->second.lastSeen = Now();
+                          // Covers a session whose opens predate this decoder's
+                          // view (restored state, or an open record lost).
+                          NoteActive(srv, fit->second.user, recTime());
                          }
                      }
                      break;
@@ -1805,6 +1877,56 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
 }
 
 /******************************************************************************/
+/*                       s e s s i o n S p a n O f                            */
+/******************************************************************************/
+
+XrdMonDecode::SessionSpan
+XrdMonDecode::sessionSpanOf(int32_t stod, const Server& srv, const UserInfo* u,
+                            double tRec) const
+{
+   SessionSpan s;
+
+// The end first, since it bounds every begin candidate. The disconnect record's
+// own (interpolated) time, else the last close folded into the session, else
+// this collector's clock translated into the server's -- a session that reached
+// its disconnect always has an end.
+//
+   s.end = tRec;
+   if (s.end <= 0 && u) s.end = (double)u->sLast;
+   if (s.end <= 0) s.end = toServerClock(srv, (double)Now());
+
+// A candidate is admissible only within [incarnation start, disconnect]. The
+// header's stod is the server's own process start time, so no session it
+// reports can predate it: that makes the floor exact in the server's clock
+// rather than a guess, and it rejects both a mistranslated collector stamp and
+// a rollup restored from an older run. Because admission is the only way into
+// the result, stod <= beg <= end holds by construction and the duration cannot
+// come out negative.
+//
+   const double floor = stod > 0 ? (double)stod : 0;
+   auto ok = [&](double t) {return t > 0 && t >= floor && t <= s.end;};
+
+   const double conn  = (u && u->connT > 0)
+                      ? toServerClock(srv, (double)u->connT) : 0;
+   const double first = u ? (double)u->sFirst : 0;
+
+// Best evidence first. The login record's arrival is a true login, but sampled
+// from this collector's clock; the first observed activity is exact but late,
+// missing the login and the authentication that precede it. When both are
+// admissible the earlier wins: the login precedes any activity by definition,
+// and admission has already bounded it.
+//
+   if      (ok(conn) && ok(first)) {s.beg = std::min(conn, first);
+                                    s.src = conn <= first ? "connect"
+                                                          : "first_activity";}
+   else if (ok(conn))             {s.beg = conn;  s.src = "connect";}
+   else if (ok(first))            {s.beg = first; s.src = "first_activity";}
+   else                           {s.beg = s.end; s.src = "disconnect";}
+
+   return s;
+}
+
+/******************************************************************************/
 /*                             E m i t D i s c                                */
 /******************************************************************************/
 
@@ -1813,28 +1935,28 @@ void XrdMonDecode::EmitDisc(const std::string& src, int32_t stod, Server& srv,
 {
    if (!emitSessions) return;             // session documents disabled
 
+// Resolve the bounds once: the log attributes, the duration, the envelope
+// timestamp and the root span all have to agree, and the resolver is the only
+// thing that reconciles the collector's and the server's clocks. The user entry
+// is optional -- the login record can have been lost, evicted or never enabled
+// -- and the session is still reported when it is missing.
+//
+   auto uit = srv.users.find(userID);
+   const UserInfo*   u  = uit != srv.users.end() ? &uit->second : nullptr;
+   const SessionSpan sp = sessionSpanOf(stod, srv, u, tRec);
+
    json j;
    otelResource(j, src, stod, srv);
-   otelBegin(j, "xrootd.session", tRec, false);
+   otelBegin(j, "xrootd.session", sp.end, false);
    json& a = j["attributes"];
    otelIdentity(a, srv, userID);
 
-// Attach the session's aggregated file activity (counters plus a capped recent-
-// file list) accumulated from every close that named this user (see foldSession).
-// The session begins at the login (the 'u' map record's collector arrival) when
-// that does not contradict the server-reported activity times (clock skew,
-// state restored from an older run); else at the first folded close.
+// The session's aggregated file activity (counters plus a capped recent-file
+// list) accumulated from every close that named this user (see foldSession),
+// with the resolved bounds and the provenance of the start.
 //
-   auto uit = srv.users.find(userID);
-   double sBeg = 0;
-   if (uit != srv.users.end())
-      {const UserInfo& u = uit->second;
-       sBeg = (double)u.sFirst;
-       if (u.connT > 0 && (sBeg <= 0 || (double)u.connT <= sBeg)
-                       && (tRec <= 0 || (double)u.connT <= tRec))
-          sBeg = (double)u.connT;
-       otelSession(a, u, sBeg, tRec);
-      }
+   otelSession(a, u, sp.beg, sp.end);
+   a["xrootd.session.start_time_source"] = sp.src;
 
 // The session document is the root span of the client's trace (login ->
 // disconnect); each per-file operation carries the same traceId.
@@ -1845,15 +1967,22 @@ void XrdMonDecode::EmitDisc(const std::string& src, int32_t stod, Server& srv,
    a["session.id"] = j["traceId"];   // semconv: queryable session correlator
 
    if (metrics)
-      metrics->counterSeries("sessions_total",
-                       "client sessions ended", {{"server", src}}) += 1;
+      {metrics->counterSeries("sessions_total",
+                        "client sessions ended", {{"server", src}}) += 1;
+       // A separate series rather than a label on sessions_total, which
+       // existing dashboards already aggregate. Watching this is how an
+       // operator sees a site degrade to guessed session starts.
+       metrics->counterSeries("session_starts_total",
+                        "client sessions by how the session start was resolved",
+                        {{"server", src}, {"source", sp.src}}) += 1;
+      }
 
    if (doc) doc(j.dump());
 
-// The session span is the trace root (no parent), spanning from the login
-// (or first close, as resolved above) to this disconnect.
+// The session span is the trace root (no parent), covering the whole session as
+// resolved above.
 //
-   emitSpan(j, "session", sBeg, tRec, std::string());
+   emitSpan(j, "session", sp.beg, sp.end, std::string());
 }
 
 /******************************************************************************/
@@ -2008,6 +2137,10 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
        const int64_t moved = write ? wrBytes : rdBytes + rvBytes;
        foldSession(srv, openUser, openLfn, moved, write, whole, hasErr,
                    (int32_t)tRec);
+       // The open normally supplies the earlier bound, but a close whose open
+       // was never seen (packet lost, or the session predates this decoder)
+       // still dates the session.
+       NoteActive(srv, openUser, openTBeg > 0 ? openTBeg : tRec);
       }
 
 // Optional op-count detail (XrdXrootdMonStatOPS) when "ops" was configured.
@@ -2166,6 +2299,9 @@ void XrdMonDecode::EmitError(const std::string& src, int32_t stod, Server& srv,
        setFile(a, lfn);
        off = 12 + (int)lfn.size() + 1;       // past the lfn's terminating null
        otelIdentity(a, srv, user);
+       // A failed operation still dates the session: it happened while the
+       // client was connected, and a session may consist of nothing else.
+       NoteActive(srv, user, tRec);
       }
 
    std::string cat = otelError(a, rec + off, recSize - off);

@@ -64,4 +64,65 @@ max-memory = 64M
 EOF
 starts -c "${TMP}/ok.cfg" || fail "valid config should start the collector"
 
+# 6. A filter rule keyed on something that is not a known field is a hard error
+#    naming the key: a rule that silently matches nothing is indistinguishable
+#    from one that works, until documents go missing.
+printf '[xrdmoncollect]\nport = 9933\n[filter "x"]\nusr = alice\n' > "${TMP}/badkey.cfg"
+out=$("${BIN}" -c "${TMP}/badkey.cfg" 2>&1)
+test $? -ne 0 || fail "unknown filter key should fail"
+grep -q "usr" <<<"${out}" || fail "expected the bad key to be named, got: ${out}"
+
+# 7. A ~pattern that does not compile is rejected at start-up, not per document.
+printf '[xrdmoncollect]\nport = 9933\n[filter "x"]\nuser = ~([\n' > "${TMP}/badre.cfg"
+"${BIN}" -c "${TMP}/badre.cfg" >/dev/null 2>&1 && fail "bad regex should fail"
+
+# 8. An unnamed section, an unknown action, and a rule with no conditions (which
+#    would match every document) are all rejected.
+printf '[xrdmoncollect]\nport = 9933\n[filter]\nuser = alice\n' > "${TMP}/noname.cfg"
+"${BIN}" -c "${TMP}/noname.cfg" >/dev/null 2>&1 && fail "[filter] needs a name"
+printf '[xrdmoncollect]\nport = 9933\n[filter "x"]\nuser = a\naction = nope\n' \
+	> "${TMP}/badact.cfg"
+"${BIN}" -c "${TMP}/badact.cfg" >/dev/null 2>&1 && fail "bad action should fail"
+printf '[xrdmoncollect]\nport = 9933\n[filter "x"]\naction = drop\n' > "${TMP}/nocond.cfg"
+"${BIN}" -c "${TMP}/nocond.cfg" >/dev/null 2>&1 && fail "rule with no conditions should fail"
+
+# 9. Two rules whose names differ only in case would silently share one set of
+#    values (INIReader folds "<section>=<key>" but not the section list), so
+#    they are rejected as duplicates.
+printf '[xrdmoncollect]\nport = 9933\n[filter "x"]\nuser = a\n[filter "X"]\nuser = b\n' \
+	> "${TMP}/dup.cfg"
+"${BIN}" -c "${TMP}/dup.cfg" >/dev/null 2>&1 && fail "duplicate rule name should fail"
+
+# 10. Indented keys hit inih's multi-line continuation: everything after the
+#     first key is appended to that key's value. Report it instead of quietly
+#     loading a rule that matches nothing.
+printf '[xrdmoncollect]\nport = 9933\n[filter "x"]\n  user = daemon\n  authprot = sss\n' \
+	> "${TMP}/indent.cfg"
+out=$("${BIN}" -c "${TMP}/indent.cfg" 2>&1)
+test $? -ne 0 || fail "indented filter keys should fail"
+grep -q "column 1" <<<"${out}" || fail "expected the column-1 hint, got: ${out}"
+
+# 11. A valid rule set loads, is reported at start-up, and the collector runs.
+cat > "${TMP}/filter.cfg" <<EOF
+[xrdmoncollect]
+port = 9934
+[filter "eos-internal"]
+user     = daemon, root, ~^[0-9]+\$
+authprot = sss
+action   = tag
+label    = internal
+[filter "eos-proc"]
+path   = /eos/*/proc/*
+action = drop
+EOF
+"${BIN}" -c "${TMP}/filter.cfg" >/dev/null 2>"${TMP}/summary" &
+pid=$!
+sleep 1
+kill -0 "${pid}" 2>/dev/null || fail "valid filter config should start"
+kill "${pid}" 2>/dev/null; wait "${pid}" 2>/dev/null
+# Dropping documents is not something to do silently: it is reported at start-up
+# whether or not -v was given.
+grep -q "2 filter rule(s) loaded (1 tag, 1 drop, 0 keep)" "${TMP}/summary" \
+	|| fail "expected the rule summary, got: $(cat "${TMP}/summary")"
+
 echo "ok"

@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "XrdApps/XrdMonCollect/XrdMonDecode.hh"
+#include "XrdApps/XrdMonCollect/XrdMonFilter.hh"
 #include "XrdMetrics/XrdMetricsRegistry.hh"
 #include "XrdMetrics/XrdMetricsSerializer.hh"
 #include "XrdNet/XrdNetUtils.hh"
@@ -112,6 +113,8 @@ class Transfer : public ::testing::Test
 protected:
   std::string lastDoc;
   std::vector<std::string> allDocs;
+  // Declared before the decoder so it outlives it (SetFilter does not own it).
+  XrdMonFilter flt;
   XrdMonDecode dec{[&](const std::string& d){ lastDoc = d;
                                               allDocs.push_back(d); }};
   XrdMonDecode* alt = nullptr;   // when set, the feed helpers feed this decoder
@@ -816,6 +819,203 @@ TEST(XrdMonCollect, DatasetRegexInvalidRejected)
   EXPECT_FALSE(dec.SetDatasetRegex("(["));
   EXPECT_TRUE(dec.SetDatasetRegex("^/store/([^/]+)/"));
   EXPECT_TRUE(dec.SetDatasetRegex(""));    // clear
+}
+
+/******************************************************************************/
+/*                       d o c u m e n t   f i l t e r                        */
+/******************************************************************************/
+
+// A tag rule labels the document in place; everything else about it is
+// unchanged.
+TEST_F(Transfer, FilterTagsMatchingDocument)
+{
+  std::string err;
+  std::size_t r = flt.AddRule("internal");
+  ASSERT_TRUE(flt.AddCondition(r, "user", "alice", err)) << err;
+  dec.SetFilter(&flt);
+
+  feedUserMap(); feedOpen(); feedClose();
+
+  ASSERT_FALSE(lastDoc.empty());
+  json j = json::parse(lastDoc);
+  EXPECT_EQ(j["attributes"]["xrootd.filter.labels"], json::array({"internal"}));
+  EXPECT_EQ(j["attributes"]["user.name"], "alice");
+  EXPECT_EQ(dec.GetStats().filtered, 0u);
+}
+
+// A rule keyed on a field this document does not carry must not fire.
+TEST_F(Transfer, FilterLeavesNonMatchingDocumentAlone)
+{
+  std::string err;
+  std::size_t r = flt.AddRule("internal");
+  ASSERT_TRUE(flt.AddCondition(r, "authprot", "sss", err)) << err;  // no &p=
+  dec.SetFilter(&flt);
+
+  feedUserMap(); feedOpen(); feedClose();
+
+  ASSERT_FALSE(lastDoc.empty());
+  json j = json::parse(lastDoc);
+  EXPECT_FALSE(j["attributes"].contains("xrootd.filter.labels"));
+}
+
+// A drop rule suppresses the document entirely, and says so in the stats.
+TEST_F(Transfer, FilterDropsMatchingDocument)
+{
+  std::string err;
+  std::size_t r = flt.AddRule("internal");
+  ASSERT_TRUE(flt.AddCondition(r, "user", "alice", err)) << err;
+  ASSERT_TRUE(flt.SetAction(r, "drop", err)) << err;
+  dec.SetFilter(&flt);
+
+  feedUserMap(); feedOpen(); feedClose();
+
+  EXPECT_TRUE(allDocs.empty());
+  EXPECT_EQ(dec.GetStats().filtered, 1u);
+  // The close was still decoded and counted: only the output is suppressed.
+  EXPECT_EQ(dec.GetStats().closes, 1u);
+  EXPECT_EQ(dec.GetStats().docs, 1u);
+}
+
+// A tagged document's companion span inherits the label, since the span is
+// built from the already-tagged log document.
+TEST_F(Transfer, FilterTagIsInheritedByTheCompanionSpan)
+{
+  std::string err;
+  std::size_t r = flt.AddRule("internal");
+  ASSERT_TRUE(flt.AddCondition(r, "user", "alice", err)) << err;
+  dec.SetFilter(&flt);
+  dec.SetEmitSpans(true);
+
+  feedUserMap(); feedOpen(); feedClose();
+
+  ASSERT_EQ(allDocs.size(), 2u);           // the log, then its span
+  for (const std::string& d : allDocs)
+      {json j = json::parse(d);
+       EXPECT_EQ(j["attributes"]["xrootd.filter.labels"],
+                 json::array({"internal"})) << d;
+      }
+  json span = json::parse(allDocs[1]);
+  EXPECT_EQ(span["kind"], "SPAN_KIND_SERVER");
+}
+
+// Dropping a log document must take its span with it, or a tracing backend is
+// left with a parentless child span.
+TEST_F(Transfer, FilterDropAlsoDropsTheCompanionSpan)
+{
+  std::string err;
+  std::size_t r = flt.AddRule("internal");
+  ASSERT_TRUE(flt.AddCondition(r, "user", "alice", err)) << err;
+  ASSERT_TRUE(flt.SetAction(r, "drop", err)) << err;
+  dec.SetFilter(&flt);
+  dec.SetEmitSpans(true);
+
+  feedUserMap(); feedOpen(); feedClose();
+
+  EXPECT_TRUE(allDocs.empty());
+  EXPECT_EQ(dec.GetStats().spans, 0u);
+}
+
+// The point of the feature: a dropped document is still fully accounted for in
+// the Prometheus series, so sysadmins keep the complete picture of the cluster
+// while the document stream is cleaned up.
+TEST(XrdMonCollect, FilterDoesNotAffectMetrics)
+{
+  XrdMetrics::Collector collector("xrootd");
+  XrdMonFilter flt;
+  std::string err;
+  std::size_t r = flt.AddRule("internal");
+  ASSERT_TRUE(flt.AddCondition(r, "user", "alice", err)) << err;
+  ASSERT_TRUE(flt.SetAction(r, "drop", err)) << err;
+
+  std::vector<std::string> docs;
+  XrdMonDecode d([&](const std::string& s){ docs.push_back(s); }, nullptr,
+                 false, false, false, false, &collector.subsystem("collector"));
+  d.SetFilter(&flt);
+
+  { W body; body.u32(7);
+    std::string info = "xroot/alice.1:2@wn.example.org\n";
+    std::vector<unsigned char> pl = body.b;
+    pl.insert(pl.end(), info.begin(), info.end());
+    auto pkt = packet('u', kStod, pl);
+    d.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size()); }
+  { W body; body.u32(100); body.u64(123456); body.u32(7);
+    std::string lfn = "/store/data/file.root"; body.raw(lfn); body.u8(0);
+    auto payload = todRec(kOpenT, 42);
+    auto r2 = rec(1, 0x03, body.b);
+    payload.insert(payload.end(), r2.begin(), r2.end());
+    auto pkt = packet('f', kStod, payload);
+    d.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size()); }
+  { W body; body.u32(100); body.u64(10485760); body.u64(0); body.u64(0);
+    body.u32(320); body.u32(0); body.u32(0); body.u16(0); body.u16(0);
+    body.u64(0); body.u32(4096); body.u32(1048576);
+    body.u32(0); body.u32(0); body.u32(0); body.u32(0);
+    body.u32(0); body.u32(0); body.u32(0); body.u32(0);
+    auto payload = todRec(kCloseT, 42);
+    auto r2 = rec(0, 0x02, body.b);
+    payload.insert(payload.end(), r2.begin(), r2.end());
+    auto pkt = packet('f', kStod, payload);
+    d.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size()); }
+
+  EXPECT_TRUE(docs.empty());                  // nothing was exported ...
+  EXPECT_EQ(d.GetStats().filtered, 1u);
+  std::string out;                            // ... but everything was measured
+  XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
+  EXPECT_NE(out.find("xrootd_collector_transfers_total{server=\"10.0.0.1:9930\"} 1"),
+            std::string::npos);
+  EXPECT_NE(out.find("xrootd_collector_read_bytes_total{server=\"10.0.0.1:9930\"} 10485760"),
+            std::string::npos);
+}
+
+// An identity rule must not reach documents that carry no identity: a
+// server-identity document has no user at all, so `user = *` leaves it alone.
+TEST(XrdMonCollect, FilterIdentityRuleSparesServerIdent)
+{
+  XrdMonFilter flt;
+  std::string err;
+  std::size_t r = flt.AddRule("any-user");
+  ASSERT_TRUE(flt.AddCondition(r, "user", "*", err)) << err;
+  ASSERT_TRUE(flt.SetAction(r, "drop", err)) << err;
+
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetFilter(&flt);
+
+  std::string info = "=/xrootd.4321:99@srv.example.org"
+                     "\n&site=T1_DE_KIT&port=1094&inst=manager&pgm=xrootd&ver=v6.1.0";
+  W body; body.u32(0);
+  std::vector<unsigned char> pl = body.b;
+  pl.insert(pl.end(), info.begin(), info.end());
+  auto pkt = packet('=', kStod, pl);
+  dec.Process("srv:9930", (const char*)pkt.data(), pkt.size());
+
+  ASSERT_EQ(docs.size(), 1u);
+  EXPECT_EQ(dec.GetStats().filtered, 0u);
+  json j = json::parse(docs[0]);
+  EXPECT_EQ(j["attributes"]["event.name"], "xrootd.server_ident");
+}
+
+// A server-level rule, by contrast, does reach it.
+TEST(XrdMonCollect, FilterServerRuleDropsServerIdent)
+{
+  XrdMonFilter flt;
+  std::string err;
+  std::size_t r = flt.AddRule("no-ident");
+  ASSERT_TRUE(flt.AddCondition(r, "event", "xrootd.server_ident", err)) << err;
+  ASSERT_TRUE(flt.SetAction(r, "drop", err)) << err;
+
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetFilter(&flt);
+
+  std::string info = "=/xrootd.4321:99@srv.example.org\n&site=T1_DE_KIT&pgm=xrootd";
+  W body; body.u32(0);
+  std::vector<unsigned char> pl = body.b;
+  pl.insert(pl.end(), info.begin(), info.end());
+  auto pkt = packet('=', kStod, pl);
+  dec.Process("srv:9930", (const char*)pkt.data(), pkt.size());
+
+  EXPECT_TRUE(docs.empty());
+  EXPECT_EQ(dec.GetStats().filtered, 1u);
 }
 
 // The 'i' blob is only emitted when it adds information over the login &y=
@@ -2506,6 +2706,37 @@ TEST(XrdMonCollect, SessionAggregatesFileActivity)
   EXPECT_EQ(json::parse(docs[0])["attributes"]["xrootd.transfer.kind"], "transfer");
   EXPECT_EQ(json::parse(docs[2])["attributes"]["xrootd.transfer.kind"], "access");
 }
+
+// Dropping the per-file documents must not disturb the session rollup: the
+// session document still reports every file that was closed.
+TEST(XrdMonCollect, FilterDoesNotAffectSessionRollup)
+{
+  XrdMonFilter flt;
+  std::string err;
+  std::size_t r = flt.AddRule("no-transfers");
+  ASSERT_TRUE(flt.AddCondition(r, "event", "xrootd.transfer", err)) << err;
+  ASSERT_TRUE(flt.SetAction(r, "drop", err)) << err;
+
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetEmitSessions(true);
+  dec.SetFilter(&flt);
+
+  feedUserN(dec, "h:1", 7);
+  openClose(dec, "h:1", 1, 7, 1000, 1000, 0, "/a.root");
+  openClose(dec, "h:1", 2, 7, 1000, 1000, 0, "/b.root");
+  feedDisc(dec, "h:1", 7);
+
+  // Both transfer documents were dropped; the session document survives and
+  // still accounts for both files.
+  ASSERT_EQ(docs.size(), 1u);
+  EXPECT_EQ(dec.GetStats().filtered, 2u);
+  json j = json::parse(docs.back());
+  EXPECT_EQ(j["attributes"]["event.name"], "xrootd.session");
+  EXPECT_EQ(j["attributes"]["xrootd.session.files"], 2);
+  EXPECT_EQ(j["attributes"]["xrootd.session.read_bytes"], 2000);
+}
+
 
 // A 'u' map re-sent for a dictid whose session is already under way is a
 // retransmit of the same login (the server mints dictids from a monotonic

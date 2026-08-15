@@ -16,6 +16,16 @@
 COLLECTOR_PORT=8096
 COLLECTOR_OUT="${PWD}/${NAME}/collected.ndjson"
 COLLECTOR_PID="${PWD}/${NAME}/collector.pid"
+COLLECTOR_CFG="${PWD}/${NAME}/collector.cfg"
+COLLECTOR_LOG="${PWD}/${NAME}/collector.log"
+
+# Application names the filter rules key on (see setup_moncollect): the client
+# advertises them via XRD_APPNAME at login, so they reach the collector as the
+# u-record's "&x=" and surface as user_agent.original's companion
+# user_agent.name -- the same shape as an EOS instance tagging its internal
+# traffic.
+APP_TAGGED=e2e-tagged
+APP_DROPPED=e2e-dropped
 
 # Mock OTLP/HTTP receiver: when python3 is available the collector additionally
 # exports OTLP logs/traces here, and the test asserts they arrive. Optional so
@@ -140,16 +150,32 @@ function setup_moncollect() {
 	# the 'io' destination in moncollect.cfg); --spans turns concluded operations
 	# and each I/O op into OpenTelemetry span documents, so the test can assert
 	# both the correlation ids and the session -> file -> I/O span nesting.
-	# -c /dev/null keeps a host's /etc/xrootd/xrdmoncollect.cfg (auto-loaded
-	# when present) from leaking admin settings into the test.
+	# -c pointed at a generated file keeps a host's /etc/xrootd/xrdmoncollect.cfg
+	# (auto-loaded when present) from leaking admin settings into the test. The
+	# file carries nothing but the document filter rules, which have no
+	# command-line equivalent; with no [xrdmoncollect] section, every setting
+	# still comes from the command line below.
+	# NB: a filter key must start in column 1. inih appends an indented line to
+	# the preceding key's value, so indenting these would fold "action" into
+	# "app" and leave a rule that matches nothing.
+	cat >| "${COLLECTOR_CFG}" <<-EOF
+	[filter "${APP_TAGGED}"]
+	app = ${APP_TAGGED}
+	action = tag
+	label = e2e-internal
+
+	[filter "${APP_DROPPED}"]
+	app = ${APP_DROPPED}
+	action = drop
+	EOF
 	# --sessions folds each close into its client's session and emits a session
 	# document (the trace root) when the client disconnects, which is where the
 	# session start/end/duration are reported.
-	xrdmoncollect -c /dev/null -p "${COLLECTOR_PORT}" -o "${COLLECTOR_OUT}" \
+	xrdmoncollect -c "${COLLECTOR_CFG}" -p "${COLLECTOR_PORT}" -o "${COLLECTOR_OUT}" \
 	              --flush-secs 1 --flush-count 1 --traces --spans --sessions \
 	              ${OTLP_ARGS} \
 	              --dataset '/(test-[A-Za-z0-9]+)/' \
-	              > "${PWD}/${NAME}/collector.log" 2>&1 < /dev/null &
+	              > "${COLLECTOR_LOG}" 2>&1 < /dev/null &
 	echo $! > "${COLLECTOR_PID}"
 	disown 2>/dev/null || true
 
@@ -373,6 +399,59 @@ function test_moncollect() {
 	assert grep -Eq '"xrootd.error.code":3003' <<<"${locked_doc}"
 	assert grep -Eq '"error.type":"[^"]*is already opened by[^"]*open denied' \
 		<<<"${locked_doc}"
+
+	# 5. Document filtering. Two [filter] rules were written into the collector
+	#    config at setup: one tags documents from XRD_APPNAME=${APP_TAGGED},
+	#    the other drops documents from XRD_APPNAME=${APP_DROPPED}. This is the
+	#    shape an EOS site uses to separate its own internal traffic from user
+	#    activity.
+
+	# The rules were actually loaded. This is the positive control for the
+	# drop assertion below, which can only ever observe an absence.
+	assert grep -Eq '2 filter rule\(s\) loaded \(1 tag, 1 drop, 0 keep\)' \
+		"${COLLECTOR_LOG}"
+
+	# A tag rule labels the matching document in place and changes nothing else.
+	# Pin the wait to the f-stream close: the client's trace-stream disconnect
+	# carries the same app name and is flushed on its own schedule, so waiting
+	# for the app name alone can return before any transfer document exists
+	# (and a disconnect record has no companion span to check below). Keys are
+	# serialized in sorted order, so event.name always precedes user_agent.name.
+	drive_until "\"event.name\":\"xrootd.transfer\".*\"user_agent.name\":\"${APP_TAGGED}\"" \
+		"tagged transfer document" \
+		"XRD_APPNAME=${APP_TAGGED} xrdcp -f '${HOST}/${TMPDIR}/ok.ref' '${TMPDIR}/tagged.dat'"
+	tagged_doc=$(grep -E "\"event.name\":\"xrootd.transfer\".*\"user_agent.name\":\"${APP_TAGGED}\"" \
+		"${COLLECTOR_OUT}" | grep -Ev '"kind":' | head -n1)
+	test -n "${tagged_doc}" || error "no tagged transfer document found"
+	assert grep -Fq '"xrootd.filter.labels":["e2e-internal"]' <<<"${tagged_doc}"
+
+	# The companion span inherits the label, because it is built from the
+	# already-tagged log document.
+	tagged_span=$(grep -F '"xrootd.filter.labels":["e2e-internal"]' "${COLLECTOR_OUT}" \
+		| grep -E '"kind":"SPAN_KIND_SERVER"' | head -n1)
+	test -n "${tagged_span}" || error "no tagged span document found"
+
+	# A document no rule matches is left untouched: the very first successful
+	# transfer ran long before either app name was used.
+	ok_doc=$(grep -E '"xrootd.operation.state":"Successful"' "${COLLECTOR_OUT}" | head -n1)
+	test -n "${ok_doc}" || error "no successful transfer document found"
+	assert_failure grep -q '"xrootd.filter.labels"' <<<"${ok_doc}"
+
+	# A drop rule suppresses every document of the matching session. Drive the
+	# same transfer the tag rule was just proven on, then wait for a *later*
+	# tagged transfer of a distinctly named file to land: once that marker is
+	# through, the collector has processed past the dropped ones, so their
+	# absence means the rule fired rather than that monitoring stopped flowing.
+	for _ in $(seq 1 5); do
+		XRD_APPNAME="${APP_DROPPED}" \
+			xrdcp -f "${HOST}/${TMPDIR}/ok.ref" "${TMPDIR}/dropped.dat" \
+			>/dev/null 2>&1 || true
+	done
+	assert xrdcp -f "${TMPDIR}/ok.ref" "${HOST}/${TMPDIR}/marker.ref"
+	drive_until '"event.name":"xrootd.transfer".*"file.name":"marker.ref"' \
+		"post-drop marker document" \
+		"XRD_APPNAME=${APP_TAGGED} xrdcp -f '${HOST}/${TMPDIR}/marker.ref' '${TMPDIR}/marker.dat'"
+	assert_failure grep -q "\"user_agent.name\":\"${APP_DROPPED}\"" "${COLLECTOR_OUT}"
 
 	echo "collector documents:"
 	cat "${COLLECTOR_OUT}"

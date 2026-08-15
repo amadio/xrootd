@@ -35,6 +35,7 @@
 #include "XrdVersion.hh"
 
 #include "XrdApps/XrdMonCollect/XrdMonDecode.hh"
+#include "XrdApps/XrdMonCollect/XrdMonFilter.hh"
 #include "XrdMetrics/XrdMetricsRegistry.hh"
 #include "XrdNet/XrdNetAddr.hh"
 #include "XrdNet/XrdNetIF.hh"
@@ -561,6 +562,24 @@ void XrdMonDecode::emitSpan(const json& src, const char* name, double tBeg,
 
    stats.spans++;
    doc(sp.dump());
+}
+
+/******************************************************************************/
+/*                              e m i t D o c                                 */
+/******************************************************************************/
+
+// The one place a finished document becomes a string and reaches the sink. The
+// filter runs here, at the very end of the pipeline, so everything it might
+// suppress has already been folded into the correlation state, the session
+// rollups and the Prometheus series: filtering changes what is exported, never
+// what is measured.
+//
+bool XrdMonDecode::emitDoc(json& j)
+{
+   if (!doc) return false;
+   if (filter && !filter->Apply(j)) {stats.filtered++; return false;}
+   doc(j.dump());
+   return true;
 }
 
 /******************************************************************************/
@@ -1657,7 +1676,7 @@ void XrdMonDecode::DecodeIdent(const std::string& src, int32_t stod,
    json j;
    otelResource(j, src, stod, srv);
    otelBegin(j, "xrootd.server_ident", (int32_t)Now(), false);
-   if (doc) doc(j.dump());
+   emitDoc(j);
 }
 
 /******************************************************************************/
@@ -1725,7 +1744,7 @@ void XrdMonDecode::DecodeFrm(const std::string& src, int32_t stod, Server& srv,
                         "bytes purged by FRM", {{"server", src}}) += sz;
       }
 
-   if (doc) doc(j.dump());
+   emitDoc(j);
 }
 
 /******************************************************************************/
@@ -2013,12 +2032,10 @@ void XrdMonDecode::EmitDisc(const std::string& src, int32_t stod, Server& srv,
                         {{"server", src}, {"source", sp.src}}) += 1;
       }
 
-   if (doc) doc(j.dump());
-
 // The session span is the trace root (no parent), covering the whole session as
-// resolved above.
+// resolved above. A filtered-out session takes its span with it.
 //
-   emitSpan(j, "session", sp.beg, sp.end, std::string());
+   if (emitDoc(j)) emitSpan(j, "session", sp.beg, sp.end, std::string());
 }
 
 /******************************************************************************/
@@ -2271,14 +2288,14 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
       }
 
    stats.docs++;
-   if (doc) doc(j.dump());
 
 // Companion span for this file operation (open -> close), child of the session
 // span. Start at the open time when known, else the close time.
 //
-   emitSpan(j, (wrBytes > 0) ? "write" : "read",
-            openTBeg > 0 ? openTBeg : tRec, tRec,
-            spanIdOf(sessKey(src, stod, openUser) + "|session"));
+   if (emitDoc(j))
+      emitSpan(j, (wrBytes > 0) ? "write" : "read",
+               openTBeg > 0 ? openTBeg : tRec, tRec,
+               spanIdOf(sessKey(src, stod, openUser) + "|session"));
 }
 
 /******************************************************************************/
@@ -2358,13 +2375,13 @@ void XrdMonDecode::EmitError(const std::string& src, int32_t stod, Server& srv,
 
    stats.failed++;
    stats.docs++;
-   if (doc) doc(j.dump());
 
 // Companion span for the failed operation (zero-duration, ERROR status), child
 // of the session span.
 //
-   emitSpan(j, cat.empty() ? "operation" : cat.c_str(), tRec, tRec,
-            spanIdOf(sess + "|session"));
+   if (emitDoc(j))
+      emitSpan(j, cat.empty() ? "operation" : cat.c_str(), tRec, tRec,
+               spanIdOf(sess + "|session"));
 }
 
 /******************************************************************************/
@@ -2531,14 +2548,14 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
            }
 
         otelBegin(j, ev, tRec, false);
-        if (doc) doc(j.dump());
+        const bool sent = emitDoc(j);
 
 // With --spans, an I/O op also appears as a child span under the file's transfer
 // span (emitSpan is a no-op otherwise); ev is "xrootd.<op>", so ev+7 names the
 // span with the bare operation. I/O entries are instants: the span is
 // zero-length at the record's (interpolated) time.
 //
-        if (ioOp && fileID)
+        if (sent && ioOp && fileID)
            emitSpan(j, ev + 7, tRec, tRec, fileSpanId(src, stod, fileID));
        }
 }
@@ -2758,7 +2775,7 @@ void XrdMonDecode::EmitGStreamRecord(const std::string& src, int32_t stod,
        if (payload.is_discarded())
             a["xrootd.gstream.data"] = line;
        else a["xrootd.gstream.data"] = payload;
-       doc(j.dump());
+       emitDoc(j);
       }
 }
 
@@ -2970,11 +2987,11 @@ void XrdMonDecode::DecodeRStream(const std::string& src, int32_t stod,
              a["session.id"] = j["traceId"];   // semconv session correlator
 
              stats.docs++;
-             if (doc) doc(j.dump());
 
              // Companion span for the redirect, child of the session span.
-             emitSpan(j, "redirect", tWin, tWin,
-                      spanIdOf(sess + "|session"));
+             if (emitDoc(j))
+                emitSpan(j, "redirect", tWin, tWin,
+                         spanIdOf(sess + "|session"));
             }
 
          off += RSZ * (1 + slots);

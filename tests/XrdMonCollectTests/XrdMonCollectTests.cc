@@ -2179,6 +2179,94 @@ TEST(XrdMonCollect, SessionWithoutTodStillTimestamped)
   ASSERT_TRUE(sessionSpan(docs).contains("startTimeUnixNano"));
 }
 
+namespace {
+// A 't' packet: a WINDOW mark closing at `win`, then a DISC for `user` whose
+// connect duration is `csec` seconds.
+void feedTraceDisc(XrdMonDecode& dec, const std::string& src, int32_t win,
+                   uint32_t user, uint32_t csec)
+{
+   W payload;
+   { std::vector<unsigned char> a0(8, 0); a0[0] = 0xe0;   // WINDOW
+     payload.raw(trace(a0, (uint32_t)win, (uint32_t)win)); }
+   { std::vector<unsigned char> a0(8, 0); a0[0] = 0xd0;   // DISC
+     payload.raw(trace(a0, csec, user)); }
+   auto pkt = packet('t', kStod, payload.b);
+   dec.Process(src, (const char*)pkt.data(), pkt.size());
+}
+}
+
+// The trace stream's disconnect carries the connect duration the server
+// measured itself, which dates the login exactly and in the server's own clock
+// -- better than any estimate. It is taken even with trace emission off, since
+// a site can run session documents without the far higher volume trace stream.
+TEST(XrdMonCollect, TraceDiscSuppliesExactLoginTime)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetEmitSessions(true);           // note: --traces is NOT enabled
+
+  const int32_t T = kOpenT + 500;
+  feedUserN(dec, "h:1", 7);
+  feedTraceDisc(dec, "h:1", T, 7, 45);   // logged in 45s before T
+  feedF(dec, "h:1", T, discRec(7));
+
+  json j = sessionDoc(docs);
+  ASSERT_FALSE(j.is_null());
+  const json& a = j["attributes"];
+  EXPECT_EQ(a["xrootd.session.start_time_source"], "login");
+  EXPECT_EQ(a["xrootd.session.start_time"], isoOf(T - 45));
+  EXPECT_EQ(a["xrootd.session.end_time"],   isoOf(T));
+  EXPECT_EQ(a["xrootd.session.duration"].get<double>(), 45.0);
+  EXPECT_EQ(docs.size(), 1u);          // trace emission off: no trace documents
+}
+
+// The two disconnect records travel in independent datagrams with no ordering
+// guarantee. When the f-stream one wins the race the session document is
+// already out and is not revised, so the fallback has to have produced a usable
+// start -- and the late trace record must not emit a second session document.
+TEST(XrdMonCollect, TraceDiscAfterSessionStillLeavesAStart)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetEmitSessions(true);
+
+  const int32_t T = kOpenT + 500;
+  feedUserN(dec, "h:1", 7);
+  feedF(dec, "h:1", T, discRec(7));       // disconnect reported first
+  feedTraceDisc(dec, "h:1", T, 7, 45);    // the exact login arrives too late
+
+  json j = sessionDoc(docs);
+  ASSERT_FALSE(j.is_null());
+  const json& a = j["attributes"];
+  ASSERT_TRUE(a.contains("xrootd.session.start_time"));
+  EXPECT_NE(a["xrootd.session.start_time_source"], "login");
+  EXPECT_GE(a["xrootd.session.duration"].get<double>(), 0.0);
+  EXPECT_EQ(docs.size(), 1u);             // exactly one session document
+}
+
+// The disconnect document and the session document describe the same session,
+// so they report its bounds with the same keys and the same types.
+TEST(XrdMonCollect, TraceDiscDocCarriesSessionTimes)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); },
+                   nullptr, false, /*traces=*/true);
+
+  const int32_t T = kOpenT + 500;
+  feedTraceDisc(dec, "h:1", T, 7, 45);
+
+  ASSERT_EQ(docs.size(), 1u);
+  json j = json::parse(docs[0]);
+  const json& a = j["attributes"];
+  EXPECT_EQ(a["event.name"], "xrootd.disconnect");
+  EXPECT_EQ(a["xrootd.session.start_time"], isoOf(T - 45));
+  EXPECT_EQ(a["xrootd.session.end_time"],   isoOf(T));
+  EXPECT_EQ(a["xrootd.session.duration"].get<double>(), 45.0);
+  // Same JSON type as the session document's, so a strict consumer mapping
+  // sees one type for the key rather than two.
+  EXPECT_TRUE(a["xrootd.session.duration"].is_number_float());
+}
+
 // Whatever the inputs, a session document always carries the three time fields,
 // the start never follows the end, and the duration is exactly their difference.
 TEST(XrdMonCollect, SessionStartNeverAfterEnd)

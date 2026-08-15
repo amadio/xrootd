@@ -1480,6 +1480,12 @@ void XrdMonDecode::DecodeMap(unsigned char code, Server& srv,
        u.site       = cgiVal(text, "S");
        std::string iv = cgiVal(text, "I");
        if (!iv.empty()) u.ipVersion = atoi(iv.c_str());
+       // A 'u' map can be re-sent for a dictid whose session is already under
+       // way (the server retransmits on a late "set monitor on", and any
+       // destination can see a duplicated datagram). lruPut replaces the entry
+       // wholesale, so carry the session forward explicitly.
+       if (auto old = srv.users.find(dictid); old != srv.users.end())
+          u.adopt(std::move(old->second));
        std::size_t w = bytesOf(u);
        lruPut(&srv, Dict::Users, srv.users, dictid, dictid, std::string(),
               std::move(u), w);

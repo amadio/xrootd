@@ -298,6 +298,30 @@ struct UserInfo
    // still here at the isDisc is a leaked open (its close record was lost)
    // and is swept out of the open-file table (see DropUserFiles).
    std::unordered_set<uint32_t> openFiles;
+
+   // Carry the accumulated session over a re-sent 'u' map for the same dictid.
+   // The server mints dictids from a monotonic counter (XrdXrootdMonitor::
+   // GetDictID), so a repeat within one incarnation is a retransmit of the same
+   // login, never a new session: replacing the entry wholesale (what lruPut
+   // does for the stateless dictionaries) would drop the rollup, the login time
+   // and the open-file set mid-session. The identity fields are deliberately
+   // not carried: the newer copy of the map is the better parse. The LRU
+   // back-reference belongs to the entry, not to the session, and is left to
+   // lruPut.
+   //
+   void adopt(UserInfo&& p)
+        {if (p.connT > 0 && (connT <= 0 || p.connT < connT)) connT = p.connT;
+         sFiles      = p.sFiles;
+         sTransfers  = p.sTransfers;
+         sAccesses   = p.sAccesses;
+         sErrors     = p.sErrors;
+         sReadBytes  = p.sReadBytes;
+         sWriteBytes = p.sWriteBytes;
+         sFirst      = p.sFirst;
+         sLast       = p.sLast;
+         sRecent     = std::move(p.sRecent);
+         openFiles   = std::move(p.openFiles);
+        }
 };
 
 // Token identity from a 'T' (MAPTOKN) record, keyed by the user dictid.

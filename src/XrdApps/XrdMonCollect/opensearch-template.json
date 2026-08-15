@@ -177,7 +177,7 @@
                   "properties": {
                     "kind":         { "type": "keyword" },
                     "start_time":   { "type": "date" },
-                    "duration":     { "type": "long" },
+                    "duration":     { "type": "double" },
                     "forced_close": { "type": "boolean" },
                     "is_local":     { "type": "boolean" },
                     "open_seen":    { "type": "boolean" },
@@ -210,7 +210,8 @@
                     "write_bytes":  { "type": "long" },
                     "start_time":   { "type": "date" },
                     "end_time":     { "type": "date" },
-                    "duration":     { "type": "long" },
+                    "duration":     { "type": "double" },
+                    "start_time_source": { "type": "keyword" },
                     "recent_files": { "type": "object", "enabled": false }
                   }
                 }

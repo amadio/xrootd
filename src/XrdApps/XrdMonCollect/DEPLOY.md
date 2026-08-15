@@ -1810,6 +1810,20 @@ curl -ku admin:'<StrongAdminPassword>' -X PUT \
   --data-binary @opensearch-template.json
 ```
 
+> **Upgrading an existing deployment.** `xrootd.transfer.duration` and
+> `xrootd.session.duration` are mapped `double` (they were `long`, but both
+> carry fractional seconds since record times are interpolated within a
+> reporting window), and `xrootd.session.start_time_source` is a new `keyword`.
+> A mapping change applies only to **newly created** backing indices: re-apply
+> the template, then roll the data stream over, or the existing index keeps
+> truncating sub-second durations to whole seconds and leaves the new field
+> unindexed.
+>
+> ```bash
+> curl -ku admin:'<StrongAdminPassword>' -X POST \
+>   https://localhost:9200/xrootd-transfers/_rollover
+> ```
+
 Then enable the direct sink in the collector config (section 3.2):
 
 ```ini

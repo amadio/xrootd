@@ -142,8 +142,12 @@ function setup_moncollect() {
 	# both the correlation ids and the session -> file -> I/O span nesting.
 	# -c /dev/null keeps a host's /etc/xrootd/xrdmoncollect.cfg (auto-loaded
 	# when present) from leaking admin settings into the test.
+	# --sessions folds each close into its client's session and emits a session
+	# document (the trace root) when the client disconnects, which is where the
+	# session start/end/duration are reported.
 	xrdmoncollect -c /dev/null -p "${COLLECTOR_PORT}" -o "${COLLECTOR_OUT}" \
-	              --flush-secs 1 --flush-count 1 --traces --spans ${OTLP_ARGS} \
+	              --flush-secs 1 --flush-count 1 --traces --spans --sessions \
+	              ${OTLP_ARGS} \
 	              --dataset '/(test-[A-Za-z0-9]+)/' \
 	              > "${PWD}/${NAME}/collector.log" 2>&1 < /dev/null &
 	echo $! > "${COLLECTOR_PID}"
@@ -237,6 +241,36 @@ function test_moncollect() {
 	assert test -n "${io_span}"
 	assert grep -Eq '"parentSpanId":"[0-9a-f]{16}"' <<<"${io_span}"
 	assert grep -Eq '"name":"(read|write|readv)"' <<<"${io_span}"
+
+	# With --sessions, a disconnecting client yields a session document. Its
+	# start, end and duration are always present: the start is resolved from
+	# the login (exactly, when the trace stream reports the connect duration),
+	# else the login record's arrival, else the session's first activity, else
+	# the disconnect. Re-drive until one lands: the disconnect is reported on
+	# the server's fstat flush interval and monitoring is UDP.
+	drive_until '"event.name":"xrootd.session"' "session document" \
+		"xrdcp -f '${HOST}/${TMPDIR}/ok.ref' '${TMPDIR}/ok.dat'"
+	sess_doc=$(grep -E '"event.name":"xrootd.session"' "${COLLECTOR_OUT}" \
+		| grep -Ev '"kind":' | head -n1)
+	assert test -n "${sess_doc}"
+	assert grep -Eq '"xrootd.session.start_time":"[0-9]{4}-[0-9]{2}-[0-9]{2}T' <<<"${sess_doc}"
+	assert grep -Eq '"xrootd.session.end_time":"[0-9]{4}-[0-9]{2}-[0-9]{2}T' <<<"${sess_doc}"
+	# No leading '-' accepted: the resolver clamps the start into the session,
+	# so the duration can never come out negative.
+	assert grep -Eq '"xrootd.session.duration":[0-9]+(\.[0-9]+)?[,}]' <<<"${sess_doc}"
+	# Which rung produced the start is reported, but not which one wins here:
+	# the trace and f-stream disconnects are independent datagrams and either
+	# may arrive first, so only membership of the enumeration is asserted.
+	assert grep -Eq '"xrootd.session.start_time_source":"(login|connect|first_activity|disconnect)"' \
+		<<<"${sess_doc}"
+
+	# The session span is the trace root: no parent, and a start time (a span
+	# without startTimeUnixNano is not valid OTLP).
+	sess_span=$(grep -E '"name":"session"' "${COLLECTOR_OUT}" \
+		| grep -E '"kind":' | head -n1)
+	assert test -n "${sess_span}"
+	assert grep -Eq '"startTimeUnixNano":"[0-9]+"' <<<"${sess_span}"
+	assert_failure grep -q '"parentSpanId"' <<<"${sess_span}"
 
 	# OTLP export (when the mock receiver is running): the collector must POST an
 	# OTLP logs export to /v1/logs (resourceLogs envelope with typed KeyValue

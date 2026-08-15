@@ -83,6 +83,23 @@ with \fBfile.path\fR, \fBxrootd.transfer.kind\fR, \fBxrootd.operation.name\fR, a
 \fBxrootd.bytes\fR). The totals cover every closed file; only the recent-file
 list is bounded, so a long session that opens many files stays memory-bounded.
 .P
+\fBxrootd.session.start_time\fR, \fB.end_time\fR and \fB.duration\fR are always
+present on a session document, and the duration is never negative. The end is
+the disconnect. No dictionary record carries a time on the wire, so the login
+can only be timed by the collector, whose clock is not the reporting server's;
+the offset between the two is estimated per server incarnation from the window
+ends the \fBf\fR stream carries. \fBxrootd.session.start_time_source\fR reports
+how the start was arrived at, best first: \fBlogin\fR (exact, the connect
+duration the \fBt\fR-stream disconnect carries), \fBconnect\fR (the login
+record's arrival, translated into the server's clock), \fBfirst_activity\fR (the
+earliest record naming the session) or \fBdisconnect\fR (nothing else was
+available, so the session is reported as an instant). Candidates are accepted
+only within the session's own bounds, so a skewed clock degrades the start to a
+later source rather than producing a wrong or missing one. The counter
+\fBxrootd_collector_session_starts_total{server,source}\fR shows the mix: mostly
+\fBdisconnect\fR means \fBu\fR records are being lost, or the server's
+\fBxrootd.monitor\fR destination lacks the \fBuser\fR flag.
+.P
 Documents are emitted as newline-delimited JSON (NDJSON) to a file or standard
 output, posted directly to an OpenSearch cluster, exported as OTLP/JSON to an
 OpenTelemetry collector (\fB--otlp-url\fR), and/or streamed over TCP to a

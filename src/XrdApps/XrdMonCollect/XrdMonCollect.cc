@@ -25,6 +25,7 @@
 // or a file. See xrootd-new-metrics.md, Phase 5.
 
 #include <arpa/inet.h>
+#include <cctype>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -33,13 +34,16 @@
 #include <getopt.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <deque>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -52,6 +56,7 @@
 
 #include "XrdApps/XrdMonCollect/XrdMonDecode.hh"
 #include "XrdApps/XrdMonCollect/XrdMonDiskCache.hh"
+#include "XrdApps/XrdMonCollect/XrdMonFilter.hh"
 #include "XrdApps/XrdMonCollect/XrdMonForward.hh"
 #include "XrdApps/XrdMonCollect/XrdMonPipe.hh"
 #include "XrdApps/XrdMonCollect/XrdMonShovel.hh"
@@ -106,6 +111,54 @@ void sdNotify(const char* state)
 #endif
 }
 
+// INIReader keeps every parsed key in a protected std::map keyed by the
+// lowercased "<section>=<name>" and exposes only the section names, so a loader
+// cannot tell a mistyped key from an unset one. Filter rules need exactly that
+// distinction — an unrecognised key there is a rule that silently matches
+// nothing — so surface the keys of one section. Nothing else changes.
+//
+class MonCfg : public INIReader
+{
+public:
+   using INIReader::INIReader;
+
+   //! Lowercased names of the keys set in `section` (which may be given in any
+   //! case, as INIReader folds it internally).
+   std::vector<std::string> KeysIn(const std::string& section) const
+   {
+      std::string pfx = section + "=";
+      std::transform(pfx.begin(), pfx.end(), pfx.begin(),
+                     [](unsigned char c){return (char)std::tolower(c);});
+      std::vector<std::string> keys;
+      for (auto it = _values.lower_bound(pfx);
+           it != _values.end() && !it->first.compare(0, pfx.size(), pfx); ++it)
+          keys.push_back(it->first.substr(pfx.size()));
+      return keys;
+   }
+};
+
+// Recognise a "[filter "<name>"]" section header and extract its name. inih
+// hands back whatever stands between the brackets, verbatim and unquoted, so
+// both the git-config form and a bare "[filter <name>]" are accepted.
+//
+bool filterSection(const std::string& sec, std::string& name)
+{
+   static const char* kPfx = "filter";
+   const std::size_t  pLen = strlen(kPfx);
+
+   if (sec.size() < pLen || strncasecmp(sec.c_str(), kPfx, pLen)) return false;
+   std::string rest = sec.substr(pLen);
+   if (!rest.empty() && !isspace((unsigned char)rest[0]) && rest[0] != '"'
+                     && rest[0] != '.') return false;   // e.g. "[filters]"
+
+   auto b = rest.find_first_not_of(" \t.");
+   auto e = rest.find_last_not_of(" \t");
+   name = (b == std::string::npos) ? std::string() : rest.substr(b, e - b + 1);
+   if (name.size() >= 2 && name.front() == '"' && name.back() == '"')
+      name = name.substr(1, name.size() - 2);
+   return true;
+}
+
 void usage(const char* prog)
 {
    fprintf(stderr,
@@ -114,7 +167,9 @@ void usage(const char* prog)
      "           [--os-pass <p>] [--os-insecure]]\n"
      "          [--flush-count <n>] [--flush-secs <n>] [--debug] [-v]\n\n"
      "  -c <file>        load options from an INI config file (a [xrdmoncollect]\n"
-     "                   section; default /etc/xrootd/xrdmoncollect.cfg if present;\n"
+     "                   section, plus optional [filter \"<name>\"] sections that\n"
+     "                   tag or drop emitted documents; default\n"
+     "                   /etc/xrootd/xrdmoncollect.cfg if present;\n"
      "                   command-line options override file values)\n"
      "  -p <port>        UDP port to listen on (long form: --udp-port; required\n"
      "                   unless --tcp-port is given)\n"
@@ -694,6 +749,8 @@ int main(int argc, char* argv[])
    bool        sessions = false;      // per-session rollup + session documents
    bool        spans    = false;      // companion OTLP span documents
    std::string bindStore, outStore;   // backing storage for config bind/output
+   XrdMonFilter filter;               // [filter "<name>"] document rules
+                                      // (declared here so it outlives decoder)
 
 // Under systemd (StateDirectory=xrdmoncollect) default the state snapshot into
 // the provided state directory; a config/command-line --state-file overrides
@@ -726,7 +783,7 @@ int main(int argc, char* argv[])
        if (access(def, R_OK) == 0) cfgFile = def;
       }
    if (!cfgFile.empty())
-      {INIReader cfg(cfgFile);
+      {MonCfg cfg(cfgFile);
        int perr = cfg.ParseError();
        if (perr == -1)
           {fprintf(stderr, "%s: cannot open config file '%s'\n", argv[0],
@@ -803,6 +860,59 @@ int main(int argc, char* argv[])
        redirects   = cfg.GetBoolean(sec, "redirects", redirects);
        debug       = cfg.GetBoolean(sec, "debug", debug);
        verbose     = cfg.GetBoolean(sec, "verbose", verbose);
+
+// Document filter rules: one [filter "<name>"] section per rule, whose keys
+// (bar the reserved action/label) are match conditions. An unknown key is
+// fatal rather than ignored, since a rule that silently matches nothing is
+// indistinguishable from one that works until documents go missing.
+//
+       std::set<std::string> ruleNames;
+       for (const std::string& fsec : cfg.Sections())
+           {std::string name;
+            if (!strcasecmp(fsec.c_str(), sec)) continue;
+            if (!filterSection(fsec, name))
+               {fprintf(stderr, "%s: warning: ignoring unrecognised config "
+                        "section '[%s]'\n", argv[0], fsec.c_str());
+                continue;
+               }
+            if (name.empty())
+               {fprintf(stderr, "%s: a filter section needs a name: "
+                        "[filter \"<name>\"]\n", argv[0]);
+                return 2;
+               }
+            // INIReader folds "<section>=<key>" to lower case but keeps the
+            // section name verbatim, so two rules whose names differ only in
+            // case would silently share one set of values.
+            std::string lname = name;
+            std::transform(lname.begin(), lname.end(), lname.begin(),
+                           [](unsigned char c){return (char)std::tolower(c);});
+            if (!ruleNames.insert(lname).second)
+               {fprintf(stderr, "%s: duplicate filter rule '%s'\n", argv[0],
+                        name.c_str());
+                return 2;
+               }
+
+            std::size_t r = filter.AddRule(name);
+            for (const std::string& key : cfg.KeysIn(fsec))
+                {std::string val = cfg.Get(fsec, key, ""), err;
+                 bool ok;
+                 if      (key == "label") {filter.SetLabel(r, val); continue;}
+                 else if (key == "action") ok = filter.SetAction(r, val, err);
+                 else    ok = filter.AddCondition(r, key, val, err);
+                 if (!ok)
+                    {fprintf(stderr, "%s: [filter \"%s\"]: %s\n", argv[0],
+                             name.c_str(), err.c_str());
+                     return 2;
+                    }
+                }
+           }
+       if (!filter.Empty())
+          {std::string err;
+           if (!filter.Validate(err))
+              {fprintf(stderr, "%s: %s\n", argv[0], err.c_str());
+               return 2;
+              }
+          }
       }
 
 // Parse arguments. Short options (-p/-b/-o/-v/-h) and long options are handled
@@ -987,6 +1097,7 @@ int main(int argc, char* argv[])
        if (gstream)          ignored("--gstream");
        if (redirects)        ignored("--redirects");
        if (debug)            ignored("--debug");
+       if (!filter.Empty())  ignored("a [filter] section");
 
        ShovelerOpts so;
        so.udpPort     = port;
@@ -1251,6 +1362,16 @@ int main(int argc, char* argv[])
    decoder.SetResolveHosts(resolve);
    decoder.SetEmitSessions(sessions);
    decoder.SetEmitSpans(spans);
+   if (!filter.Empty())
+      {decoder.SetFilter(&filter);
+       // Silently dropping documents is exactly the kind of thing an operator
+       // must see confirmed at start-up, so this is not gated on --verbose.
+       fprintf(stderr, "xrdmoncollect: %zu filter rule(s) loaded "
+               "(%zu tag, %zu drop, %zu keep)\n", filter.Size(),
+               filter.Count(XrdMonFilter::Action::Tag),
+               filter.Count(XrdMonFilter::Action::Drop),
+               filter.Count(XrdMonFilter::Action::Keep));
+      }
    if (!dataset.empty() && !decoder.SetDatasetRegex(dataset))
       {fprintf(stderr, "%s: --dataset '%s' is not a valid POSIX extended "
                "regular expression\n", argv[0], dataset.c_str());
@@ -1316,6 +1437,8 @@ int main(int argc, char* argv[])
        OBS("reaped_servers_total",
            "idle server incarnations reclaimed by the server TTL", reaped);
        OBS("documents_total", "transfer documents produced", docs);
+       OBS("filtered_documents_total",
+           "documents suppressed before emission by a [filter] rule", filtered);
        OBS("orphan_closes_total",
            "closes with no matching open", orphanCls);
        OBS("disconnects_total",
@@ -1656,7 +1779,7 @@ int main(int argc, char* argv[])
          "xrdmoncollect: packets=%llu malformed=%llu records=%llu "
          "mapUser=%llu mapTokn=%llu mapUeac=%llu mapIdnt=%llu "
          "opens=%llu closes=%llu xfrs=%llu discs=%llu docs=%llu "
-         "orphanCloses=%llu lost=%llu evicted=%llu "
+         "filtered=%llu orphanCloses=%llu lost=%llu evicted=%llu "
          "traces=%llu gevents=%llu redirs=%llu spans=%llu frm=%llu "
          "unknown=%llu\n",
          (unsigned long long)s.packets, (unsigned long long)s.malformed,
@@ -1665,7 +1788,8 @@ int main(int argc, char* argv[])
          (unsigned long long)s.mapIdnt,
          (unsigned long long)s.opens, (unsigned long long)s.closes,
          (unsigned long long)s.xfrs, (unsigned long long)s.discs,
-         (unsigned long long)s.docs, (unsigned long long)s.orphanCls,
+         (unsigned long long)s.docs, (unsigned long long)s.filtered,
+         (unsigned long long)s.orphanCls,
          (unsigned long long)s.lost, (unsigned long long)s.evicted,
          (unsigned long long)s.traces, (unsigned long long)s.gevents,
          (unsigned long long)s.redirs, (unsigned long long)s.spans,

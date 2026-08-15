@@ -3,6 +3,7 @@ add_library(XrdAppUtils SHARED
   XrdCpFile.cc    XrdCpFile.hh
   XrdMpxXml.cc    XrdMpxXml.hh
   XrdMonCollect/XrdMonDecode.cc  XrdMonCollect/XrdMonDecode.hh
+  XrdMonCollect/XrdMonFilter.cc  XrdMonCollect/XrdMonFilter.hh
 )
 
 target_link_libraries(XrdAppUtils PRIVATE XrdUtils)

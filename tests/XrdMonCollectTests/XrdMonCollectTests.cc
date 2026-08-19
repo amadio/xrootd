@@ -2866,7 +2866,9 @@ TEST(XrdMonCollect, SessionEnclosesACloseStampedPastTheDisconnect)
 
 // The t and f streams window independently, so a trace record can be stamped
 // past the f-stream disconnect however well each stream is behaving. Its span
-// is a descendant of the session's, so the session has to reach it.
+// is a descendant of the session's, so the session has to reach it. The record
+// used here stays inside the collector's own clock, so it survives the clamp
+// DecodeTStream applies and really does have to widen the session.
 TEST(XrdMonCollect, SessionEnclosesTraceIoPastTheDisconnect)
 {
   std::vector<std::string> docs;
@@ -2874,15 +2876,62 @@ TEST(XrdMonCollect, SessionEnclosesTraceIoPastTheDisconnect)
                    nullptr, false, /*traces=*/true);
   dec.SetEmitSessions(true);
 
-  const int32_t W = kOpenT;
+  const time_t now = time(nullptr);
+  dec.SetClock([&]{ return now; });
+
   feedUserN(dec, "h:1", 7);
-  feedF(dec, "h:1", W, openRec(100, 7, "/store/f.root"));
-  feedTraceRead(dec, "h:1", W + 100, 100, 4096);   // t stream runs ahead
-  feedF(dec, "h:1", W + 50, discRec(7));
+  feedF(dec, "h:1", (int32_t)now + 10, openRec(100, 7, "/store/f.root"));
+  feedF(dec, "h:1", (int32_t)now + 100, {});   // server runs 100s ahead of us
+  feedTraceRead(dec, "h:1", (int32_t)now + 80, 100, 4096);
+  feedF(dec, "h:1", (int32_t)now + 50, discRec(7));   // disconnect stamped first
 
   json j = sessionDoc(docs);
   ASSERT_FALSE(j.is_null());
-  EXPECT_EQ(j["attributes"]["xrootd.session.end_time"], isoOf(W + 100));
+  EXPECT_EQ(j["attributes"]["xrootd.session.end_time"], isoOf(now + 80));
+}
+
+// An I/O record's time comes from the t stream's windowing, which is far
+// coarser than the f-stream bounds of the file it is on -- and its span is a
+// child of that file's. Both physical bounds are enforced: it cannot precede
+// the open, and it cannot follow the moment the collector received it. What
+// survives both and still outruns the close widens the file span, which is the
+// only direction left once the record has been emitted.
+TEST(XrdMonCollect, IoSpansStayInsideTheirFileSpan)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); },
+                   nullptr, false, /*traces=*/true);
+  dec.SetEmitSpans(true);
+
+  const time_t now = time(nullptr);
+  dec.SetClock([&]{ return now; });
+
+  feedF(dec, "h:1", (int32_t)now + 10, openRec(100, 7, "/store/f.root"));
+  feedTraceRead(dec, "h:1", (int32_t)now - 500,  100, 4096);  // before the open
+  feedTraceRead(dec, "h:1", (int32_t)now + 5000, 100, 4096);  // in our future
+  feedF(dec, "h:1", (int32_t)now + 100, {});      // server now 100s ahead
+  feedTraceRead(dec, "h:1", (int32_t)now + 80,  100, 4096);   // legitimately late
+  feedF(dec, "h:1", (int32_t)now + 50, closeRec(100));        // ...past the close
+
+  json file;
+  std::vector<json> ios;
+  for (const json& s : allSpans(docs))
+     {if (s["name"] == "read" && s.contains("parentSpanId")
+      && !s["attributes"].contains("xrootd.io.offset")) file = s;
+      else if (s["attributes"].contains("xrootd.io.offset")) ios.push_back(s);
+     }
+  ASSERT_FALSE(file.is_null());
+  ASSERT_EQ(ios.size(), 3u);
+
+  for (const json& s : ios)
+     {EXPECT_EQ(s["parentSpanId"], file["spanId"]) << s.dump();
+      EXPECT_GE(spanBeg(s), spanBeg(file)) << s.dump();
+      EXPECT_LE(spanEnd(s), spanEnd(file)) << s.dump();
+     }
+  // The file span reaches the one record that outlived the close, and no
+  // further: the two clamped records did not drag it anywhere.
+  EXPECT_EQ(spanBeg(file), (uint64_t)(now + 10) * 1000000000ULL);
+  EXPECT_EQ(spanEnd(file), (uint64_t)(now + 80) * 1000000000ULL);
 }
 
 // The exact login (the t-stream disconnect's connect duration) used to win

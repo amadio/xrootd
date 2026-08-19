@@ -31,10 +31,10 @@ The principal output is one document per file close, joining the
 activity dictionaries into a single record carrying WLCG-aligned identity,
 location, and transfer fields. Documents use an OpenTelemetry-aligned schema: a
 process-level \fBresource\fR object and an event-level \fBattributes\fR object
-keyed by dotted semantic-convention names (with XRootD/WLCG-specific fields under
-the \fBxrootd.*\fR/\fBwlcg.*\fR vendor namespaces; for example
-\fBresource.server.address\fR, \fBattributes.client.address\fR,
-\fBattributes.wlcg.vo\fR, \fBattributes.xrootd.read_bytes\fR).
+keyed by dotted semantic-convention names (with XRootD-specific fields under the
+\fBxrootd.*\fR vendor namespace; for example \fBresource.server.address\fR,
+\fBattributes.client.address\fR, \fBattributes.xrootd.vo\fR,
+\fBattributes.xrootd.read_bytes\fR).
 A store that expands dotted field names (such as OpenSearch) indexes each key as
 a nested field, and empty or zero-valued fields are omitted. The OpenSearch
 \fB_bulk\fR and OTLP sinks serialize this one canonical document, so they carry
@@ -239,13 +239,25 @@ Every per-server series carries \fBcluster\fR and \fBserver\fR labels, so
 server's \fBall.sitename\fR, which this collector reads as the name of the
 storage cluster (\fBeoscms\fR, \fBeosalice\fR) rather than the WLCG site: a
 site holds several storage systems and nothing else on the monitoring wire
-tells them apart. There is no \fBsite\fR label; derive one downstream from
-\fBserver\fR with a Prometheus \fBmetric_relabel_configs\fR rule. Both
-labels come from the \fB=\fR identity record and are provisional until it
+tells them apart. The WLCG site is not on the wire at all and comes from
+\fB--site\fR (see below); without it there is no \fBsite\fR label. Both
+cluster and server come from the \fB=\fR identity record and are provisional until it
 arrives: a server not yet identified reads \fBcluster="unknown"\fR with its
 numeric address as \fBserver\fR. That record defaults to hourly, so set
 \fBident 300\fR in the server's \fBxrootd.monitor\fR directive to shorten
 the window.
+.RE
+\fB--site\fR \fIname\fR
+.RS 5
+Name the site this collector serves. The site is not carried on the monitoring
+wire \(em \fBall.sitename\fR names the storage cluster, and one site holds
+several \(em so it comes from here, on the deployment model of one collector
+per site. Every metric series then carries a \fBsite\fR label, including the
+collector's own unlabeled aggregates, and every document an \fBxrootd.site\fR
+resource attribute. Unset by default, in which case nothing is tagged. A
+collector receiving from several sites should instead derive the label per
+server, e.g. with a Prometheus \fBmetric_relabel_configs\fR rule on
+\fBserver\fR.
 .RE
 \fB--tcp-port\fR \fIport\fR
 .RS 5
@@ -365,10 +377,10 @@ instead.
 Load a SciTags registry (the scitags.org schema: a top-level \fBexperiments\fR
 array of \fB{expId, expName, activities:[{activityId, activityName}]}\fR). The
 numeric SciTags experiment/activity ids carried on the \fIU\fR stream are then
-additionally mapped to their names (\fBwlcg.activity.experiment\fR,
-\fBwlcg.activity.activity\fR), and the experiment name is used as a \fBwlcg.vo\fR
-fallback when neither a token nor the auth CGI supplied a VO. The numeric ids
-are emitted either way; a missing or unparseable source is warned about and
+additionally mapped to their names (\fBscitags.experiment\fR,
+\fBscitags.activity\fR). The names stand on their own and are deliberately
+\fInot\fR folded into \fBxrootd.vo\fR, which carries only a genuine VO. The
+numeric ids are emitted either way; a missing or unparseable source is warned about and
 otherwise ignored.
 .sp
 \fIsrc\fR is a local file path or an \fBhttp(s)://\fR URL (e.g.
@@ -459,8 +471,8 @@ populate.
 The \fBxrootd.client.site\fR field is populated when the connecting client
 advertises a site of its own: a client with \fBXRDSITE\fR (or \fBXRD_SITE\fR,
 which takes precedence) set in its environment sends it at login, and the server
-forwards it on the \fIu\fR-stream. This is independent of the reporting
-server's own \fBservice.namespace\fR.
+forwards it on the \fIu\fR-stream. This is independent both of the reporting
+server's own \fBservice.namespace\fR and of the collector's \fB--site\fR.
 .SS Tuning for pipeline resilience
 The monitor streams are UDP: a datagram larger than the path MTU is fragmented
 at the IP layer and the loss of any one fragment drops the whole datagram.
@@ -548,8 +560,8 @@ Condition keys are \fBuser\fR, \fBuserid\fR, \fBrole\fR, \fBvo\fR, \fBgroups\fR,
 \fBexperiment\fR, \fBactivity\fR, \fBpath\fR, \fBdir\fR, \fBfilename\fR,
 \fBext\fR, \fBdataset\fR, \fBevent\fR, \fBop\fR, \fBstate\fR,
 \fBerror\fR, \fBprovider\fR, \fBtarget\fR, \fBsession\fR, \fBseverity\fR,
-\fBserver\fR, \fBcluster\fR, \fBservice\fR, \fBprogram\fR and
-\fBversion\fR, or a
+\fBserver\fR, \fBsite\fR, \fBcluster\fR, \fBservice\fR, \fBprogram\fR
+and \fBversion\fR, or a
 raw \fBattributes.\fIkey\fR / \fBresource.\fIkey\fR path for any other field.
 .P
 Filtering applies to the emitted documents only: a dropped document is still

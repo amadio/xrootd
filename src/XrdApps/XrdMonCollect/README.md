@@ -117,7 +117,7 @@ Every document — the per-file close records, `session`,
 `server_ident`, `frm`, `redirect`, the `t`-stream traces and `gstream` — shares
 one OpenTelemetry-aligned schema: a process-level `resource` object and an
 event-level `attributes` object, both keyed by dotted semantic-convention names
-(with XRootD/WLCG-specific fields under the `xrootd.*`/`wlcg.*` vendor
+(with XRootD/WLCG-specific fields under the `xrootd.*` vendor
 namespaces). There is no top-level `type` field: the record kind is the
 top-level `eventName` (the OTLP LogRecord EventName field, its semconv home
 since the `event.name` attribute was deprecated), duplicated as
@@ -212,7 +212,7 @@ sinks differ only in wire encoding:
 The one practical asymmetry is queryability of *nested* values: a structured
 `xrootd.gstream.data` payload stays a nested object in OpenSearch but becomes a
 JSON string under OTLP (a deliberate flat-export choice — the data is retained,
-not dropped). All flat `xrootd.*`/`wlcg.*`/semconv fields are equally queryable
+not dropped). All flat `xrootd.*`/semconv fields are equally queryable
 in both.
 
 ### Durability and offline caching
@@ -497,9 +497,9 @@ records are also always consumed:
   document's `resource`. Re-sent identically each `ident` interval; the
   collector emits the document only when it changes.
 - `T` (`MAPTOKN`) carries the token identity (subject, VO, role, groups). Keyed
-  by the user dictid, it joins onto each document as `user.id`, `wlcg.vo`,
-  `user.roles` and `wlcg.groups`. There is no VO metric: the VO is not reliable
-  enough across the monitoring stream to aggregate on. `wlcg.vo` comes from the
+  by the user dictid, it joins onto each document as `user.id`, `xrootd.vo`,
+  `user.roles` and `xrootd.groups`. There is no VO metric: the VO is not reliable
+  enough across the monitoring stream to aggregate on. `xrootd.vo` comes from the
   token when present, else from the auth CGI `&o=` — but only for methods that
   can actually convey a VO (gsi with VOMS, sss, ztn, http/https); a `&o=` from
   unix/krb5/pwd/host auth is ignored rather than surfacing fake VO values.
@@ -511,7 +511,7 @@ records are also always consumed:
   a top-level `"experiments"` array of `{expId, expName, activities:[{activityId,
   activityName}]}`), those numeric ids are additionally mapped to human names —
   `scitags.experiment` and `scitags.activity`. These stand on their own (group
-  by them in dashboards); they are deliberately not folded into `wlcg.vo`,
+  by them in dashboards); they are deliberately not folded into `xrootd.vo`,
   which carries only genuine VO information. The numeric ids are always
   emitted, so the field is present with or without the registry; a
   missing/unparseable source is warned about at start-up and otherwise ignored.
@@ -625,8 +625,8 @@ path (for example `attributes.xrootd.session.files`).
 | `user` | `user.name` | `path` | `file.path` |
 | `userid` | `user.id` | `dir` | `file.directory` |
 | `role` | `user.roles` *(array)* | `filename` | `file.name` |
-| `vo` | `wlcg.vo` | `ext` | `file.extension` |
-| `groups` | `wlcg.groups` | `dataset` | `xrootd.dataset` |
+| `vo` | `xrootd.vo` | `ext` | `file.extension` |
+| `groups` | `xrootd.groups` | `dataset` | `xrootd.dataset` |
 | `authprot` | `xrootd.auth.method` | `event` | `event.name` |
 | `proto` | `network.protocol.name` | `op` | `xrootd.operation.name` |
 | `scheme` | `url.scheme` | `state` | `xrootd.operation.state` |
@@ -640,6 +640,7 @@ path (for example `attributes.xrootd.session.files`).
 | `experiment` | `scitags.experiment` | `service` | `service.name` *(resource)* |
 | `activity` | `scitags.activity` | `program` | `process.executable.name` *(resource)* |
 | | | `version` | `service.version` *(resource)* |
+| | | `site` | `xrootd.site` *(resource)* |
 
 An array field (`role`) matches when any element does; numbers and booleans are
 matched as their printed form (`attributes.xrootd.error.code = 3011`,
@@ -701,6 +702,7 @@ shows a fully-populated successful read (server configured with
     "server.address": "srv1.example.org",
     "server.port": 1094,
     "process.executable.name": "xrootd",
+    "xrootd.site": "CERN-PROD",
     "xrootd.server.id": 42,
     "xrootd.server.incarnation": 1700000000
   },
@@ -730,7 +732,7 @@ shows a fully-populated successful read (server configured with
     "user.name": "alice",
     "user.id": "https://issuer/sub42",
     "user.roles": ["production"],
-    "wlcg.vo": "atlas", "wlcg.groups": "/atlas/prod",
+    "xrootd.vo": "atlas", "xrootd.groups": "/atlas/prod",
     "xrootd.auth.method": "gsi",
     "user_agent.name": "xrdcp", "user_agent.version": "v5.6.1",
     "user_agent.original": "task=prod-copy",
@@ -902,7 +904,7 @@ rolling up everything it did — the root of its trace:
     "session.id": "9f1c8b0d4e2a6f37c1a8b0d4e2a6f371",
     "user.name": "alice",
     "client.address": "wn.example.org",
-    "wlcg.vo": "cms",
+    "xrootd.vo": "cms",
     "xrootd.session.start_time": "2026-07-02T09:55:30.000Z",
     "xrootd.session.end_time": "2026-07-02T10:14:07.000Z",
     "xrootd.session.duration": 1117.0,
@@ -949,7 +951,7 @@ on the wire. Mapping (and the server config each needs):
 | client_site | `xrootd.client.site` | login appinfo (`&S=`, client `XRDSITE`/`XRD_SITE`) |
 | auth_method | `xrootd.auth.method` | **`… auth`** |
 | user | `user.name` (token `&n=` preferred over descriptor) / `user.id` (token `&s=`, else login DN `&n=`) | `u` / `T` token |
-| vo | `wlcg.vo` | `T` token, else `… auth` (`&o=` from a VO-bearing method: gsi/sss/ztn/http(s)) |
+| vo | `xrootd.vo` | `T` token, else `… auth` (`&o=` from a VO-bearing method: gsi/sss/ztn/http(s)) |
 | activity | `scitags.experiment`/`scitags.activity` (names), `scitags.*_id` (numeric), `user.roles` | `U` SciTags + `--scitags` registry; `T` token for role |
 | start_time / end_time | `xrootd.operation.start_time` / the record's `@timestamp` | f-stream `FileTOD` window, interpolated per record |
 | bytes | `xrootd.{read,readv,write}_bytes` | `fstat … xfr` |
@@ -1070,14 +1072,17 @@ spec](https://xrootd.web.cern.ch/doc/dev6/xrd_monitoring.htm).
 | `&pgm=` | `resource.process.executable.name` |
 | f-stream `sID` | `resource.xrootd.server.id` |
 | header `stod` | `resource.xrootd.server.incarnation` |
+| *(not on the wire)* `--site` | `resource.xrootd.site` |
 
 The three `service.*` attributes carry the whole of the server's identity, as
 the [OTel service
 conventions](https://opentelemetry.io/docs/specs/semconv/resource/service/)
 define them. `service.namespace` is the storage cluster and the group the other
 two are unique within; **this collector reads `all.sitename` as the cluster
-name** (`eosalice`, `eoscms`), not as the WLCG site — see [Cluster and server
-labels](#cluster-and-server-labels). `service.name` is the daemon's `-n` name
+name** (`eosalice`, `eoscms`), not as the WLCG site — which is not on the wire
+at all and comes from this collector's own `--site`, emitted as
+`xrootd.site`. See [Site, cluster and server
+labels](#site-cluster-and-server-labels). `service.name` is the daemon's `-n` name
 (`fst`, `mgm`), falling back to the program name, which is what semconv
 prescribes for a service that has not been named; `-n` defaults to the
 placeholder `anon`, which is treated as unnamed. `service.instance.id` must be
@@ -1121,9 +1126,9 @@ duration). The window endpoints themselves have one-second wire granularity.
 | `&h=` | auth-reported client host — name candidate for `client.address` |
 | `&n=` | `attributes.user.id` (login DN; token `&s=` wins) |
 | `&p=` | `attributes.xrootd.auth.method` |
-| `&o=` | `attributes.wlcg.vo` (only if the auth method conveys a VO) |
+| `&o=` | `attributes.xrootd.vo` (only if the auth method conveys a VO) |
 | `&r=` | `attributes.user.roles[]` |
-| `&g=` | `attributes.wlcg.groups` |
+| `&g=` | `attributes.xrootd.groups` |
 | `&x=` | `attributes.user_agent.name` (executable; else `xrootd`) |
 | `&R=` | `attributes.user_agent.version` (client release) |
 | `&y=` | `attributes.user_agent.original` (XRD_MONINFO) |
@@ -1144,9 +1149,9 @@ duration). The window endpoints themselves have one-second wire granularity.
 | :-- | :-- |
 | `&s=` | `attributes.user.id` (subject; preferred over login `&n=`) |
 | `&n=` | `attributes.user.name` (mapped username; preferred over descriptor) |
-| `&o=` | `attributes.wlcg.vo` (preferred over the `u` auth `&o=`) |
+| `&o=` | `attributes.xrootd.vo` (preferred over the `u` auth `&o=`) |
 | `&r=` | `attributes.user.roles[]` |
-| `&g=` | `attributes.wlcg.groups` |
+| `&g=` | `attributes.xrootd.groups` |
 
 **`U` — SciTags experiment/activity (`MAPUEAC`):**
 
@@ -1336,6 +1341,9 @@ xrdmoncollect -p <port> [-b <bindaddr>] [-o <file>] [--bulk <index>]
   --rcvbuf <sz>     kernel UDP receive buffer, SO_RCVBUF (K/M/G; default 16M)
   --queue-depth <n> receive->serialize batches in flight (default: 64)
   --metrics-port <p> serve aggregated metrics over HTTP on port <p>
+  --site <name>    tag everything this collector emits with a site: a site
+                   label on every metric series and xrootd.site on every
+                   document (default: none, and nothing is tagged)
   --max-memory <sz>  bound correlation state to ~<sz> bytes, LRU-evicting
                      (K/M/G suffix; default 256M; 0=unbounded)
   --max-entries <n>  optional hard cap on correlation entries (0=off)
@@ -1400,9 +1408,9 @@ enriches the user dictionary with the authentication method and VO (see the
 field table above); without it those fields are simply absent.
 
 The VO path (gsi → VOMS attribute certificate → `XrdSecEntity.vorg` → MAPUSER
-`&o=` → `wlcg.vo`) is exercised end-to-end by the `XRootD::moncollect`
+`&o=` → `xrootd.vo`) is exercised end-to-end by the `XRootD::moncollect`
 integration test when the VOMS plug-in is built: it mints a fake VOMS proxy with
-`voms-proxy-fake` and asserts `wlcg.vo` appears on the transfer document.
+`voms-proxy-fake` and asserts `xrootd.vo` appears on the transfer document.
 
 ```
 xrootd.monitor all flush 30 fstat 30 lfn ops ssq xfr 1 auth ident 300 \
@@ -1415,13 +1423,13 @@ it the collector reports opens, closes and byte volumes but no IOPS.
 `ident 300` is worth setting: the `=` identity record is what tells the
 collector a server's cluster and host name, and it defaults to hourly. Until
 it arrives every metric from that server is labelled `cluster="unknown"` with
-the numeric address as `server` (see [Cluster and server
-labels](#cluster-and-server-labels)).
+the numeric address as `server` (see [Site, cluster and server
+labels](#site-cluster-and-server-labels)).
 
 `all.sitename` is what names the cluster. This collector reads it as the
-storage system (`eosalice`, `eoscms`), not the WLCG site — see [Cluster and
-server labels](#cluster-and-server-labels) for why, and for how the site is
-recovered downstream.
+storage system (`eosalice`, `eoscms`), not the WLCG site — see [Site, cluster
+and server labels](#site-cluster-and-server-labels) for why, and for where the
+site comes from instead.
 
 ### Tuning `xrootd.monitor` for pipeline resilience
 
@@ -1558,7 +1566,7 @@ streams reject `index`) and relies on the `@timestamp` every document carries.
 
 A composable index template with an explicit mapping for the dotted
 semantic-convention field names (the `resource.*`, `attributes.*`,
-`xrootd.*`, and `wlcg.*` keys) is provided in
+and `xrootd.*` keys) is provided in
 [`opensearch-template.json`](opensearch-template.json)
 (IPs as `ip`, byte counters as `long`, identifiers as `keyword`, strings mapped
 to `keyword` by default rather than analyzed `text`). Apply it once before
@@ -1674,9 +1682,10 @@ serves Prometheus metrics aggregated from the decoded records. Unlike the
 per-file documents (which belong in a document store), these are bounded in
 cardinality and suitable for a time-series database.
 
-Every per-server series carries `{cluster, server}`. Both come from the `=`
-identity record, so both are provisional until it arrives — see
-[Cluster and server labels](#cluster-and-server-labels) below.
+Every per-server series carries `{cluster, server}`, both from the `=` identity
+record and so provisional until it arrives. A configured `--site` prepends a
+`site` label to every series below, including the unlabelled aggregates — see
+[Site, cluster and server labels](#site-cluster-and-server-labels) below.
 
 I/O, per cluster and server:
 
@@ -1839,10 +1848,11 @@ xrootd_collector_frm_purge_bytes_total{cluster,server}
 collector sees. Everything else counts individual I/O operations or file
 open→close lifecycles, and is named for what it counts.
 
-#### Cluster and server labels
+#### Site, cluster and server labels
 
-`cluster` is the server's `all.sitename`, which **this collector reads as the
-name of the storage cluster** — `eosalice`, `eoscms`, `eospilot` — and not as
+`site` is this collector's own, from `--site`; `cluster` is the server's
+`all.sitename`, which **this collector reads as the name of the storage
+cluster** — `eosalice`, `eoscms`, `eospilot` — and not as
 the WLCG site. That is a deliberate reinterpretation, and the reason for it is
 that a site holds several storage systems: one `all.sitename CERN-PROD` covers
 `eosalice`, `eosatlas`, `eoscms` and `eoslhcb`, and nothing else on the
@@ -1852,14 +1862,20 @@ solely from the daemon's `-n` flag, defaults to `anon`, and names the role
 (`fst`, `mgm`) in a stock EOS deployment, because it also picks the config
 file, admin path and pid path.
 
-**There is no `site` label.** The WLCG site is derived downstream from the
-server name; see [Adding a site
-label](DEPLOY.md#adding-a-site-label-downstream) in DEPLOY.md for the
-Prometheus relabel rule and the ingest-pipeline equivalent. Note the knock-on
-effect of the reinterpretation: other consumers of the same wire field —
-notably the MONIT/OSG pipeline, which maps `&site=` straight to a `site` field
-— see the cluster name once a deployment switches, so the downstream mapping
-has to exist before the switch, not after.
+**The site comes from this collector, not from the wire.** Since nothing a
+server reports names its WLCG site, `--site` (or `site =` in the config file)
+supplies it, on the deployment model of one collector per site. When set it
+becomes a `site` label on every series — including the collector's own
+unlabelled aggregates, since it is a global label and therefore leads the
+label list — and the `xrootd.site` resource attribute on every document. When
+unset, nothing is tagged and there is no `site` label at all; a collector
+serving several sites wants the per-server rule in [The site
+label](DEPLOY.md#the-site-label) instead.
+
+Note the knock-on effect of reading `all.sitename` as the cluster: other
+consumers of the same wire field — notably the MONIT/OSG pipeline, which maps
+`&site=` straight to a `site` field — see the cluster name once a deployment
+switches, so their mapping has to be adjusted before the switch, not after.
 
 `server` is the same name the documents carry in `resource.server.address`:
 the `=` identity record's advertised host, or the local FQDN for a co-located

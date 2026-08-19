@@ -105,9 +105,9 @@ p.wait(timeout=15)
 if not doc:
     fail('no transfer document for the packets sent during the restart window')
 a = doc['attributes']
-if a.get('user.name') != 'alice' or a.get('xrootd.transfer.open_seen') is not True:
+if a.get('user.name') != 'alice' or a.get('xrootd.open_seen') is not True:
     fail('document not fully correlated: %s' % json.dumps(a))
 
 print('OK: zero-loss restart -- %d bytes read by alice, correlated across '
-      'a collector restart on the held socket' % a['xrootd.transfer.read_bytes'])
+      'a collector restart on the held socket' % a['xrootd.read_bytes'])
 EOF

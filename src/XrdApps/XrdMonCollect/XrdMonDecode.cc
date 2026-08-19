@@ -2111,11 +2111,11 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
    otelBegin(j, (wrBytes > 0) ? "xrootd.write" : "xrootd.read", tRec, hasErr);
    json& a = j["attributes"];
 
-   a["xrootd.transfer.forced_close"] = forced;
-   a["xrootd.transfer.read_bytes"]   = rdBytes;
-   a["xrootd.transfer.readv_bytes"]  = rvBytes;
-   a["xrootd.transfer.write_bytes"]  = wrBytes;
    a["xrootd.operation.name"] = opName;
+   a["xrootd.forced_close"]   = forced;
+   a["xrootd.read_bytes"]     = rdBytes;
+   a["xrootd.readv_bytes"]    = rvBytes;
+   a["xrootd.write_bytes"]    = wrBytes;
 
 // Join the matching open record (held since the open packet) to recover the
 // path, the user, and the open time. Resolve the user dictid if we have it.
@@ -2123,7 +2123,7 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
    auto fit = srv.files.find(fileID);
    if (fit != srv.files.end())
       {const OpenFile& of = fit->second;
-       a["xrootd.transfer.open_seen"] = true;
+       a["xrootd.open_seen"] = true;
        haveOpen = true;
        openFsz  = of.fsz;
        openUser = of.user;
@@ -2132,14 +2132,14 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
        setFile(a, of.lfn);
        a["file.size"] = of.fsz;
        a["xrootd.file.read_write"] = of.rw;
-       if (of.tOpen > 0) a["xrootd.transfer.start_time"] = isoTime(of.tOpen);
+       if (of.tOpen > 0) a["xrootd.operation.start_time"] = isoTime(of.tOpen);
        // Both ends are interpolated within their reporting windows, so the
        // difference is an estimate with fractional seconds; clamp reordering
        // artifacts to zero and round to milliseconds.
        if (of.tOpen > 0 && tRec > 0)
           {durSecs = std::max(0.0, tRec - of.tOpen);
            durSecs = std::round(durSecs * 1000.0) / 1000.0;
-           a["xrootd.transfer.duration"] = durSecs;}
+           a["xrootd.operation.duration"] = durSecs;}
 
        vo = otelIdentity(a, srv, of.user);
 
@@ -2153,7 +2153,7 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
            std::string cd = hostDomain(ch);
            std::string sd = hostDomain(srv.ident.host);
            if (!cd.empty() && !sd.empty())
-              a["xrootd.transfer.is_local"] = (cd == sd);
+              a["xrootd.is_local"] = (cd == sd);
           }
        if (openUser)               // the close arrived: not a stale open
           {auto uit = srv.users.find(openUser);
@@ -2162,7 +2162,7 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
        LruDrop(fit->second.lru);   // unlink before erasing the map entry
        srv.files.erase(fit);
       }
-      else {a["xrootd.transfer.open_seen"] = false;
+      else {a["xrootd.open_seen"] = false;
             stats.orphanCls++;
             if (metrics)
                metrics->counterSeries("orphan_closes_total",
@@ -2204,31 +2204,31 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
 //
    if ((recFlag & XrdXrootdMonFileHdr::hasOPS) && recSize >= 8 + 24 + 48)
       {const unsigned char* o = rec + 8 + 24;
-       a["xrootd.transfer.read_ops"]   = ri32(o + 0);
-       a["xrootd.transfer.readv_ops"]  = ri32(o + 4);
-       a["xrootd.transfer.write_ops"]  = ri32(o + 8);
-       a["xrootd.transfer.readv_segs"] = ri64(o + 16);
+       a["xrootd.read_ops"]   = ri32(o + 0);
+       a["xrootd.readv_ops"]  = ri32(o + 4);
+       a["xrootd.write_ops"]  = ri32(o + 8);
+       a["xrootd.readv_segs"] = ri64(o + 16);
 
        // Request-size extremes use 0x7fffffff as the "unset" sentinel; omit
        // them rather than emit a misleading minimum.
        //
        auto minmax = [&](const char* kmn, const char* kmx, int32_t mn, int32_t mx)
                        {if (mn != 0x7fffffff) {a[kmn] = mn; a[kmx] = mx;}};
-       minmax("xrootd.transfer.read_min",  "xrootd.transfer.read_max",
+       minmax("xrootd.read_min",  "xrootd.read_max",
               ri32(o + 24), ri32(o + 28));
-       minmax("xrootd.transfer.readv_min", "xrootd.transfer.readv_max",
+       minmax("xrootd.readv_min", "xrootd.readv_max",
               ri32(o + 32), ri32(o + 36));
-       minmax("xrootd.transfer.write_min", "xrootd.transfer.write_max",
+       minmax("xrootd.write_min", "xrootd.write_max",
               ri32(o + 40), ri32(o + 44));
 
        // Optional sum-of-squares (XrdXrootdMonStatSSQ) when "ssq" configured.
        //
        if ((recFlag & XrdXrootdMonFileHdr::hasSSQ) && recSize >= 8 + 24 + 48 + 32)
           {const unsigned char* s = o + 48;
-           a["xrootd.transfer.read_sumsq"]  = rdbl(s + 0);
-           a["xrootd.transfer.readv_sumsq"] = rdbl(s + 8);
-           a["xrootd.transfer.rsegs_sumsq"] = rdbl(s + 16);
-           a["xrootd.transfer.write_sumsq"] = rdbl(s + 24);
+           a["xrootd.read_sumsq"]  = rdbl(s + 0);
+           a["xrootd.readv_sumsq"] = rdbl(s + 8);
+           a["xrootd.rsegs_sumsq"] = rdbl(s + 16);
+           a["xrootd.write_sumsq"] = rdbl(s + 24);
           }
       }
 
@@ -2274,11 +2274,11 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
           metrics->counterSeries("vo_transfers_total",
                         "completed transfers per VO",
                         {{"server", src}, {"vo", vo}}) += 1;
-       if (a.contains("xrootd.transfer.is_local"))
+       if (a.contains("xrootd.is_local"))
           metrics->counterSeries("locality_transfers_total",
                         "completed transfers by client/server locality",
                         {{"server", src}, {"locality",
-                         a["xrootd.transfer.is_local"].get<bool>() ? "local"
+                         a["xrootd.is_local"].get<bool>() ? "local"
                                                                    : "remote"}})
                   += 1;
        metrics->histogramSeries("transfer_size_bytes",
@@ -2497,8 +2497,8 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
                  {uint64_t rB = (uint64_t)rd32(a0 + 4) << a0[1];
                   uint64_t wB = (uint64_t)rd32(a1)     << a0[2];
                   ev = "xrootd.io.close";
-                  a["xrootd.transfer.read_bytes"]  = rB;
-                  a["xrootd.transfer.write_bytes"] = wB; lfnOf(rd32(a2));
+                  a["xrootd.read_bytes"]  = rB;
+                  a["xrootd.write_bytes"] = wB; lfnOf(rd32(a2));
                  }
                  break;
             case XROOTD_MON_DISC:

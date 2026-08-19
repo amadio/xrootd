@@ -188,13 +188,13 @@ TEST_F(Transfer, CorrelatesCloseWithOpenAndUser)
   EXPECT_EQ(j["attributes"]["network.protocol.name"], "xroot");
   EXPECT_FALSE(j["attributes"].contains("url.scheme"));   // not an HTTP session
   EXPECT_EQ(j["attributes"]["client.address"], "wn.example.org");
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.read_bytes"], 10485760);
+  EXPECT_EQ(j["attributes"]["xrootd.read_bytes"], 10485760);
   EXPECT_EQ(j["attributes"]["xrootd.operation.name"], "read");
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.read_ops"], 320);
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.read_max"], 1048576);
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.open_seen"], true);
+  EXPECT_EQ(j["attributes"]["xrootd.read_ops"], 320);
+  EXPECT_EQ(j["attributes"]["xrootd.read_max"], 1048576);
+  EXPECT_EQ(j["attributes"]["xrootd.open_seen"], true);
   EXPECT_EQ(j["attributes"]["file.size"], 123456);
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.duration"], kCloseT - kOpenT);
+  EXPECT_EQ(j["attributes"]["xrootd.operation.duration"], kCloseT - kOpenT);
   EXPECT_EQ(j["resource"]["xrootd.server.id"], 42);
   // semconv session correlator: the attribute mirrors the session traceId.
   EXPECT_EQ(j["attributes"]["session.id"], j["traceId"]);
@@ -215,8 +215,8 @@ TEST_F(Transfer, CloseWithoutOpenIsOrphan)
   feedClose();  // no preceding open
 
   json j = json::parse(lastDoc);
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.open_seen"], false);
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.read_bytes"], 10485760);
+  EXPECT_EQ(j["attributes"]["xrootd.open_seen"], false);
+  EXPECT_EQ(j["attributes"]["xrootd.read_bytes"], 10485760);
   EXPECT_FALSE(j["attributes"].contains("file.path"));
   EXPECT_EQ(dec.GetStats().orphanCls, 1u);
 }
@@ -316,11 +316,11 @@ TEST_F(Transfer, SamePacketOpenCloseInterpolatesDuration)
   ASSERT_TRUE(haveLog);
   ASSERT_TRUE(haveSpan);
 
-  EXPECT_EQ(log["attributes"]["xrootd.transfer.open_seen"], true);
+  EXPECT_EQ(log["attributes"]["xrootd.open_seen"], true);
   EXPECT_DOUBLE_EQ(
-      log["attributes"]["xrootd.transfer.duration"].get<double>(), 2.5);
+      log["attributes"]["xrootd.operation.duration"].get<double>(), 2.5);
   // The open time carries the interpolated fraction (tBeg + 0/2 of 5s).
-  EXPECT_EQ(log["attributes"]["xrootd.transfer.start_time"],
+  EXPECT_EQ(log["attributes"]["xrootd.operation.start_time"],
             "2023-11-14T22:13:20.000Z");
   // The span covers open -> close with nanosecond-encoded fractional times.
   EXPECT_EQ(span["startTimeUnixNano"], std::to_string(
@@ -339,7 +339,7 @@ TEST_F(Transfer, CrossPacketDurationUsesWindowEnds)
   feedClose();
 
   json j = json::parse(lastDoc);
-  EXPECT_DOUBLE_EQ(j["attributes"]["xrootd.transfer.duration"].get<double>(),
+  EXPECT_DOUBLE_EQ(j["attributes"]["xrootd.operation.duration"].get<double>(),
                    (double)(kCloseT - kOpenT));
 }
 
@@ -450,8 +450,8 @@ TEST_F(Transfer, AbortedTransferCloseHasError)
   ASSERT_FALSE(lastDoc.empty());
   json j = json::parse(lastDoc);
   EXPECT_EQ(j["attributes"]["file.path"], "/store/data/file.root");  // joined to the open
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.read_bytes"], 4096);    // partial bytes preserved
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.read_ops"], 2);
+  EXPECT_EQ(j["attributes"]["xrootd.read_bytes"], 4096);    // partial bytes preserved
+  EXPECT_EQ(j["attributes"]["xrootd.read_ops"], 2);
   EXPECT_EQ(j["attributes"]["xrootd.operation.state"], "Failed");
   EXPECT_EQ(j["attributes"]["xrootd.operation.name"], "read");
   EXPECT_EQ(j["attributes"]["error.type"], "read error: connection reset");
@@ -545,7 +545,7 @@ TEST(XrdMonCollect, TStreamRecordsDecoded)
   EXPECT_EQ(rd["attributes"]["file.path"], "/path/f.root");
   json cl = json::parse(docs[1]);
   EXPECT_EQ(cl["attributes"]["event.name"], "xrootd.io.close");
-  EXPECT_EQ(cl["attributes"]["xrootd.transfer.read_bytes"], 2048);
+  EXPECT_EQ(cl["attributes"]["xrootd.read_bytes"], 2048);
   json di = json::parse(docs[2]);
   EXPECT_EQ(di["attributes"]["event.name"], "xrootd.io.disconnect");
 
@@ -1458,7 +1458,7 @@ TEST_F(Transfer, WriteOperationDerived)
 
   json j = json::parse(lastDoc);
   EXPECT_EQ(j["attributes"]["xrootd.operation.name"], "write");
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.write_bytes"], 2097152);
+  EXPECT_EQ(j["attributes"]["xrootd.write_bytes"], 2097152);
   EXPECT_EQ(j["attributes"]["xrootd.transfer.kind"], "transfer");  // a clean write produces a whole file
 }
 
@@ -1539,7 +1539,7 @@ TEST_F(Transfer, OrphanCloseIsAccess)
 
   json j = json::parse(lastDoc);
   EXPECT_EQ(j["attributes"]["xrootd.transfer.kind"], "access");
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.open_seen"], false);
+  EXPECT_EQ(j["attributes"]["xrootd.open_seen"], false);
 }
 
 // A partial-access close increments the accesses counter, not transfers.
@@ -1598,8 +1598,8 @@ TEST_F(Transfer, IsLocalWhenSameDomain)
   feedClose();
 
   json j = json::parse(lastDoc);
-  ASSERT_TRUE(j["attributes"].contains("xrootd.transfer.is_local"));
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.is_local"], true);
+  ASSERT_TRUE(j["attributes"].contains("xrootd.is_local"));
+  EXPECT_EQ(j["attributes"]["xrootd.is_local"], true);
 }
 
 TEST_F(Transfer, IsRemoteWhenDifferentDomain)
@@ -1610,8 +1610,8 @@ TEST_F(Transfer, IsRemoteWhenDifferentDomain)
   feedClose();
 
   json j = json::parse(lastDoc);
-  ASSERT_TRUE(j["attributes"].contains("xrootd.transfer.is_local"));
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.is_local"], false);
+  ASSERT_TRUE(j["attributes"].contains("xrootd.is_local"));
+  EXPECT_EQ(j["attributes"]["xrootd.is_local"], false);
 }
 
 TEST_F(Transfer, IsLocalAbsentWithoutServerHost)
@@ -1622,7 +1622,7 @@ TEST_F(Transfer, IsLocalAbsentWithoutServerHost)
   feedClose();
 
   json j = json::parse(lastDoc);
-  EXPECT_FALSE(j["attributes"].contains("xrootd.transfer.is_local"));
+  EXPECT_FALSE(j["attributes"].contains("xrootd.is_local"));
 }
 
 namespace
@@ -1880,12 +1880,12 @@ TEST(XrdMonCollect, WarmEntrySurvivesEviction)
 
   feedCloseId(dec, "h:1", 1);                     // the warm open still joins
   json jw = json::parse(doc);
-  EXPECT_EQ(jw["attributes"]["xrootd.transfer.open_seen"], true);
+  EXPECT_EQ(jw["attributes"]["xrootd.open_seen"], true);
   EXPECT_EQ(jw["attributes"]["file.path"], "/warm/file.root");
 
   feedCloseId(dec, "h:1", 100);                   // an early cold open was evicted
   json jc = json::parse(doc);
-  EXPECT_EQ(jc["attributes"]["xrootd.transfer.open_seen"], false);
+  EXPECT_EQ(jc["attributes"]["xrootd.open_seen"], false);
 }
 
 // The resident state stays within the byte budget no matter how many distinct
@@ -3097,9 +3097,9 @@ TEST_F(StateFile, CloseCorrelatesAfterReload)
   json j = json::parse(doc2);
   EXPECT_EQ(j["attributes"]["file.path"], "/store/data/file.root");
   EXPECT_EQ(j["attributes"]["user.name"], "alice");
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.open_seen"], true);
+  EXPECT_EQ(j["attributes"]["xrootd.open_seen"], true);
   EXPECT_EQ(j["attributes"]["file.size"], 123456);
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.duration"], kCloseT - kOpenT);
+  EXPECT_EQ(j["attributes"]["xrootd.operation.duration"], kCloseT - kOpenT);
   EXPECT_EQ(j["resource"]["xrootd.server.id"], 42);
 
   const XrdMonDecode::Stats& s = dec2.GetStats();

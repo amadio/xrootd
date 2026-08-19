@@ -30,7 +30,7 @@ json doc()
                       {"file.path",           "/eos/atlas/proc/tmp.root"},
                       {"user_agent.name",     "eoscp"},
                       {"xrootd.error.code",   3011},
-                      {"xrootd.transfer.open_seen", true},
+                      {"xrootd.open_seen", true},
                       {"xrootd.session.recent_files", json::array({json::object()})}}}};
 }
 
@@ -152,7 +152,7 @@ TEST(XrdMonFilter, ArrayMatchesAnyElement)
 TEST(XrdMonFilter, NumbersAndBooleansAreStringified)
 {
    EXPECT_TRUE(matches("attributes.xrootd.error.code", "3011"));
-   EXPECT_TRUE(matches("attributes.xrootd.transfer.open_seen", "true"));
+   EXPECT_TRUE(matches("attributes.xrootd.open_seen", "true"));
    EXPECT_TRUE(matches("resource.server.port", "1095"));
    EXPECT_TRUE(matches("resource.server.port", "~^10"));
    EXPECT_FALSE(matches("attributes.xrootd.error.code", "3012"));

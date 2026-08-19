@@ -126,10 +126,32 @@
               "properties": {
                 "operation": {
                   "properties": {
-                    "name":  { "type": "keyword" },
-                    "state": { "type": "keyword" }
+                    "name":       { "type": "keyword" },
+                    "state":      { "type": "keyword" },
+                    "start_time": { "type": "date" },
+                    "duration":   { "type": "double" }
                   }
                 },
+                "forced_close": { "type": "boolean" },
+                "is_local":     { "type": "boolean" },
+                "open_seen":    { "type": "boolean" },
+                "read_bytes":   { "type": "long" },
+                "readv_bytes":  { "type": "long" },
+                "write_bytes":  { "type": "long" },
+                "read_ops":     { "type": "long" },
+                "readv_ops":    { "type": "long" },
+                "write_ops":    { "type": "long" },
+                "readv_segs":   { "type": "long" },
+                "read_min":     { "type": "long" },
+                "read_max":     { "type": "long" },
+                "readv_min":    { "type": "long" },
+                "readv_max":    { "type": "long" },
+                "write_min":    { "type": "long" },
+                "write_max":    { "type": "long" },
+                "read_sumsq":   { "type": "double" },
+                "readv_sumsq":  { "type": "double" },
+                "rsegs_sumsq":  { "type": "double" },
+                "write_sumsq":  { "type": "double" },
                 "dataset":         { "type": "keyword" },
                 "filter": { "properties": { "labels": { "type": "keyword" } } },
                 "auth":   { "properties": { "method": { "type": "keyword" } } },
@@ -176,29 +198,7 @@
                 },
                 "transfer": {
                   "properties": {
-                    "kind":         { "type": "keyword" },
-                    "start_time":   { "type": "date" },
-                    "duration":     { "type": "double" },
-                    "forced_close": { "type": "boolean" },
-                    "is_local":     { "type": "boolean" },
-                    "open_seen":    { "type": "boolean" },
-                    "read_bytes":   { "type": "long" },
-                    "readv_bytes":  { "type": "long" },
-                    "write_bytes":  { "type": "long" },
-                    "read_ops":     { "type": "long" },
-                    "readv_ops":    { "type": "long" },
-                    "write_ops":    { "type": "long" },
-                    "readv_segs":   { "type": "long" },
-                    "read_min":     { "type": "long" },
-                    "read_max":     { "type": "long" },
-                    "readv_min":    { "type": "long" },
-                    "readv_max":    { "type": "long" },
-                    "write_min":    { "type": "long" },
-                    "write_max":    { "type": "long" },
-                    "read_sumsq":   { "type": "double" },
-                    "readv_sumsq":  { "type": "double" },
-                    "rsegs_sumsq":  { "type": "double" },
-                    "write_sumsq":  { "type": "double" }
+                    "kind": { "type": "keyword" }
                   }
                 },
                 "session": {

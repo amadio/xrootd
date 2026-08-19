@@ -60,6 +60,7 @@
             },
             "xrootd": {
               "properties": {
+                "site": { "type": "keyword" },
                 "server": {
                   "properties": {
                     "id":          { "type": "long" },

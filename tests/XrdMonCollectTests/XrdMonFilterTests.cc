@@ -22,6 +22,7 @@ json doc()
       {"severityText", "INFO"},
       {"resource", {{"server.address",   "fst01.cern.ch"},
                     {"server.port",      1095},
+                    {"xrootd.site",      "CERN-PROD"},
                     {"service.namespace", "eosatlas"},
                     {"service.name",     "fst"}}},
       {"attributes", {{"event.name",          "xrootd.read"},
@@ -170,6 +171,7 @@ TEST(XrdMonFilter, ObjectsAndObjectArraysNeverMatch)
 TEST(XrdMonFilter, ResourceAndTopLevelKeys)
 {
    EXPECT_TRUE(matches("server", "fst01.cern.ch"));
+   EXPECT_TRUE(matches("site", "CERN-PROD"));
    EXPECT_TRUE(matches("cluster", "eosatlas"));
    EXPECT_TRUE(matches("service", "fst"));
    EXPECT_TRUE(matches("severity", "INFO"));        // top-level severityText

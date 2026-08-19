@@ -322,6 +322,11 @@ struct UserInfo
    int32_t  sLast       = 0;  // window time of the most recent folded close
    std::deque<FileSummary> sRecent;  // capped most-recent file summaries
 
+   // The session's disconnect has been reported. The entry outlives it -- a
+   // straggling close still needs the identity to resolve against -- so this
+   // is what separates a live session from a spent one for Server::sessions.
+   bool     disc        = false;
+
    // fileIDs of this user's open files still awaiting their close. The server
    // closes a session's files before reporting its disconnect, so anything
    // still here at the isDisc is a leaked open (its close record was lost)
@@ -423,6 +428,11 @@ struct Server
    std::unordered_map<std::string, StringEntry> infos; // 'i' descriptor -> appinfo
    std::unordered_map<uint32_t, TokenInfo>    tokens;  // 'T' user dictid -> token
    std::unordered_map<uint32_t, UserActivity> activity;// 'U' user dictid -> scitag
+   // Live client sessions: user dictids seen but not yet disconnected. Kept as
+   // a counter rather than derived from users.size(), which also holds the
+   // entries of sessions already ended (see UserInfo::disc). Maintained at the
+   // three places the set can change: a 'u' map, a disconnect, and eviction.
+   uint64_t sessions = 0;
    ServerIdent ident;        // '=' server self-identification
    std::string identRaw;     // last emitted identity (to de-duplicate docs)
    std::string resolvedHost; // reverse-resolved sender hostname (cached)
@@ -462,6 +472,11 @@ std::string ServerName(const Server& srv, const std::string& src) const;
 //! Recompute a server's cached {site, server} metric labels. Called when an
 //! incarnation appears and whenever a '=' ident changes what we know of it.
 void     LabelServer(Server& srv, const std::string& src);
+//! Publish the per-server live-state gauges (files_open, sessions_open) from
+//! the correlation tables. Call after anything that grows or shrinks them.
+//! sessions_open counts known user dictids, so it stays at zero when the
+//! server's monitor config omits the `user` destination.
+void     LiveGauges(const Server& srv);
 //! The decoder's view of the wall clock (see SetClock).
 time_t   Now() const {return nowFn ? nowFn() : time(nullptr);}
 //! Fold one f-stream window end into the incarnation's clock-offset estimate.

@@ -138,128 +138,6 @@
   "weekStart": "",
   "panels": [
     {
-      "id": 1,
-      "type": "stat",
-      "title": "Whole-file transfers",
-      "description": "Completed whole-file transfers in the selected range.",
-      "datasource": {
-        "type": "loki",
-        "uid": "${DS_LOKI}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 0,
-        "y": 0
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "auto",
-        "orientation": "auto"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "${DS_LOKI}"
-          },
-          "editorMode": "code",
-          "expr": "sum(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" | xrootd_transfer_kind=\"transfer\" [$__range]))",
-          "legendFormat": "",
-          "queryType": "instant",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 2,
-      "type": "stat",
-      "title": "Partial accesses",
-      "description": "Partial (byte-range) accesses in the selected range.",
-      "datasource": {
-        "type": "loki",
-        "uid": "${DS_LOKI}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 4,
-        "y": 0
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "auto",
-        "orientation": "auto"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "${DS_LOKI}"
-          },
-          "editorMode": "code",
-          "expr": "sum(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" | xrootd_transfer_kind=\"access\" [$__range]))",
-          "legendFormat": "",
-          "queryType": "instant",
-          "refId": "A"
-        }
-      ]
-    },
-    {
       "id": 3,
       "type": "stat",
       "title": "Bytes read",
@@ -313,7 +191,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" | unwrap xrootd_transfer_read_bytes [$__range]))",
+          "expr": "sum(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__range]))",
           "legendFormat": "",
           "queryType": "instant",
           "refId": "A"
@@ -374,7 +252,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" | unwrap xrootd_transfer_write_bytes [$__range]))",
+          "expr": "sum(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_write_bytes [$__range]))",
           "legendFormat": "",
           "queryType": "instant",
           "refId": "A"
@@ -435,7 +313,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" | xrootd_operation_state=\"Failed\" [$__range]))",
+          "expr": "sum(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_operation_state=\"Failed\" [$__range]))",
           "legendFormat": "",
           "queryType": "instant",
           "refId": "A"
@@ -496,7 +374,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "count(sum by (client_address)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" [$__range])))",
+          "expr": "count(sum by (client_address)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range])))",
           "legendFormat": "",
           "queryType": "instant",
           "refId": "A"
@@ -556,7 +434,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" | unwrap xrootd_transfer_read_bytes [$__auto]))",
+          "expr": "sum(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__auto]))",
           "legendFormat": "read bytes",
           "queryType": "range",
           "refId": "A"
@@ -567,7 +445,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" | unwrap xrootd_transfer_write_bytes [$__auto]))",
+          "expr": "sum(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_write_bytes [$__auto]))",
           "legendFormat": "write bytes",
           "queryType": "range",
           "refId": "B"
@@ -624,69 +502,9 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum by (xrootd_operation_state)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" [$__range]))",
+          "expr": "sum by (xrootd_operation_state)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range]))",
           "legendFormat": "{{xrootd_operation_state}}",
           "queryType": "instant",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 9,
-      "type": "timeseries",
-      "title": "Transfer/access rate by kind",
-      "description": "Event count per time bucket, split by transfer kind.",
-      "datasource": {
-        "type": "loki",
-        "uid": "${DS_LOKI}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 12
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 20,
-            "showPoints": "never",
-            "stacking": {
-              "mode": "normal",
-              "group": "A"
-            },
-            "axisCenteredZero": false
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": []
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "${DS_LOKI}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (xrootd_transfer_kind)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" [$__auto]))",
-          "legendFormat": "{{xrootd_transfer_kind}}",
-          "queryType": "range",
           "refId": "A"
         }
       ]
@@ -744,7 +562,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "quantile_over_time(0.5, {service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" | unwrap xrootd_transfer_duration [$__auto]) by (service_name)",
+          "expr": "quantile_over_time(0.5, {service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_duration [$__auto]) by (service_name)",
           "legendFormat": "p50",
           "queryType": "range",
           "refId": "A"
@@ -755,7 +573,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "quantile_over_time(0.9, {service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" | unwrap xrootd_transfer_duration [$__auto]) by (service_name)",
+          "expr": "quantile_over_time(0.9, {service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_duration [$__auto]) by (service_name)",
           "legendFormat": "p90",
           "queryType": "range",
           "refId": "B"
@@ -766,7 +584,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "quantile_over_time(0.99, {service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" | unwrap xrootd_transfer_duration [$__auto]) by (service_name)",
+          "expr": "quantile_over_time(0.99, {service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_duration [$__auto]) by (service_name)",
           "legendFormat": "p99",
           "queryType": "range",
           "refId": "C"
@@ -823,7 +641,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum by (wlcg_vo)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" [$__range]))",
+          "expr": "sum by (wlcg_vo)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range]))",
           "legendFormat": "{{wlcg_vo}}",
           "queryType": "instant",
           "refId": "A"
@@ -880,8 +698,8 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum by (xrootd_transfer_is_local)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" [$__range]))",
-          "legendFormat": "{{xrootd_transfer_is_local}}",
+          "expr": "sum by (xrootd_is_local)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range]))",
+          "legendFormat": "{{xrootd_is_local}}",
           "queryType": "instant",
           "refId": "A"
         }
@@ -937,7 +755,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum by (xrootd_auth_method)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" [$__range]))",
+          "expr": "sum by (xrootd_auth_method)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range]))",
           "legendFormat": "{{xrootd_auth_method}}",
           "queryType": "instant",
           "refId": "A"
@@ -994,7 +812,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum by (xrootd_operation_name)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" | xrootd_operation_state=\"Failed\" [$__range]))",
+          "expr": "sum by (xrootd_operation_name)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_operation_state=\"Failed\" [$__range]))",
           "legendFormat": "{{xrootd_operation_name}}",
           "queryType": "instant",
           "refId": "A"
@@ -1133,7 +951,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "topk(20, sum by (file_path)(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" | unwrap xrootd_transfer_read_bytes [$__range])))",
+          "expr": "topk(20, sum by (file_path)(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__range])))",
           "legendFormat": "",
           "queryType": "instant",
           "refId": "A"
@@ -1215,7 +1033,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "topk(20, sum by (user_name)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" [$__range])))",
+          "expr": "topk(20, sum by (user_name)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range])))",
           "legendFormat": "",
           "queryType": "instant",
           "refId": "A"
@@ -1297,7 +1115,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "topk(20, sum by (xrootd_client_site)(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | event_name=\"xrootd.transfer\" | unwrap xrootd_transfer_read_bytes [$__range])))",
+          "expr": "topk(20, sum by (xrootd_client_site)(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__range])))",
           "legendFormat": "",
           "queryType": "instant",
           "refId": "A"

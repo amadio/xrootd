@@ -83,6 +83,64 @@
         "refresh": 1
       },
       {
+        "name": "cluster",
+        "type": "query",
+        "label": "Storage cluster",
+        "datasource": {
+          "type": "loki",
+          "uid": "${DS_LOKI}"
+        },
+        "definition": "label_values({service_namespace=~\".+\"}, service_namespace)",
+        "query": {
+          "label": "service_namespace",
+          "stream": "{service_namespace=~\".+\"}",
+          "type": 1,
+          "refId": "cluster"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "service",
+        "type": "query",
+        "label": "Service",
+        "datasource": {
+          "type": "loki",
+          "uid": "${DS_LOKI}"
+        },
+        "definition": "label_values({service_namespace=~\"$cluster\"}, service_name)",
+        "query": {
+          "label": "service_name",
+          "stream": "{service_namespace=~\"$cluster\"}",
+          "type": 1,
+          "refId": "service"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
         "name": "server",
         "type": "query",
         "label": "Server",
@@ -90,10 +148,10 @@
           "type": "loki",
           "uid": "${DS_LOKI}"
         },
-        "definition": "label_values({service_name=\"xrootd\"}, service_instance_id)",
+        "definition": "label_values({service_namespace=~\"$cluster\", service_name=~\"$service\"}, service_instance_id)",
         "query": {
           "label": "service_instance_id",
-          "stream": "{service_name=\"xrootd\"}",
+          "stream": "{service_namespace=~\"$cluster\", service_name=~\"$service\"}",
           "type": 1,
           "refId": "server"
         },
@@ -101,7 +159,7 @@
         "sort": 1,
         "multi": true,
         "includeAll": true,
-        "allValue": ".*",
+        "allValue": ".+",
         "current": {
           "text": [
             "All"
@@ -179,7 +237,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__range])) + sum(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_readv_bytes [$__range]))",
+          "expr": "sum(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__range])) + sum(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_readv_bytes [$__range]))",
           "legendFormat": "",
           "refId": "A",
           "queryType": "instant"
@@ -240,7 +298,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "count(sum by (user_name)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | user_name!=\"\" [$__range])))",
+          "expr": "count(sum by (user_name)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | user_name!=\"\" [$__range])))",
           "legendFormat": "",
           "refId": "A",
           "queryType": "instant"
@@ -301,7 +359,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "count(sum by (xrootd_dataset)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_dataset!=\"\" [$__range])))",
+          "expr": "count(sum by (xrootd_dataset)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_dataset!=\"\" [$__range])))",
           "legendFormat": "",
           "refId": "A",
           "queryType": "instant"
@@ -362,7 +420,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "count(sum by (file_directory)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | file_directory!=\"\" [$__range])))",
+          "expr": "count(sum by (file_directory)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | file_directory!=\"\" [$__range])))",
           "legendFormat": "",
           "refId": "A",
           "queryType": "instant"
@@ -422,7 +480,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum by (scitags_experiment)(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__auto]))",
+          "expr": "sum by (scitags_experiment)(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__auto]))",
           "legendFormat": "{{scitags_experiment}}",
           "refId": "A",
           "queryType": "range"
@@ -482,7 +540,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum by (wlcg_vo)(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__auto]))",
+          "expr": "sum by (wlcg_vo)(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__auto]))",
           "legendFormat": "{{wlcg_vo}}",
           "refId": "A",
           "queryType": "range"
@@ -542,7 +600,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum by (xrootd_client_site)(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__auto]))",
+          "expr": "sum by (xrootd_client_site)(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__auto]))",
           "legendFormat": "{{xrootd_client_site}}",
           "refId": "A",
           "queryType": "range"
@@ -605,7 +663,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "topk(10, sum by (xrootd_dataset)(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_dataset!=\"\" | unwrap xrootd_read_bytes [$__range])))",
+          "expr": "topk(10, sum by (xrootd_dataset)(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_dataset!=\"\" | unwrap xrootd_read_bytes [$__range])))",
           "legendFormat": "{{xrootd_dataset}}",
           "refId": "A",
           "queryType": "instant"
@@ -668,7 +726,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "topk(10, sum by (xrootd_dataset)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_dataset!=\"\" [$__range])))",
+          "expr": "topk(10, sum by (xrootd_dataset)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_dataset!=\"\" [$__range])))",
           "legendFormat": "{{xrootd_dataset}}",
           "refId": "A",
           "queryType": "instant"
@@ -731,7 +789,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "topk(10, sum by (user_name)(sum_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | user_name!=\"\" | unwrap xrootd_read_bytes [$__range])))",
+          "expr": "topk(10, sum by (user_name)(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | user_name!=\"\" | unwrap xrootd_read_bytes [$__range])))",
           "legendFormat": "{{user_name}}",
           "refId": "A",
           "queryType": "instant"
@@ -794,7 +852,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "topk(10, sum by (xrootd_client_site)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_client_site!=\"\" [$__range])))",
+          "expr": "topk(10, sum by (xrootd_client_site)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_client_site!=\"\" [$__range])))",
           "legendFormat": "{{xrootd_client_site}}",
           "refId": "A",
           "queryType": "instant"
@@ -854,7 +912,7 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum by (xrootd_dataset)(count_over_time({service_name=\"xrootd\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_dataset!=\"\" [$__auto]))",
+          "expr": "sum by (xrootd_dataset)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_dataset!=\"\" [$__auto]))",
           "legendFormat": "{{xrootd_dataset}}",
           "refId": "A",
           "queryType": "range"

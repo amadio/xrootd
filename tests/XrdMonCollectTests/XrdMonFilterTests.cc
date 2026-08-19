@@ -20,9 +20,10 @@ json doc()
 {
    return json{
       {"severityText", "INFO"},
-      {"resource", {{"server.address", "fst01.cern.ch"},
-                    {"server.port",    1095},
-                    {"xrootd.server.site", "CERN-PROD"}}},
+      {"resource", {{"server.address",   "fst01.cern.ch"},
+                    {"server.port",      1095},
+                    {"service.namespace", "eosatlas"},
+                    {"service.name",     "fst"}}},
       {"attributes", {{"event.name",          "xrootd.read"},
                       {"user.name",           "daemon"},
                       {"user.roles",          json::array({"production"})},
@@ -169,9 +170,10 @@ TEST(XrdMonFilter, ObjectsAndObjectArraysNeverMatch)
 TEST(XrdMonFilter, ResourceAndTopLevelKeys)
 {
    EXPECT_TRUE(matches("server", "fst01.cern.ch"));
-   EXPECT_TRUE(matches("site", "CERN-PROD"));
+   EXPECT_TRUE(matches("cluster", "eosatlas"));
+   EXPECT_TRUE(matches("service", "fst"));
    EXPECT_TRUE(matches("severity", "INFO"));        // top-level severityText
-   EXPECT_TRUE(matches("resource.xrootd.server.site", "CERN-PROD"));
+   EXPECT_TRUE(matches("resource.service.namespace", "eosatlas"));
    EXPECT_TRUE(matches("attributes.user.name", "daemon"));
    // A resource key must not be found under attributes, or vice versa.
    EXPECT_FALSE(matches("attributes.server.address", "fst01.cern.ch"));

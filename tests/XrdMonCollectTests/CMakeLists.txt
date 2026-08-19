@@ -36,3 +36,18 @@ if(TARGET xrdmoncollect)
       PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
   endif()
 endif()
+
+# The Grafana dashboards and OpenSearch objects shipped next to the collector
+# are data, not code: a panel querying a metric that has been renamed, or a new
+# metric that reaches no dashboard at all, compiles and packages perfectly and
+# only shows up as an empty panel in somebody's Grafana. This checks both
+# directions against the collector sources. It needs no build artefact, so it
+# runs even where the daemon itself is not built.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+
+if(Python3_Interpreter_FOUND)
+  add_test(NAME XrdMonCollect::Dashboards
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/dashboards_test.py ${CMAKE_SOURCE_DIR})
+  set_tests_properties(XrdMonCollect::Dashboards PROPERTIES TIMEOUT 60)
+endif()

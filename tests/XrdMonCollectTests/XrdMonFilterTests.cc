@@ -23,7 +23,7 @@ json doc()
       {"resource", {{"server.address", "fst01.cern.ch"},
                     {"server.port",    1095},
                     {"xrootd.server.site", "CERN-PROD"}}},
-      {"attributes", {{"event.name",          "xrootd.transfer"},
+      {"attributes", {{"event.name",          "xrootd.read"},
                       {"user.name",           "daemon"},
                       {"user.roles",          json::array({"production"})},
                       {"xrootd.auth.method",  "sss"},

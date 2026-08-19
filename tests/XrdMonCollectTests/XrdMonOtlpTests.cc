@@ -35,7 +35,7 @@ TEST(XrdMonOtlp, LogRecordEncoding)
    doc["severityText"]           = "INFO";
    doc["traceId"]                = "9f1c8b0d4e2a6f37c1a8b0d4e2a6f371";
    doc["spanId"]                 = "3ab4c1d2e3f40516";
-   doc["attributes"]["event.name"]                 = "xrootd.transfer";
+   doc["attributes"]["event.name"]                 = "xrootd.read";
    doc["attributes"]["file.path"]                  = "/store/data/file.root";
    doc["attributes"]["xrootd.transfer.read_bytes"] = 10485760;
    doc["attributes"]["xrootd.transfer.is_local"]   = true;
@@ -68,7 +68,7 @@ TEST(XrdMonOtlp, LogRecordEncoding)
    EXPECT_EQ(lr["timeUnixNano"], "1751450432000000000");
    EXPECT_EQ(lr["traceId"], "9f1c8b0d4e2a6f37c1a8b0d4e2a6f371");
    EXPECT_EQ(lr["spanId"], "3ab4c1d2e3f40516");
-   EXPECT_EQ(lr["body"]["stringValue"], "xrootd.transfer");
+   EXPECT_EQ(lr["body"]["stringValue"], "xrootd.read");
 
    const json& la = lr["attributes"];
    const json* fp = kv(la, "file.path");
@@ -126,7 +126,7 @@ TEST(XrdMonOtlp, GroupsByResourceAndResets)
    json doc;
    doc["resource"]["service.name"] = "xrootd";
    doc["severityText"]             = "INFO";
-   doc["attributes"]["event.name"] = "xrootd.transfer";
+   doc["attributes"]["event.name"] = "xrootd.read";
 
    XrdMonOtlpBatch b;
    b.add(doc);

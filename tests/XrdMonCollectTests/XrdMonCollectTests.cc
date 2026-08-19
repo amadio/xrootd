@@ -180,8 +180,8 @@ TEST_F(Transfer, CorrelatesCloseWithOpenAndUser)
 
   // The event name lives in the top-level EventName LogRecord field, with the
   // deprecated attribute kept as a duplicate for Loki (grafana/loki#19260).
-  EXPECT_EQ(j["eventName"], "xrootd.transfer");
-  EXPECT_EQ(j["attributes"]["event.name"], "xrootd.transfer");
+  EXPECT_EQ(j["eventName"], "xrootd.read");
+  EXPECT_EQ(j["attributes"]["event.name"], "xrootd.read");
   EXPECT_EQ(j["attributes"]["xrootd.transfer.kind"], "transfer");
   EXPECT_EQ(j["attributes"]["file.path"], "/store/data/file.root");
   EXPECT_EQ(j["attributes"]["user.name"], "alice");
@@ -311,7 +311,7 @@ TEST_F(Transfer, SamePacketOpenCloseInterpolatesDuration)
      {json x = json::parse(d);
       if (x.contains("kind"))              {span = x; haveSpan = true;}
       else if (x["attributes"].value("event.name", std::string())
-               == "xrootd.transfer")       {log  = x; haveLog  = true;}
+               == "xrootd.read")            {log  = x; haveLog  = true;}
      }
   ASSERT_TRUE(haveLog);
   ASSERT_TRUE(haveSpan);
@@ -379,7 +379,7 @@ TEST_F(Transfer, FailedOpenEmitsFailedState)
 
   ASSERT_FALSE(lastDoc.empty());
   json j = json::parse(lastDoc);
-  EXPECT_EQ(j["attributes"]["event.name"], "xrootd.transfer");
+  EXPECT_EQ(j["attributes"]["event.name"], "xrootd.auth");
   EXPECT_EQ(j["attributes"]["file.path"], "/store/data/missing.root");
   EXPECT_EQ(j["attributes"]["user.name"], "alice");   // resolved from the inline dictid
   EXPECT_EQ(j["attributes"]["xrootd.operation.state"], "Failed");
@@ -539,15 +539,15 @@ TEST(XrdMonCollect, TStreamRecordsDecoded)
   EXPECT_EQ(dec.GetStats().traces, 4u);
   ASSERT_EQ(docs.size(), 3u);   // window emits nothing; read + close + disc do
   json rd = json::parse(docs[0]);
-  EXPECT_EQ(rd["attributes"]["event.name"], "xrootd.read");
+  EXPECT_EQ(rd["attributes"]["event.name"], "xrootd.io.read");
   EXPECT_EQ(rd["attributes"]["xrootd.io.offset"], 4096);
   EXPECT_EQ(rd["attributes"]["xrootd.io.length"], 1024);
   EXPECT_EQ(rd["attributes"]["file.path"], "/path/f.root");
   json cl = json::parse(docs[1]);
-  EXPECT_EQ(cl["attributes"]["event.name"], "xrootd.close");
+  EXPECT_EQ(cl["attributes"]["event.name"], "xrootd.io.close");
   EXPECT_EQ(cl["attributes"]["xrootd.transfer.read_bytes"], 2048);
   json di = json::parse(docs[2]);
-  EXPECT_EQ(di["attributes"]["event.name"], "xrootd.disconnect");
+  EXPECT_EQ(di["attributes"]["event.name"], "xrootd.io.disconnect");
 
   // Every emitted trace record carries a well-formed traceId/spanId so tracing
   // backends can correlate it (32-hex trace id, 16-hex span id); the session.id
@@ -614,7 +614,7 @@ TEST(XrdMonCollect, TraceAppidMapsToXrootdApp)
 
   ASSERT_EQ(docs.size(), 1u);
   json j = json::parse(docs[0]);
-  EXPECT_EQ(j["attributes"]["event.name"], "xrootd.appid");
+  EXPECT_EQ(j["attributes"]["event.name"], "xrootd.io.appid");
   EXPECT_EQ(j["attributes"]["xrootd.app"], "myapp");
 }
 
@@ -649,7 +649,7 @@ TEST_F(Transfer, TraceRecordsCorrelateWithTransferSpan)
      {json d = json::parse(s);
       if (d.contains("kind")) rspan = d; else rlog = d;
      }
-  EXPECT_EQ(rlog["attributes"]["event.name"], "xrootd.read");
+  EXPECT_EQ(rlog["attributes"]["event.name"], "xrootd.io.read");
   EXPECT_EQ(rlog["attributes"]["session.id"], rlog["traceId"]);
   EXPECT_EQ(rspan["name"], "read");
   EXPECT_EQ(rspan["kind"], "SPAN_KIND_SERVER");
@@ -665,7 +665,7 @@ TEST_F(Transfer, TraceRecordsCorrelateWithTransferSpan)
      {json d = json::parse(s);
       if (d.contains("kind")) xspan = d; else xlog = d;
      }
-  ASSERT_EQ(xlog["eventName"], "xrootd.transfer");
+  ASSERT_EQ(xlog["eventName"], "xrootd.read");
   EXPECT_EQ(xspan["spanId"], xlog["spanId"]);        // the file's transfer span
 
   // The I/O span nests under the file's transfer span, same session trace.
@@ -1069,9 +1069,9 @@ TEST(XrdMonCollect, RedirectStreamDecoded)
 
   EXPECT_EQ(dec.GetStats().redirs, 1u);
   json j = json::parse(out);
-  // A redirect is a concluded-operation report: type:"transfer" with
+  // A redirect is a concluded-operation report: its own event name, with
   // operation state "Redirected" and the destination under "redirect".
-  EXPECT_EQ(j["attributes"]["event.name"], "xrootd.transfer");
+  EXPECT_EQ(j["attributes"]["event.name"], "xrootd.redirect");
   EXPECT_EQ(j["attributes"]["xrootd.operation.name"], "open-read");
   EXPECT_EQ(j["attributes"]["xrootd.operation.state"], "Redirected");
   EXPECT_EQ(j["attributes"]["xrootd.redirect.kind"], "remote");
@@ -2458,7 +2458,7 @@ TEST(XrdMonCollect, TraceDiscDocCarriesSessionTimes)
   ASSERT_EQ(docs.size(), 1u);
   json j = json::parse(docs[0]);
   const json& a = j["attributes"];
-  EXPECT_EQ(a["event.name"], "xrootd.disconnect");
+  EXPECT_EQ(a["event.name"], "xrootd.io.disconnect");
   EXPECT_EQ(a["xrootd.session.start_time"], isoOf(T - 45));
   EXPECT_EQ(a["xrootd.session.end_time"],   isoOf(T));
   EXPECT_EQ(a["xrootd.session.duration"].get<double>(), 45.0);
@@ -2714,7 +2714,7 @@ TEST(XrdMonCollect, FilterDoesNotAffectSessionRollup)
   XrdMonFilter flt;
   std::string err;
   std::size_t r = flt.AddRule("no-transfers");
-  ASSERT_TRUE(flt.AddCondition(r, "event", "xrootd.transfer", err)) << err;
+  ASSERT_TRUE(flt.AddCondition(r, "event", "xrootd.read", err)) << err;
   ASSERT_TRUE(flt.SetAction(r, "drop", err)) << err;
 
   std::vector<std::string> docs;

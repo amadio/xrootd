@@ -251,10 +251,10 @@ function test_moncollect() {
 	# Trace-stream I/O records (--traces) must carry OTel correlation ids: a
 	# 32-hex traceId and a 16-hex spanId. Re-drive until a read record lands
 	# (the trace stream is buffered server-side and can lag the close).
-	drive_until '"event.name":"xrootd.read"' "trace-stream read record" \
+	drive_until '"event.name":"xrootd.io.read"' "trace-stream read record" \
 		"xrdcp -f '${HOST}/${TMPDIR}/ok.ref' '${TMPDIR}/ok.dat'"
 	# The read log (no "kind") carries the ids.
-	read_doc=$(grep -E '"event.name":"xrootd.read"' "${COLLECTOR_OUT}" \
+	read_doc=$(grep -E '"event.name":"xrootd.io.read"' "${COLLECTOR_OUT}" \
 		| grep -Ev '"kind":' | head -n1)
 	assert grep -Eq '"traceId":"[0-9a-f]{32}"' <<<"${read_doc}"
 	assert grep -Eq '"spanId":"[0-9a-f]{16}"' <<<"${read_doc}"
@@ -318,7 +318,7 @@ function test_moncollect() {
 		assert grep -q '"key":"xrootd.operation.state"' "${OTLP_OUT}"
 		# the event name must ride in the top-level LogRecord EventName field
 		# (the event.name attribute stays as a duplicate for Loki)
-		assert grep -q '"eventName":"xrootd.transfer"' "${OTLP_OUT}"
+		assert grep -Eq '"eventName":"xrootd\.(read|write)"' "${OTLP_OUT}"
 		# the bearer token (read from @file) must reach the endpoint
 		assert grep -q '^authz /v1/logs Bearer secrettoken123' "${OTLP_OUT}"
 		for _ in $(seq 1 15); do
@@ -417,10 +417,10 @@ function test_moncollect() {
 	# for the app name alone can return before any transfer document exists
 	# (and a disconnect record has no companion span to check below). Keys are
 	# serialized in sorted order, so event.name always precedes user_agent.name.
-	drive_until "\"event.name\":\"xrootd.transfer\".*\"user_agent.name\":\"${APP_TAGGED}\"" \
+	drive_until "\"event.name\":\"xrootd[.](read|write)\".*\"user_agent.name\":\"${APP_TAGGED}\"" \
 		"tagged transfer document" \
 		"XRD_APPNAME=${APP_TAGGED} xrdcp -f '${HOST}/${TMPDIR}/ok.ref' '${TMPDIR}/tagged.dat'"
-	tagged_doc=$(grep -E "\"event.name\":\"xrootd.transfer\".*\"user_agent.name\":\"${APP_TAGGED}\"" \
+	tagged_doc=$(grep -E "\"event.name\":\"xrootd[.](read|write)\".*\"user_agent.name\":\"${APP_TAGGED}\"" \
 		"${COLLECTOR_OUT}" | grep -Ev '"kind":' | head -n1)
 	test -n "${tagged_doc}" || error "no tagged transfer document found"
 	assert grep -Fq '"xrootd.filter.labels":["e2e-internal"]' <<<"${tagged_doc}"
@@ -448,7 +448,7 @@ function test_moncollect() {
 			>/dev/null 2>&1 || true
 	done
 	assert xrdcp -f "${TMPDIR}/ok.ref" "${HOST}/${TMPDIR}/marker.ref"
-	drive_until '"event.name":"xrootd.transfer".*"file.name":"marker.ref"' \
+	drive_until '"event.name":"xrootd[.](read|write)".*"file.name":"marker.ref"' \
 		"post-drop marker document" \
 		"XRD_APPNAME=${APP_TAGGED} xrdcp -f '${HOST}/${TMPDIR}/marker.ref' '${TMPDIR}/marker.dat'"
 	assert_failure grep -q "\"user_agent.name\":\"${APP_DROPPED}\"" "${COLLECTOR_OUT}"

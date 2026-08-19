@@ -711,7 +711,7 @@ monitoring/
 │   ├── tempo.yml                  # section 12, unchanged
 │   ├── grafana-datasources.yaml   # section 14, localhost -> service names
 │   └── grafana-dashboards.yaml    # dashboard provider (below)
-└── dashboards/                    # the three grafana-*.json from this dir
+└── dashboards/                    # the four grafana-*.json from this dir
 ```
 
 `compose.yaml`:
@@ -863,9 +863,9 @@ otelcol.auth.bearer "otlp_in" {
 ```
 
 `configs/grafana-dashboards.yaml` provisions the XRootD dashboards shipped
-next to this guide (copy `grafana-dashboard.json`,
-`grafana-loki-dashboard.json` and `grafana-loki-popularity-dashboard.json`
-into `dashboards/`):
+next to this guide (copy `grafana-collector-dashboard.json`,
+`grafana-cluster-dashboard.json`, `grafana-loki-dashboard.json` and
+`grafana-loki-popularity-dashboard.json` into `dashboards/`):
 
 ```yaml
 apiVersion: 1
@@ -1312,7 +1312,7 @@ site = CERN-PROD
 
 or `--site CERN-PROD` on the command line. Every metric series then carries a
 `site` label and every document an `xrootd.site` resource attribute, and the
-shipped Grafana dashboard's **Site** variable picks it up with no further
+shipped Grafana dashboards' **Site** variable picks it up with no further
 configuration. This is the intended arrangement: **one collector per site**.
 Leave it unset and nothing is tagged — no label, no attribute.
 
@@ -1732,20 +1732,27 @@ datasources:
 
 ### 14.2 XRootD dashboards
 
-Three ready-made dashboards ship in the XRootD source tree next to this
+Four ready-made dashboards ship in the XRootD source tree next to this
 guide (`src/XrdApps/XrdMonCollect/`):
 
 | File | Datasource | Content |
 |------|------------|---------|
-| `grafana-dashboard.json` | Prometheus | collector health: rates, packet loss, sinks, per-VO/locality aggregates |
-| `grafana-loki-dashboard.json` | Loki | transfer documents: throughput, clients, errors |
+| `grafana-collector-dashboard.json` | Prometheus | collector health: ingest and decode rates, packet loss, the reporting server fleet, sinks, shovel transport |
+| `grafana-cluster-dashboard.json` | Prometheus | storage activity: throughput, file operations, sessions, errors, redirects, `g`-stream backends |
+| `grafana-loki-dashboard.json` | Loki | transfer documents: throughput, clients, users, errors |
 | `grafana-loki-popularity-dashboard.json` | Loki | data popularity by dataset/path |
+
+The two Prometheus dashboards split by audience: the first answers "is the
+pipeline healthy and is every server feeding it", the second "what is the
+storage cluster doing". Each carries a link dropdown to the other three, so
+importing all four is worth the extra minute.
 
 Provision them as files:
 
 ```bash
 sudo mkdir -p /var/lib/grafana/dashboards
-sudo cp grafana-dashboard.json grafana-loki-dashboard.json \
+sudo cp grafana-collector-dashboard.json grafana-cluster-dashboard.json \
+        grafana-loki-dashboard.json \
         grafana-loki-popularity-dashboard.json /var/lib/grafana/dashboards/
 sudo chown -R grafana:grafana /var/lib/grafana/dashboards
 ```

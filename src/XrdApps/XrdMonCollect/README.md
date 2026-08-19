@@ -1671,7 +1671,7 @@ dataset panels stay empty while the directory/user/VO panels still work. The
 Loki variant groups by structured metadata, which is comparatively expensive
 over long ranges — prefer hours-to-days ranges there (OpenSearch aggregations
 handle longer windows better). Collector-health and aggregate-rate panels
-stay in the Prometheus dashboard ([below](#aggregated-metrics-prometheus));
+stay in the Prometheus dashboards ([below](#aggregated-metrics-prometheus));
 the Prometheus metrics deliberately carry no per-dataset labels (unbounded
 cardinality), so popularity is a log-analytics concern.
 
@@ -1705,6 +1705,12 @@ tick. `app_io_bytes_total` attributes the same volumes to the client
 application (the `i`-stream appid when the site sets one, else the login's
 `&x=` executable) and deliberately carries no `server` label — `app × server`
 is the one label product here with real cardinality risk.
+
+Redirects, which need `redir` in the servers' `xrootd.monitor` directive:
+
+```
+xrootd_collector_redirects_total{cluster,server,kind="local|remote"}
+```
 
 Live state and identity:
 
@@ -1828,8 +1834,8 @@ xrootd_collector_oss_ops_total{cluster,server,op="..."}
 xrootd_collector_oss_slow_ops_total{cluster,server,op="..."}
 xrootd_collector_pfc_files_total{cluster,server}
 xrootd_collector_pfc_bytes_total{cluster,server,source="hit|miss|bypass|disk|prefetch"}
-xrootd_collector_tpc_total{cluster,server,type="push|pull",result="ok|error"}
-xrootd_collector_tpc_bytes_total{cluster,server,type="push|pull"}
+xrootd_collector_tpc_total{cluster,server,type="...",result="ok|error"}
+xrootd_collector_tpc_bytes_total{cluster,server,type="..."}
 xrootd_collector_tpc_size_bytes{cluster,server}   (histogram)
 xrootd_collector_throttle_io_total{cluster,server}
 xrootd_collector_throttle_io_active{cluster,server}   (gauge)
@@ -1910,18 +1916,40 @@ sum by (service_name) (
 
 Point a Prometheus scrape job at `http://<collector-host>:<p>/metrics`.
 
-[`grafana-dashboard.json`](grafana-dashboard.json) (next to this README) is a
-ready-to-import dashboard covering the metrics above: collector health (ingest/decode rates, correlation
-memory, queue depth), sink health (POST failures, drops, queue and disk-cache
-backlog for both the OpenSearch and OTLP sinks), shovel transport (collector
-TCP connections and shoveled-datagram rates, plus per-shoveler pipeline, spool
-backlog, and connectivity — scrape the shovelers' `--metrics-port` with the
-same Prometheus), I/O activity per cluster and server
-(throughput, IOPS, open files and sessions, errors by category), and the
-`g`/`x`/`p`-stream backends (redirects, TPC, PFC, OSS, HTTP, throttle, FRM).
-Import it in Grafana (*Dashboards → New → Import*), then pick the Prometheus
-data source that scrapes the collector; **Storage cluster** and **Server**
-variables multi-select what to show.
+Two ready-to-import dashboards sit next to this README, split by what they
+answer:
+
+| Dashboard | Question it answers |
+|-----------|---------------------|
+| [`grafana-collector-dashboard.json`](grafana-collector-dashboard.json) | Is the monitoring pipeline healthy, and is every server feeding it? |
+| [`grafana-cluster-dashboard.json`](grafana-cluster-dashboard.json) | What is the storage cluster doing? |
+
+The **collector** dashboard covers ingest and decode rates, packet loss,
+correlation memory and queue depth, sink health (POST failures, drops, queue
+and disk-cache backlog for both the OpenSearch and OTLP sinks), and shovel
+transport — collector TCP connections and shoveled-datagram rates plus
+per-shoveler pipeline, spool backlog and connectivity, for which you scrape
+the shovelers' own `--metrics-port` with the same Prometheus. Two tables are
+worth knowing about: *Packets by server and stream* gives one row per server
+and one column per stream code, so a server sending traffic but no `f`
+records — whose transfers can therefore never be correlated — shows up as a
+red cell rather than as a quiet absence; and *Server inventory* lists each
+live server's advertised identity, including the XRootD version it runs.
+
+The **cluster** dashboard covers throughput and file operations, open files
+and sessions, session duration and how each session's start time was
+resolved, errors by category, redirects, and the `g`/`x`/`p`-stream backends
+(HTTP, TPC, PFC, OSS, throttle, FRM).
+
+Import either in Grafana (*Dashboards → New → Import*), then pick the
+Prometheus data source that scrapes the collector. **Site**, **Storage
+cluster** and **Server** variables multi-select what to show, and every
+dashboard carries a link dropdown to its siblings.
+
+Per-user, per-VO and per-dataset detail is deliberately absent from both: no
+Prometheus metric carries those labels, since one series per user would be
+unbounded. That view lives in the document stream — see [Loki /
+Grafana](#loki--grafana) below.
 
 ## Limitations
 

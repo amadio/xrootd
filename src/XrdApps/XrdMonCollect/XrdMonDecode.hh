@@ -603,7 +603,7 @@ static std::size_t bytesOf(const StringEntry& s, const std::string& key);
 // one OpenTelemetry-aligned schema: a process-level j["resource"] object and an
 // event-level j["attributes"] object, both keyed by dotted semantic-convention
 // names (service.*, server.*, host.*, file.*, client.*, user.*, error.*) with
-// XRootD/WLCG-specific fields under the xrootd.*/wlcg.* vendor namespaces.
+// XRootD-specific fields under the xrootd.* vendor namespace.
 //
 //! Fill the j["resource"] object (service.*/server.*/host.name plus the
 //! xrootd.server.* vendor keys) from the server incarnation identity.
@@ -634,7 +634,7 @@ void     emitSpan(const nlohmann::json& src, const char* name, double tBeg,
 //!         companion emitSpan() on this, so a suppressed log never leaves a
 //!         parentless span behind.
 bool     emitDoc(nlohmann::json& j, const Server& srv);
-//! Fill the identity attributes (user.*, client.*, wlcg.*, xrootd.*) into the
+//! Fill the identity attributes (user.*, client.*, xrootd.*) into the
 //! event `attributes` object from the user dictionary entry (and the token and
 //! activity streams keyed by the same dictid). Returns the resolved VO (token
 //! preferred, else the auth CGI of a VO-bearing method) for metric labels.

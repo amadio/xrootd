@@ -699,8 +699,8 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum by (wlcg_vo)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range]))",
-          "legendFormat": "{{wlcg_vo}}",
+          "expr": "sum by (xrootd_vo)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range]))",
+          "legendFormat": "{{xrootd_vo}}",
           "queryType": "instant",
           "refId": "A"
         }

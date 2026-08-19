@@ -88,18 +88,31 @@ with \fBfile.path\fR, \fBxrootd.operation.name\fR, and
 list is bounded, so a long session that opens many files stays memory-bounded.
 .P
 \fBxrootd.session.start_time\fR, \fB.end_time\fR and \fB.duration\fR are always
-present on a session document, and the duration is never negative. The end is
-the disconnect. No dictionary record carries a time on the wire, so the login
-can only be timed by the collector, whose clock is not the reporting server's;
-the offset between the two is estimated per server incarnation from the window
-ends the \fBf\fR stream carries. \fBxrootd.session.start_time_source\fR reports
-how the start was arrived at, best first: \fBlogin\fR (exact, the connect
-duration the \fBt\fR-stream disconnect carries), \fBconnect\fR (the login
-record's arrival, translated into the server's clock), \fBfirst_activity\fR (the
-earliest record naming the session) or \fBdisconnect\fR (nothing else was
-available, so the session is reported as an instant). Candidates are accepted
-only within the session's own bounds, so a skewed clock degrades the start to a
-later source rather than producing a wrong or missing one. The counter
+present on a session document, and the duration is never negative. The window
+also encloses every record the session accounts for, so no open, I/O trace,
+close, error or redirect belonging to it falls outside and, with \fB--spans\fR,
+no child span escapes its parent. This needs stating because no record carries
+an exact time: a record's time is interpolated across the window of the packet
+carrying it, and two packets \(em especially from two streams, which window
+independently \(em carry independent estimation error, so a transfer that
+finished before the client disconnected can arrive stamped after it. The
+earliest and latest time of any record naming a session are tracked and the
+resolved window widened to cover both.
+.P
+The start has a further problem: no dictionary record carries a time on the wire
+at all, so the login can only be timed by the collector, whose clock is not the
+reporting server's; the offset between the two is estimated per server
+incarnation from the window ends the \fBf\fR stream carries.
+\fBxrootd.session.start_time_source\fR reports how the start was arrived at, in
+decreasing authority: \fBlogin\fR (the connect duration the \fBt\fR-stream
+disconnect carries), \fBconnect\fR (the login record's arrival, translated into
+the server's clock), \fBfirst_activity\fR (the earliest record naming the
+session) or \fBdisconnect\fR (nothing else was available, so the session is
+reported as an instant). The earliest admissible candidate wins, ties going to
+the more authoritative one, so \fBfirst_activity\fR also covers activity that
+predates a login estimate. Candidates are accepted only within the session's own
+bounds, so a skewed clock degrades the start to a later source rather than
+producing a wrong or missing one. The counter
 \fBxrootd_collector_session_starts_total{cluster,server,source}\fR shows the mix: mostly
 \fBdisconnect\fR means \fBu\fR records are being lost, or the server's
 \fBxrootd.monitor\fR destination lacks the \fBuser\fR flag.

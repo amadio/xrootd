@@ -399,25 +399,40 @@ Several opt-in streams add finer-grained events:
   <a id="session-times"></a>
   **Session times.** `xrootd.session.start_time`, `.end_time` and `.duration`
   are **always present** on a session document, and the duration is never
-  negative. The end is the disconnect. The start is harder: the wire carries no
-  time on any dictionary record, so the login can only be timed by the
-  collector, whose clock is not the reporting server's. The collector therefore
-  estimates the offset between the two per server incarnation (from the window
-  ends the `f` stream already carries) and resolves the start from the best
-  evidence available, reporting which in
-  `xrootd.session.start_time_source`:
+  negative. The window also **encloses every record the session accounts for**:
+  no open, I/O trace, close, error or redirect belonging to it falls outside,
+  and with `--spans` no child span escapes the session span that parents it.
+
+  That guarantee is not free, because no record carries an exact time. A
+  record's time is interpolated across the window of the packet carrying it, so
+  two records from different packets — and especially from different streams,
+  which window independently — carry independent estimation error. A transfer
+  that really did finish before the client disconnected can arrive stamped
+  after it. The collector therefore tracks the earliest and latest time of any
+  record naming a session and widens the resolved window to cover both.
+
+  The start has a second problem on top: the wire carries no time at all on a
+  dictionary record, so the login can only be timed by the collector, whose
+  clock is not the reporting server's. The collector estimates the offset
+  between the two per server incarnation (from the window ends the `f` stream
+  already carries) and resolves the start from the evidence available,
+  reporting which in `xrootd.session.start_time_source`:
 
   | `start_time_source` | Derived from | Accuracy |
   | :-- | :-- | :-- |
-  | `login` | the `t`-stream disconnect's connect duration, subtracted from its time | exact; the server measured it |
+  | `login` | the `t`-stream disconnect's connect duration, subtracted from its time | exact to the second the server reported it in |
   | `connect` | the `u` login record's arrival, translated into the server's clock | true login, within the receive batching interval |
-  | `first_activity` | the earliest record naming the session (open, transfer snapshot, error, close) | exact, but misses the login and authentication |
+  | `first_activity` | the earliest record naming the session (open, I/O trace, transfer snapshot, error, close, redirect) | exact, but misses the login and authentication — unless it simply predates the other candidates |
   | `disconnect` | the disconnect itself | none: the session is reported as an instant |
 
-  Candidates are admitted only within the session's own
-  `[incarnation start, disconnect]` range, so a badly skewed clock degrades the
-  start to a later rung rather than producing a wrong or missing one. The
-  companion counter `xrootd_collector_session_starts_total{cluster,server,source}`
+  The **earliest admissible** candidate wins, ties going to the more
+  authoritative one; `first_activity` therefore also covers the case where
+  observed activity predates a login estimate that came out too late. Candidates
+  are admitted only within the session's own
+  `[incarnation start, disconnect or last activity]` range, so a badly skewed
+  clock degrades the start to a later rung rather than producing a wrong or
+  missing one. The companion counter
+  `xrootd_collector_session_starts_total{cluster,server,source}`
   makes the mix visible: a server reporting mostly `disconnect` is losing `u`
   records, or its `xrootd.monitor` destination lacks the `user` flag.
 - `--spans` additionally emits an OpenTelemetry **span** document alongside each
@@ -926,7 +941,8 @@ rolling up everything it did — the root of its trace:
 }
 ```
 
-The three time fields and `start_time_source` are always present (see
+The three time fields and `start_time_source` are always present, and the window
+encloses every record the session accounts for (see
 [Session times](#session-times)); the counters are always present but the byte
 totals, like everywhere else, are omitted when zero.
 

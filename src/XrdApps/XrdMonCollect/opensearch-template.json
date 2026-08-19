@@ -158,6 +158,7 @@
                 "dataset":         { "type": "keyword" },
                 "filter": { "properties": { "labels": { "type": "keyword" } } },
                 "auth":   { "properties": { "method": { "type": "keyword" } } },
+                "error":  { "properties": { "code":   { "type": "integer" } } },
                 "client": {
                   "properties": {
                     "site": { "type": "keyword" }

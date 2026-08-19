@@ -50,7 +50,7 @@
   "id": null,
   "links": [
     {
-      "title": "XRootD xrdmoncollect (Prometheus)",
+      "title": "XRootD dashboards",
       "type": "dashboards",
       "tags": [
         "xrootd"
@@ -69,6 +69,8 @@
   "style": "dark",
   "tags": [
     "xrootd",
+    "xrdmoncollect",
+    "loki",
     "popularity"
   ],
   "templating": {
@@ -179,7 +181,7 @@
   "timezone": "",
   "title": "XRootD Data Popularity (Loki)",
   "uid": "xrootd-popularity-loki",
-  "description": "Dataset popularity from xrdmoncollect OTLP log records in Loki: read volume, unique users, and top datasets. The xrootd.dataset dimension requires the collector's --dataset capture. Grouping by structured metadata over long ranges is comparatively expensive; prefer hours-to-days ranges. Collector health lives in the Prometheus dashboard (grafana-dashboard.json).",
+  "description": "Dataset popularity from xrdmoncollect OTLP log records in Loki: read volume, unique users, and top datasets. The xrootd.dataset dimension requires the collector's --dataset capture. Grouping by structured metadata over long ranges is comparatively expensive; prefer hours-to-days ranges. Collector health and cluster-wide rates live in the Prometheus dashboards (grafana-collector-dashboard.json and grafana-cluster-dashboard.json).",
   "version": 1,
   "weekStart": "",
   "panels": [

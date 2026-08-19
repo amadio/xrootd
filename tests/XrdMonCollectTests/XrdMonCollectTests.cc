@@ -479,7 +479,7 @@ TEST(XrdMonCollect, MalformedPacketDebugDumpsReason)
   ASSERT_FALSE(diag.empty());
   auto j = nlohmann::json::parse(diag);
   EXPECT_EQ(j["reason"], "short_packet");
-  EXPECT_EQ(j["server"], "1.2.3.4:5");
+  EXPECT_EQ(j["server"], "1.2.3.4");   // resolved name, not the UDP socket
   EXPECT_EQ(j["note"], "malformed packet");
 }
 
@@ -708,9 +708,9 @@ TEST_F(Transfer, AggregatesIntoMetricsRegistry)
 
   std::string out;
   XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_io_total{server=\"10.0.0.1:9930\",operation=\"close\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_io_total{site=\"unknown\",server=\"10.0.0.1\",operation=\"close\"} 1"),
             std::string::npos);
-  EXPECT_NE(out.find("xrootd_collector_read_bytes_total{server=\"10.0.0.1:9930\"} 10485760"),
+  EXPECT_NE(out.find("xrootd_collector_read_bytes_total{site=\"unknown\",server=\"10.0.0.1\"} 10485760"),
             std::string::npos);
   EXPECT_NE(out.find("# TYPE xrootd_collector_transfer_duration_seconds histogram"),
             std::string::npos);
@@ -959,9 +959,9 @@ TEST(XrdMonCollect, FilterDoesNotAffectMetrics)
   EXPECT_EQ(d.GetStats().filtered, 1u);
   std::string out;                            // ... but everything was measured
   XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_io_total{server=\"10.0.0.1:9930\",operation=\"close\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_io_total{site=\"unknown\",server=\"10.0.0.1\",operation=\"close\"} 1"),
             std::string::npos);
-  EXPECT_NE(out.find("xrootd_collector_read_bytes_total{server=\"10.0.0.1:9930\"} 10485760"),
+  EXPECT_NE(out.find("xrootd_collector_read_bytes_total{site=\"unknown\",server=\"10.0.0.1\"} 10485760"),
             std::string::npos);
 }
 
@@ -1606,7 +1606,7 @@ TEST_F(Transfer, OperationsAggregateIntoIoTotal)
 
   std::string out;
   XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  const std::string pfx = "xrootd_collector_io_total{server=\"10.0.0.1:9930\"";
+  const std::string pfx = "xrootd_collector_io_total{site=\"unknown\",server=\"10.0.0.1\"";
   EXPECT_NE(out.find(pfx + ",operation=\"open\"} 1"),  std::string::npos) << out;
   EXPECT_NE(out.find(pfx + ",operation=\"close\"} 1"), std::string::npos) << out;
   EXPECT_NE(out.find(pfx + ",operation=\"read\"} 3"),  std::string::npos) << out;
@@ -1629,6 +1629,64 @@ static void feedIdent(XrdMonDecode& dec, const std::string& host)
    pl.insert(pl.end(), info.begin(), info.end());
    auto pkt = packet('=', kStod, pl);
    dec.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size());
+}
+
+// Both metric labels come from the '=' ident record, so both are provisional
+// until it lands and both flip at once. Before it, a server is an unknown site
+// at its bare source IP; after it, the advertised site and host. Nothing
+// retroactively merges the two series -- the earlier one simply stops
+// advancing, which is why rate() heals but increase() across the flip does not.
+TEST(XrdMonCollect, IdentRelabelsMetricSeries)
+{
+  XrdMetrics::Collector collector("xrootd");
+  XrdMonDecode dec([](const std::string&){}, nullptr, false, false, false,
+                   false, &collector.subsystem("collector"));
+
+  auto ping = [&]{ auto pkt = packet('Z', kStod, std::vector<unsigned char>(16, 0));
+                   dec.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size()); };
+
+  ping();                              // unidentified: 1 packet
+  feedIdent(dec, "srv.example.org");   // itself counted before it relabels: 2
+  ping();                              // identified: 1 packet
+
+  std::string out;
+  XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
+  EXPECT_NE(out.find("xrootd_collector_packets_total{site=\"unknown\","
+                     "server=\"10.0.0.1\",stream=\"main\"} 2"),
+            std::string::npos) << out;
+  EXPECT_NE(out.find("xrootd_collector_packets_total{site=\"S\","
+                     "server=\"srv.example.org\",stream=\"main\"} 1"),
+            std::string::npos) << out;
+  // The UDP source port never reaches a label. It is the server's ephemeral
+  // monitor socket, so keeping it would fork every series on a server restart.
+  EXPECT_EQ(out.find("10.0.0.1:9930"), std::string::npos) << out;
+}
+
+// A site of only dots is XrdOucSiteName's sanitization of an all-invalid name;
+// it carries no more information than an absent one, so it must not become a
+// label value of its own.
+TEST(XrdMonCollect, AllDotSiteIsUnknown)
+{
+  XrdMetrics::Collector collector("xrootd");
+  XrdMonDecode dec([](const std::string&){}, nullptr, false, false, false,
+                   false, &collector.subsystem("collector"));
+
+  std::string info = "=/xrootd.1:2@srv.example.org"
+                     "\n&site=...&port=1094&inst=mgr&pgm=xrootd&ver=v6";
+  W body; body.u32(0);
+  std::vector<unsigned char> pl = body.b;
+  pl.insert(pl.end(), info.begin(), info.end());
+  auto pkt = packet('=', kStod, pl);
+  dec.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size());
+
+  auto z = packet('Z', kStod, std::vector<unsigned char>(16, 0));
+  dec.Process("10.0.0.1:9930", (const char*)z.data(), z.size());
+
+  std::string out;
+  XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
+  EXPECT_NE(out.find("site=\"unknown\",server=\"srv.example.org\""),
+            std::string::npos) << out;
+  EXPECT_EQ(out.find("site=\"...\""), std::string::npos) << out;
 }
 
 TEST_F(Transfer, IsLocalWhenSameDomain)
@@ -1756,11 +1814,11 @@ TEST(XrdMonCollect, PacketLossDetected)
 
   EXPECT_EQ(dec.GetStats().lost, 1u);
   std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_packets_lost_total{server=\"h:1\",stream=\"main\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_packets_lost_total{site=\"unknown\",server=\"h\",stream=\"main\"} 1"),
             std::string::npos) << out;
   // packets_total mirrors the lost metric's {server, stream} labels: the four
   // 'u' packets received are the denominator for a per-source loss percentage.
-  EXPECT_NE(out.find("xrootd_collector_packets_total{server=\"h:1\",stream=\"main\"} 4"),
+  EXPECT_NE(out.find("xrootd_collector_packets_total{site=\"unknown\",server=\"h\",stream=\"main\"} 4"),
             std::string::npos) << out;
 }
 
@@ -1797,15 +1855,15 @@ TEST(XrdMonCollect, PacketLossTrackedPerStream)
   EXPECT_EQ(dec.GetStats().lost, 2u);
 
   std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_packets_lost_total{server=\"h:1\",stream=\"f\"} 2"),
+  EXPECT_NE(out.find("xrootd_collector_packets_lost_total{site=\"unknown\",server=\"h\",stream=\"f\"} 2"),
             std::string::npos) << out;
   // No phantom loss is attributed to the shared "main" stream.
-  EXPECT_EQ(out.find("xrootd_collector_packets_lost_total{server=\"h:1\",stream=\"main\""),
+  EXPECT_EQ(out.find("xrootd_collector_packets_lost_total{site=\"unknown\",server=\"h\",stream=\"main\""),
             std::string::npos) << out;
   // packets_total is split per stream too: 4 'u' (main) and 5 'f' received.
-  EXPECT_NE(out.find("xrootd_collector_packets_total{server=\"h:1\",stream=\"main\"} 4"),
+  EXPECT_NE(out.find("xrootd_collector_packets_total{site=\"unknown\",server=\"h\",stream=\"main\"} 4"),
             std::string::npos) << out;
-  EXPECT_NE(out.find("xrootd_collector_packets_total{server=\"h:1\",stream=\"f\"} 5"),
+  EXPECT_NE(out.find("xrootd_collector_packets_total{site=\"unknown\",server=\"h\",stream=\"f\"} 5"),
             std::string::npos) << out;
 }
 
@@ -1833,11 +1891,11 @@ TEST(XrdMonCollect, MalformedLabeledByStreamAndReason)
 
   EXPECT_EQ(dec.GetStats().malformed, 3u);
   std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_malformed_total{server=\"h:1\",stream=\"u\",reason=\"bad_plen\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_malformed_total{site=\"unknown\",server=\"h\",stream=\"u\",reason=\"bad_plen\"} 1"),
             std::string::npos) << out;
-  EXPECT_NE(out.find("xrootd_collector_malformed_total{server=\"h:1\",stream=\"t\",reason=\"trailing_bytes\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_malformed_total{site=\"unknown\",server=\"h\",stream=\"t\",reason=\"trailing_bytes\"} 1"),
             std::string::npos) << out;
-  EXPECT_NE(out.find("xrootd_collector_malformed_total{server=\"h:1\",stream=\"f\",reason=\"bad_record\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_malformed_total{site=\"unknown\",server=\"h\",stream=\"f\",reason=\"bad_record\"} 1"),
             std::string::npos) << out;
 }
 
@@ -2047,9 +2105,9 @@ TEST(XrdMonCollect, FrmStageAndPurge)
   EXPECT_EQ(dec.GetStats().frmEvents, 2u);
 
   std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_frm_total{server=\"h:1\",op=\"purge\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_frm_total{site=\"unknown\",server=\"h\",op=\"purge\"} 1"),
             std::string::npos) << out;
-  EXPECT_NE(out.find("xrootd_collector_frm_purge_bytes_total{server=\"h:1\"} 1048576"),
+  EXPECT_NE(out.find("xrootd_collector_frm_purge_bytes_total{site=\"unknown\",server=\"h\"} 1048576"),
             std::string::npos) << out;
 }
 
@@ -2093,14 +2151,14 @@ TEST(XrdMonCollect, SessionDiscAndActiveGauge)
   EXPECT_EQ(dec.GetStats().discs, 1u);
 
   std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_sessions_total{server=\"h:1\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_sessions_total{site=\"unknown\",server=\"h\"} 1"),
             std::string::npos) << out;
   // The file was opened but its close was never seen; the server reports a
   // session's closes before its disconnect, so the disconnect sweeps the
   // leaked open out of the table instead of inflating the gauge forever.
-  EXPECT_NE(out.find("xrootd_collector_active_transfers{server=\"h:1\"} 0"),
+  EXPECT_NE(out.find("xrootd_collector_active_transfers{site=\"unknown\",server=\"h\"} 0"),
             std::string::npos) << out;
-  EXPECT_NE(out.find("xrootd_collector_stale_opens_total{server=\"h:1\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_stale_opens_total{site=\"unknown\",server=\"h\"} 1"),
             std::string::npos) << out;
   EXPECT_EQ(dec.GetStats().staleOpens, 1u);
 }
@@ -2586,9 +2644,9 @@ TEST(XrdMonCollect, FileTTLExpiresLeakedOpens)
   EXPECT_EQ(dec.GetStats().staleOpens, 1u);
 
   std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_active_transfers{server=\"h:1\"} 0"),
+  EXPECT_NE(out.find("xrootd_collector_active_transfers{site=\"unknown\",server=\"h\"} 0"),
             std::string::npos) << out;
-  EXPECT_NE(out.find("xrootd_collector_stale_opens_total{server=\"h:1\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_stale_opens_total{site=\"unknown\",server=\"h\"} 1"),
             std::string::npos) << out;
 }
 
@@ -2631,7 +2689,7 @@ TEST(XrdMonCollect, ReapZeroesActiveTransfersGauge)
 
   {std::string out; XrdMetrics::PrometheusTextSerializer ser(out);
    collector.serialize(ser);
-   EXPECT_NE(out.find("xrootd_collector_active_transfers{server=\"h:1\"} 1"),
+   EXPECT_NE(out.find("xrootd_collector_active_transfers{site=\"unknown\",server=\"h\"} 1"),
              std::string::npos) << out;
   }
 
@@ -2640,7 +2698,7 @@ TEST(XrdMonCollect, ReapZeroesActiveTransfersGauge)
 
   {std::string out; XrdMetrics::PrometheusTextSerializer ser(out);
    collector.serialize(ser);
-   EXPECT_NE(out.find("xrootd_collector_active_transfers{server=\"h:1\"} 0"),
+   EXPECT_NE(out.find("xrootd_collector_active_transfers{site=\"unknown\",server=\"h\"} 0"),
              std::string::npos) << out;
   }
 }
@@ -2661,7 +2719,7 @@ TEST(XrdMonCollect, OrphanCloseCountsMetric)
     dec.Process("h:1", (const char*)pkt.data(), pkt.size()); }
 
   std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_orphan_closes_total{server=\"h:1\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_orphan_closes_total{site=\"unknown\",server=\"h\"} 1"),
             std::string::npos) << out;
 }
 
@@ -2823,7 +2881,7 @@ TEST(XrdMonCollect, RepeatedUserMapKeepsSessionState)
   // openFiles survived too, so the disconnect still sweeps the leaked open
   // instead of stranding it in the file table.
   std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_stale_opens_total{server=\"h:1\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_stale_opens_total{site=\"unknown\",server=\"h\"} 1"),
             std::string::npos) << out;
   EXPECT_EQ(dec.GetStats().staleOpens, 1u);
 }
@@ -2973,11 +3031,11 @@ TEST(XrdMonCollect, GStreamOssMetricsDelta)
   dec.Process("h:1", (const char*)p2.data(), p2.size());
 
   std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_oss_ops_total{server=\"h:1\",op=\"read\"} 50"),
+  EXPECT_NE(out.find("xrootd_collector_oss_ops_total{site=\"unknown\",server=\"h\",op=\"read\"} 50"),
             std::string::npos) << out;
-  EXPECT_NE(out.find("xrootd_collector_oss_ops_total{server=\"h:1\",op=\"write\"} 5"),
+  EXPECT_NE(out.find("xrootd_collector_oss_ops_total{site=\"unknown\",server=\"h\",op=\"write\"} 5"),
             std::string::npos) << out;
-  EXPECT_NE(out.find("xrootd_collector_oss_slow_ops_total{server=\"h:1\",op=\"read\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_oss_slow_ops_total{site=\"unknown\",server=\"h\",op=\"read\"} 1"),
             std::string::npos) << out;
 }
 
@@ -3049,9 +3107,9 @@ TEST(XrdMonCollect, JsonGStreamOssMetricsDelta)
   dec.Process("h:1", p2.data(), (int)p2.size());
 
   std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_oss_ops_total{server=\"h:1\",op=\"read\"} 50"),
+  EXPECT_NE(out.find("xrootd_collector_oss_ops_total{site=\"unknown\",server=\"h\",op=\"read\"} 50"),
             std::string::npos) << out;
-  EXPECT_NE(out.find("xrootd_collector_oss_ops_total{server=\"h:1\",op=\"write\"} 5"),
+  EXPECT_NE(out.find("xrootd_collector_oss_ops_total{site=\"unknown\",server=\"h\",op=\"write\"} 5"),
             std::string::npos) << out;
 }
 
@@ -3070,13 +3128,13 @@ TEST(XrdMonCollect, GStreamPfcAndTpcMetrics)
   dec.Process("h:1", (const char*)tpc.data(), tpc.size());
 
   std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_pfc_files_total{server=\"h:1\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_pfc_files_total{site=\"unknown\",server=\"h\"} 1"),
             std::string::npos) << out;
-  EXPECT_NE(out.find("xrootd_collector_pfc_bytes_total{server=\"h:1\",source=\"hit\"} 2048"),
+  EXPECT_NE(out.find("xrootd_collector_pfc_bytes_total{site=\"unknown\",server=\"h\",source=\"hit\"} 2048"),
             std::string::npos) << out;
-  EXPECT_NE(out.find("xrootd_collector_tpc_total{server=\"h:1\",type=\"pull\",result=\"ok\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_tpc_total{site=\"unknown\",server=\"h\",type=\"pull\",result=\"ok\"} 1"),
             std::string::npos) << out;
-  EXPECT_NE(out.find("xrootd_collector_tpc_bytes_total{server=\"h:1\",type=\"pull\"} 1048576"),
+  EXPECT_NE(out.find("xrootd_collector_tpc_bytes_total{site=\"unknown\",server=\"h\",type=\"pull\"} 1048576"),
             std::string::npos) << out;
 }
 
@@ -3101,11 +3159,11 @@ TEST(XrdMonCollect, GStreamThrottleAndHttpMetrics)
   dec.Process("h:1", (const char*)h2.data(), h2.size());
 
   std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_throttle_io_total{server=\"h:1\"} 30"),
+  EXPECT_NE(out.find("xrootd_collector_throttle_io_total{site=\"unknown\",server=\"h\"} 30"),
             std::string::npos) << out;
-  EXPECT_NE(out.find("xrootd_collector_throttle_io_active{server=\"h:1\"} 4"),
+  EXPECT_NE(out.find("xrootd_collector_throttle_io_active{site=\"unknown\",server=\"h\"} 4"),
             std::string::npos) << out;
-  EXPECT_NE(out.find("xrootd_collector_http_requests_total{server=\"h:1\",method=\"GET\",status=\"200\"} 5"),
+  EXPECT_NE(out.find("xrootd_collector_http_requests_total{site=\"unknown\",server=\"h\",method=\"GET\",status=\"200\"} 5"),
             std::string::npos) << out;
 }
 

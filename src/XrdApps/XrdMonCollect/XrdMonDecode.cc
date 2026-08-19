@@ -163,6 +163,22 @@ bool isLocalName(const std::string& h)
    return h == "localhost" || h.rfind("localhost.", 0) == 0;
 }
 
+// Whether a '=' ident's &site= names a real site. A value of only dots is
+// XrdOucSiteName's sanitization of an all-invalid name (e.g. a stray XRDSITE
+// env var inherited by a server with no all.sitename directive), so it carries
+// no more information than an absent one.
+//
+bool siteKnown(const std::string& s)
+{
+   return !s.empty() && s.find_first_not_of('.') != std::string::npos;
+}
+
+// The `site` label of a server whose ident has not arrived, or arrived without
+// a usable site. A literal beats an empty string: it keeps `sum by (site)`
+// honest about the gap instead of silently attributing it to nothing.
+//
+constexpr const char* kSiteUnknown = "unknown";
+
 // Whether an authentication method can put a genuine VO into the auth CGI's
 // &o= (XrdSecEntity.vorg): gsi fills it from a VOMS attribute certificate,
 // sss unpacks it from the trusted key-holder's registered entity, and the
@@ -439,7 +455,43 @@ XrdMonDecode::Server& XrdMonDecode::ServerFor(const std::string& src,
        if (isLoopback(ip)) srv.resolvedHost = localHost;
        srv.resolved = true;
       }
+
+// Label a newly seen incarnation. Empty mtrServer is the marker: ServerName
+// never returns "" (the numeric source IP is its floor), so this runs once per
+// incarnation here and again from DecodeIdent when the identity lands.
+//
+   if (srv.mtrServer.empty()) LabelServer(srv, src);
    return srv;
+}
+
+/******************************************************************************/
+/*                            S e r v e r N a m e                             */
+/******************************************************************************/
+
+std::string XrdMonDecode::ServerName(const Server& srv,
+                                     const std::string& src) const
+{
+// Precedence: the '=' ident's advertised host (when it is a real name, not an
+// IP literal — "localhost" is renamed to the real FQDN), else the reverse-
+// resolved sender, else the numeric source IP with loopback replaced by the
+// public address. Only a loopback sender is ever reverse-resolved (see
+// SetResolveHosts), so for a remote server this is the ident host or the IP.
+//
+   if (!srv.ident.host.empty() && !isIPLiteral(srv.ident.host))
+      return (resolveHosts && isLocalName(srv.ident.host) && !localHost.empty())
+           ? localHost : srv.ident.host;
+   if (!srv.resolvedHost.empty()) return srv.resolvedHost;
+   return publicFor(src.substr(0, src.rfind(':')));   // strip the UDP port
+}
+
+/******************************************************************************/
+/*                           L a b e l S e r v e r                            */
+/******************************************************************************/
+
+void XrdMonDecode::LabelServer(Server& srv, const std::string& src)
+{
+   srv.mtrSite   = siteKnown(srv.ident.site) ? srv.ident.site : kSiteUnknown;
+   srv.mtrServer = ServerName(srv, src);
 }
 
 /******************************************************************************/
@@ -450,34 +502,23 @@ void XrdMonDecode::otelResource(json& j, const std::string& src, int32_t stod,
                                 const Server& srv)
 {
    json& r = j["resource"];
-   std::string ip = src.substr(0, src.rfind(':'));   // UDP source (strip :port)
 
-   // server.address precedence: the '=' ident's advertised host (when it is a
-   // real name, not an IP literal — "localhost" is renamed to the real FQDN),
-   // else the reverse-resolved sender, else the numeric source IP with
-   // loopback replaced by the public address. It is the single canonical
-   // server-name field (a separate host.name would always duplicate it), and
-   // service.instance.id the single instance field.
+   // server.address is the single canonical server-name field (a separate
+   // host.name would always duplicate it), and service.instance.id the single
+   // instance field. ServerName() is shared with the Prometheus `server` label
+   // so both name a server the same way.
    //
-   std::string host;
-   if (!srv.ident.host.empty() && !isIPLiteral(srv.ident.host))
-      host = (resolveHosts && isLocalName(srv.ident.host) && !localHost.empty())
-           ? localHost : srv.ident.host;
-   else if (!srv.resolvedHost.empty())
-      host = srv.resolvedHost;
-   std::string name = host.empty() ? publicFor(ip) : host;
+   std::string name = ServerName(srv, src);
 
    r["service.name"]        = "xrootd";
    r["service.instance.id"] = srv.ident.inst.empty() ? name : srv.ident.inst;
    r["server.address"]      = name;
    if (srv.ident.port > 0)       r["server.port"]            = srv.ident.port;
    if (!srv.ident.ver.empty())   r["service.version"]        = srv.ident.ver;
-   // A site of only dots is XrdOucSiteName's sanitization of an all-invalid
-   // name (e.g. a stray XRDSITE env var inherited by a server with no
-   // all.sitename directive) — it carries no information, so drop it.
-   if (!srv.ident.site.empty() &&
-       srv.ident.site.find_first_not_of('.') != std::string::npos)
-                                 r["xrootd.server.site"]     = srv.ident.site;
+   // Documents omit an unknown site rather than writing kSiteUnknown: absence
+   // is the natural "not set" in a document, while a metric label has no such
+   // spelling and uses the literal.
+   if (siteKnown(srv.ident.site)) r["xrootd.server.site"]    = srv.ident.site;
    if (!srv.ident.pgm.empty())   r["xrootd.server.program"]  = srv.ident.pgm;
    if (srv.sID)                  r["xrootd.server.id"]       = srv.sID;
    r["xrootd.server.incarnation"] = stod;             // incarnation key
@@ -1054,6 +1095,11 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
                srv.ident.user = it->value("user", std::string());
                srv.ident.port = it->value("port", 0);
               }
+           // Label from the restored identity now: an incarnation that is
+           // reaped before its next packet would otherwise be published under
+           // an empty server label, and one that does get a packet would be
+           // labelled by ServerFor anyway. The map key is "<src>|<stod>".
+           LabelServer(srv, key.substr(0, key.rfind('|')));
 
            if (auto it = o.find("users"); it != o.end())
               for (const auto& [id, e] : it->items())
@@ -1220,20 +1266,28 @@ const char* streamOf(unsigned char code)
 }
 
 void XrdMonDecode::Malformed(const std::string& src, unsigned char code,
-                             const char* reason)
+                             const char* reason, const Server* srv)
 {
    stats.malformed++;
+
+// A header too short to carry a stod has no incarnation to attribute to. Fall
+// back to what an unidentified server is labelled anyway (unknown site, bare
+// source IP), so the series merges with the identified one instead of forking.
+//
+   const std::string site = srv ? srv->mtrSite : kSiteUnknown;
+   const std::string name = srv ? srv->mtrServer
+                                : publicFor(src.substr(0, src.rfind(':')));
    if (metrics)
       metrics->counterSeries("malformed_total",
            "structurally invalid monitor packets by stream and reason",
-           {{"server", src}, {"stream", streamOf(code)},
+           {{"site", site}, {"server", name}, {"stream", streamOf(code)},
             {"reason", reason}}) += 1;
 
    // Under --debug, surface why the packet was rejected so the malformed_total
    // tick can be traced back to a source and category (mirrors the unhandled-
    // stream dump in Process).
    if (dumpRaw && raw)
-      {json j = {{"server", src}, {"stream", streamOf(code)},
+      {json j = {{"server", name}, {"stream", streamOf(code)},
                  {"reason", reason}, {"note", "malformed packet"}};
        raw(j.dump());
       }
@@ -1282,11 +1336,13 @@ bool XrdMonDecode::Process(const std::string& src, const char* buff, int blen)
         gclass += (plen >= 24 ? gsProvider(p[16]) : "unknown");
         sclass = gclass.c_str();
        }
-    // Received count, labeled the same {server, stream} as packets_lost_total
-    // so a per-source (and per-stream) loss percentage is lost/received.
+    // Received count, labeled the same {site, server, stream} as
+    // packets_lost_total so a per-source (and per-stream) loss percentage is
+    // lost/received.
     if (metrics)
        metrics->counterSeries("packets_total", "monitor packets received",
-            {{"server", src}, {"stream", sclass}}) += 1;
+            {{"site", srv.mtrSite}, {"server", srv.mtrServer},
+             {"stream", sclass}}) += 1;
     auto it = srv.lastPseq.find(sclass);
     if (it == srv.lastPseq.end()) srv.lastPseq.emplace(sclass, pseq);
        else
@@ -1296,7 +1352,8 @@ bool XrdMonDecode::Process(const std::string& src, const char* buff, int blen)
             if (metrics)
                metrics->counterSeries("packets_lost_total",
                     "estimated lost packets (pseq gaps)",
-                    {{"server", src}, {"stream", sclass}}) += gap;
+                    {{"site", srv.mtrSite}, {"server", srv.mtrServer},
+                     {"stream", sclass}}) += gap;
            }
         it->second = pseq;
        }
@@ -1309,7 +1366,7 @@ bool XrdMonDecode::Process(const std::string& src, const char* buff, int blen)
           case XROOTD_MON_MAPTOKN:
           case XROOTD_MON_MAPUEAC:
                // XrdXrootdMonMap: header(8) + dictid(4) + info[]
-               if (plen < 12) {Malformed(src, code, "short_packet"); return false;}
+               if (plen < 12) {Malformed(src, code, "short_packet", &srv); return false;}
                {uint32_t dictid = rd32(p + 8);
                 DecodeMap(code, srv, dictid, (const char*)(p + 12), plen - 12);
                }
@@ -1317,7 +1374,7 @@ bool XrdMonDecode::Process(const std::string& src, const char* buff, int blen)
 
           case XROOTD_MON_MAPIDNT:
                // Server self-identification: header(8) + dictid(4, =0) + info[]
-               if (plen < 12) {Malformed(src, code, "short_packet"); return false;}
+               if (plen < 12) {Malformed(src, code, "short_packet", &srv); return false;}
                DecodeIdent(src, stod, srv, (const char*)(p + 12), plen - 12);
                break;
 
@@ -1325,7 +1382,7 @@ bool XrdMonDecode::Process(const std::string& src, const char* buff, int blen)
           case XROOTD_MON_MAPPURG:
                // FRM stage/migrate ('x') and purge ('p'): map record with
                // dictid 0 and info "<who>\n<path>[\n&cgi]".
-               if (plen < 12) {Malformed(src, code, "short_packet"); return false;}
+               if (plen < 12) {Malformed(src, code, "short_packet", &srv); return false;}
                DecodeFrm(src, stod, srv, code, (const char*)(p + 12), plen - 12);
                break;
 
@@ -1459,14 +1516,19 @@ void XrdMonDecode::ReapServers(time_t now)
                }
            if (!n) continue;
            stats.staleOpens += n;
-           std::string sndr = key.substr(0, key.rfind('|'));
+           // Label from the cached pair, not from the map key: the key carries
+           // the raw "<ip>:<port>|<stod>" and would name the same server
+           // differently from every other call site.
            if (metrics)
               {metrics->counterSeries("stale_opens_total",
                              "open-file entries dropped without a close "
-                             "(close record lost)", {{"server", sndr}}) += n;
+                             "(close record lost)",
+                             {{"site", s.mtrSite}, {"server", s.mtrServer}})
+                       += n;
                metrics->gaugeSeries("active_transfers",
                              "files currently open (transfers in progress)",
-                             {{"server", sndr}}) = (double)s.files.size();
+                             {{"site", s.mtrSite}, {"server", s.mtrServer}})
+                       = (double)s.files.size();
               }
           }
 
@@ -1499,10 +1561,13 @@ void XrdMonDecode::ReapServers(time_t now)
                }
            // No live incarnation shares this sender: park its gauge at zero so
            // a restarted (or gone) server does not strand a nonzero series.
+           // Read the labels off `s` while it is still alive — it is erased
+           // just below.
            if (metrics)
               metrics->gaugeSeries("active_transfers",
                             "files currently open (transfers in progress)",
-                            {{"server", pre.substr(0, pre.size() - 1)}}) = 0.0;
+                            {{"site", s.mtrSite}, {"server", s.mtrServer}})
+                      = 0.0;
           }
 
        it = servers.erase(it);
@@ -1662,6 +1727,15 @@ void XrdMonDecode::DecodeIdent(const std::string& src, int32_t stod,
    std::string port = cgiVal(text, "port");
    if (!port.empty()) id.port = atoi(port.c_str());
 
+// This is where a server stops being an anonymous IP. Both metric labels move
+// at once — before this the series read {site="unknown", server="<ip>"}, after
+// it {site="CERN-PROD", server="fst-096.cern.ch"}. The stranded series simply
+// stop advancing, so rate()-based panels heal themselves; increase() over a
+// range spanning the switch under-reports. The window is the server's
+// "xrootd.monitor ... ident" interval, an hour by default.
+//
+   LabelServer(srv, src);
+
    if (dumpRaw && raw)
       {json j = {{"code", "="}, {"info", first}};
        raw(j.dump());
@@ -1739,10 +1813,10 @@ void XrdMonDecode::DecodeFrm(const std::string& src, int32_t stod, Server& srv,
 
    if (metrics)
       {metrics->counterSeries("frm_total", "FRM stage/purge events",
-                        {{"server", src}, {"op", op}}) += 1;
+                        {{"site", srv.mtrSite}, {"server", srv.mtrServer}, {"op", op}}) += 1;
        if (code == XROOTD_MON_MAPPURG && sz > 0)
           metrics->counterSeries("frm_purge_bytes_total",
-                        "bytes purged by FRM", {{"server", src}}) += sz;
+                        "bytes purged by FRM", {{"site", srv.mtrSite}, {"server", srv.mtrServer}}) += sz;
       }
 
    emitDoc(j);
@@ -1807,7 +1881,7 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
          int           recSize = rd16(rec + 2);
 
          if (recSize < 8 || off + recSize > len)
-            {Malformed(src, XROOTD_MON_MAPFSTA, "bad_record"); break;}
+            {Malformed(src, XROOTD_MON_MAPFSTA, "bad_record", &srv); break;}
          stats.records++;
 
          if (dumpRaw && raw)
@@ -1835,7 +1909,7 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
                      {stats.opens++;
                       if (metrics)
                          metrics->counterSeries("io_total", kIoTotalHelp,
-                                  {{"server", src}, {"operation", "open"}})
+                                  {{"site", srv.mtrSite}, {"server", srv.mtrServer}, {"operation", "open"}})
                                  += 1;
                       uint32_t fileID = rd32(rec + 4);
                       OpenFile of;
@@ -1922,7 +1996,7 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
    if (metrics)
       metrics->gaugeSeries("active_transfers",
                      "files currently open (transfers in progress)",
-                     {{"server", src}}) = (double)srv.files.size();
+                     {{"site", srv.mtrSite}, {"server", srv.mtrServer}}) = (double)srv.files.size();
 }
 
 /******************************************************************************/
@@ -2028,13 +2102,13 @@ void XrdMonDecode::EmitDisc(const std::string& src, int32_t stod, Server& srv,
 
    if (metrics)
       {metrics->counterSeries("sessions_total",
-                        "client sessions ended", {{"server", src}}) += 1;
+                        "client sessions ended", {{"site", srv.mtrSite}, {"server", srv.mtrServer}}) += 1;
        // A separate series rather than a label on sessions_total, which
        // existing dashboards already aggregate. Watching this is how an
        // operator sees a site degrade to guessed session starts.
        metrics->counterSeries("session_starts_total",
                         "client sessions by how the session start was resolved",
-                        {{"server", src}, {"source", sp.src}}) += 1;
+                        {{"site", srv.mtrSite}, {"server", srv.mtrServer}, {"source", sp.src}}) += 1;
       }
 
 // The session span is the trace root (no parent), covering the whole session as
@@ -2068,7 +2142,7 @@ void XrdMonDecode::DropUserFiles(const std::string& src, Server& srv,
    if (metrics)
       metrics->counterSeries("stale_opens_total",
                     "open-file entries dropped without a close "
-                    "(close record lost)", {{"server", src}}) += n;
+                    "(close record lost)", {{"site", srv.mtrSite}, {"server", srv.mtrServer}}) += n;
 }
 
 /******************************************************************************/
@@ -2081,7 +2155,8 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
 {
 // Always-present transfer byte totals (XrdXrootdMonStatXFR after the 8-byte hdr).
 //
-   if (recSize < 8 + 24) {Malformed(src, XROOTD_MON_MAPFSTA, "bad_record"); return;}
+   if (recSize < 8 + 24)
+      {Malformed(src, XROOTD_MON_MAPFSTA, "bad_record", &srv); return;}
    int64_t rdBytes = ri64(rec + 8);
    int64_t rvBytes = ri64(rec + 16);
    int64_t wrBytes = ri64(rec + 24);
@@ -2173,7 +2248,7 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
             if (metrics)
                metrics->counterSeries("orphan_closes_total",
                              "closes without a matching open record "
-                             "(open lost or evicted)", {{"server", src}}) += 1;
+                             "(open lost or evicted)", {{"site", srv.mtrSite}, {"server", srv.mtrServer}}) += 1;
            }
 
 // Trace context: the client session is the trace (keyed by the open's user
@@ -2261,7 +2336,7 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
        if (metrics)
           metrics->counterSeries("failed_operations_total",
                        "operations that concluded unsuccessfully",
-                       {{"server", src},
+                       {{"site", srv.mtrSite}, {"server", srv.mtrServer},
                         {"category", cat.empty() ? "unknown" : cat}})
                   += 1;
       }
@@ -2272,7 +2347,7 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
 // keep just totals and distributions suitable for time-series storage.
 //
    if (metrics)
-      {std::vector<XrdMetrics::ConstLabel> sl = {{"server", src}};
+      {std::vector<XrdMetrics::ConstLabel> sl = {{"site", srv.mtrSite}, {"server", srv.mtrServer}};
        // One series counts the operations this close reports, by kind. The
        // close itself always ticks; the request counts arrive only with the
        // optional ops block. Negative would mean a corrupt record, and the
@@ -2280,7 +2355,7 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
        auto ioOps = [&](const char* op, int64_t n)
                       {if (n > 0)
                           metrics->counterSeries("io_total", kIoTotalHelp,
-                                   {{"server", src}, {"operation", op}})
+                                   {{"site", srv.mtrSite}, {"server", srv.mtrServer}, {"operation", op}})
                                   += (uint64_t)n;
                       };
        ioOps("close", 1);
@@ -2294,13 +2369,13 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
        if (!vo.empty())
           metrics->counterSeries("vo_transfers_total",
                         "completed transfers per VO",
-                        {{"server", src}, {"vo", vo}}) += 1;
+                        {{"site", srv.mtrSite}, {"server", srv.mtrServer}, {"vo", vo}}) += 1;
        if (a.contains("xrootd.is_local"))
           metrics->counterSeries("locality_transfers_total",
                         "completed transfers by client/server locality",
-                        {{"server", src}, {"locality",
+                        {{"site", srv.mtrSite}, {"server", srv.mtrServer}, {"locality",
                          a["xrootd.is_local"].get<bool>() ? "local"
-                                                                   : "remote"}})
+                                                          : "remote"}})
                   += 1;
        metrics->histogramSeries("transfer_size_bytes",
                         "bytes moved per transfer",
@@ -2361,7 +2436,8 @@ void XrdMonDecode::EmitError(const std::string& src, int32_t stod, Server& srv,
 // XrdXrootdMonStatERR. The lfn and user are carried inline (hasLFN) because a
 // failed open creates no path/open dictionary entry to join against.
 //
-   if (recSize < 8 + 4) {Malformed(src, XROOTD_MON_MAPFSTA, "bad_record"); return;}
+   if (recSize < 8 + 4)
+      {Malformed(src, XROOTD_MON_MAPFSTA, "bad_record", &srv); return;}
 
    json j;
    otelResource(j, src, stod, srv);
@@ -2405,7 +2481,7 @@ void XrdMonDecode::EmitError(const std::string& src, int32_t stod, Server& srv,
    if (metrics)
       metrics->counterSeries("failed_operations_total",
                    "operations that concluded unsuccessfully",
-                   {{"server", src},
+                   {{"site", srv.mtrSite}, {"server", srv.mtrServer},
                     {"category", cat.empty() ? "unknown" : cat}}) += 1;
 
    stats.failed++;
@@ -2432,7 +2508,7 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
 // A payload that is not a whole number of records was truncated somewhere;
 // the leftover bytes are dropped, but the packet is flagged.
 //
-   if (len % 16) Malformed(src, XROOTD_MON_MAPTRCE, "trailing_bytes");
+   if (len % 16) Malformed(src, XROOTD_MON_MAPTRCE, "trailing_bytes", &srv);
 
 // Pre-pass: estimate each record's time. WINDOW marks bound the records
 // between them (arg2 is the start of the window that follows, arg1 the end of
@@ -2629,13 +2705,24 @@ uint64_t jU(const json& j, const char* key)
 
 // Aggregate one parsed g-stream record into bounded-cardinality Prometheus
 // series. `prev` retains the last cumulative value for providers (oss) that
-// report running totals, so they become counter deltas.
+// report running totals, so they become counter deltas. `id` is the caller's
+// {site, server} label pair, which every series here extends; `src` stays the
+// raw sender because the `prev` baselines are keyed by it and ReapServers
+// prunes them by that prefix.
 //
 void gsAggregate(XrdMetrics::Subsystem* M,
                  std::unordered_map<std::string, uint64_t>& prev,
-                 unsigned char provByte, const std::string& src, const json& j)
+                 unsigned char provByte, const std::string& src,
+                 const std::vector<XrdMetrics::ConstLabel>& id, const json& j)
 {
-   std::vector<XrdMetrics::ConstLabel> srv = {{"server", src}};
+// Extend the identity with one more label, keeping {site, server} leading so
+// every family in this function shares a schema prefix.
+//
+   auto with = [&id](std::vector<XrdMetrics::ConstLabel> more)
+      {std::vector<XrdMetrics::ConstLabel> l = id;
+       l.insert(l.end(), more.begin(), more.end());
+       return l;
+      };
 
 // Turn a running total into a counter increment (skip the first observation,
 // which only establishes the baseline; treat a decrease as a counter reset).
@@ -2660,7 +2747,7 @@ void gsAggregate(XrdMetrics::Subsystem* M,
                     {"unlink","unlinks"},{"chmod","chmods"},{"open","opens"},
                     {"rename","renames"}};
                 for (auto& op : ops)
-                    {std::vector<XrdMetrics::ConstLabel> l = {{"server", src}, {"op", op.first}};
+                    {auto l = with({{"op", op.first}});
                      std::string base = src + "|oss|" + op.first;
                      delta("oss_ops_total",
                            "OSS plugin operations", l, base, jU(j, op.second));
@@ -2676,12 +2763,12 @@ void gsAggregate(XrdMetrics::Subsystem* M,
                {auto ev = j.find("event");
                 if (ev == j.end() || *ev != "file_close") break;
                 M->counterSeries("pfc_files_total",
-                           "proxy-cache file closes", srv) += 1;
+                           "proxy-cache file closes", id) += 1;
                 auto pfcBytes = [&](const char* source, const char* field)
                    {uint64_t v = jU(j, field);
                     if (v) M->counterSeries("pfc_bytes_total",
                                 "proxy-cache bytes by source",
-                                {{"server", src}, {"source", source}}) += v;
+                                with({{"source", source}})) += v;
                    };
                 pfcBytes("hit",      "b_hit");
                 pfcBytes("miss",     "b_miss");
@@ -2704,15 +2791,16 @@ void gsAggregate(XrdMetrics::Subsystem* M,
                    }
                 uint64_t size = jU(j, "Size");
                 M->counterSeries("tpc_total", "third-party copies",
-                           {{"server", src}, {"type", type},
-                            {"result", rc == 0 ? "ok" : "error"}}) += 1;
+                           with({{"type", type},
+                                 {"result", rc == 0 ? "ok" : "error"}})) += 1;
                 if (size)
                    M->counterSeries("tpc_bytes_total",
                               "third-party copy bytes",
-                              {{"server", src}, {"type", type}}) += size;
+                              with({{"type", type}})) += size;
                 M->histogramSeries("tpc_size_bytes",
                              "third-party copy size",
-                             {1e6,1e7,1e8,1e9,1e10,1e11}).observe((double)size);
+                             {1e6,1e7,1e8,1e9,1e10,1e11}, id)
+                 .observe((double)size);
                }
                break;
 
@@ -2720,12 +2808,12 @@ void gsAggregate(XrdMetrics::Subsystem* M,
                {auto ev = j.find("event");
                 if (ev == j.end() || *ev != "throttle_update") break;
                 delta("throttle_io_total",
-                      "throttle plugin I/O operations", srv,
+                      "throttle plugin I/O operations", id,
                       src + "|thr|io_total", jU(j, "io_total"));
                 auto ia = j.find("io_active");
                 if (ia != j.end() && ia->is_number())
                    M->gaugeSeries("throttle_io_active",
-                            "throttle plugin in-flight I/O", srv)
+                            "throttle plugin in-flight I/O", id)
                     = ia->get<double>();
                }
                break;
@@ -2740,8 +2828,8 @@ void gsAggregate(XrdMetrics::Subsystem* M,
                                                         ? std::string::npos : us - 5);
                      std::string status = us == std::string::npos ? ""
                                                                   : key.substr(us + 1);
-                     std::vector<XrdMetrics::ConstLabel> l = {{"server", src}, {"method", method},
-                                           {"status", status}};
+                     auto l = with({{"method", method},
+                                    {"status", status}});
                      delta("http_requests_total",
                            "HTTP requests by method and status", l,
                            src + "|http|" + key, jU(*it, "count"));
@@ -2761,7 +2849,7 @@ void XrdMonDecode::DecodeGStream(const std::string& src, int32_t stod,
 // the top byte of sID. The remainder is newline-separated plugin records
 // (JSON or CGI), produced by the oss/pfc/throttle/tpc/http g-streams.
 //
-   if (plen < 24) {Malformed(src, XROOTD_MON_MAPGSTA, "short_packet"); return;}
+   if (plen < 24) {Malformed(src, XROOTD_MON_MAPGSTA, "short_packet", &srv); return;}
    int32_t  tBeg = ri32(p + 8);
    int32_t  tEnd = ri32(p + 12);
    uint64_t sID  = rd64(p + 16);
@@ -2798,7 +2886,9 @@ void XrdMonDecode::EmitGStreamRecord(const std::string& src, int32_t stod,
 // (a) aggregate known providers into bounded metrics.
 //
    if (metrics && !payload.is_discarded())
-      gsAggregate(metrics, gsPrev, provByte, src, payload);
+      gsAggregate(metrics, gsPrev, provByte, src,
+                  {{"site", srv.mtrSite}, {"server", srv.mtrServer}},
+                  payload);
 
 // (b) forward the record (structured payload) as a document.
 //
@@ -2846,10 +2936,11 @@ void XrdMonDecode::DecodeGStreamJson(const std::string& src,
 //
    if (hasCode && code != "g")
       {int32_t stod = (int32_t)hdr.value("stod", 0);
-       (void)ServerFor(src, stod);            // refresh lastSeen for reaping
+       Server& srv = ServerFor(src, stod);    // refresh lastSeen for reaping
        if (metrics)
           metrics->counterSeries("packets_total", "monitor packets received",
-               {{"server", src}, {"stream", "g:json"}}) += 1;
+               {{"site", srv.mtrSite}, {"server", srv.mtrServer},
+                {"stream", "g:json"}}) += 1;
        if (dumpRaw && raw)
           {json j = {{"server", src}, {"code", code},
                      {"note", "json monitor packet (uncorrelated)"}};
@@ -2886,7 +2977,8 @@ void XrdMonDecode::DecodeGStreamJson(const std::string& src,
    std::string sclass = std::string("g:") + gsProvider(provByte);
    if (metrics)
       metrics->counterSeries("packets_total", "monitor packets received",
-           {{"server", src}, {"stream", sclass}}) += 1;
+           {{"site", srv.mtrSite}, {"server", srv.mtrServer},
+            {"stream", sclass}}) += 1;
    if (pseq >= 0)
       {auto it = srv.lastPseq.find(sclass);
        if (it == srv.lastPseq.end()) srv.lastPseq.emplace(sclass, pseq);
@@ -2897,7 +2989,8 @@ void XrdMonDecode::DecodeGStreamJson(const std::string& src,
                if (metrics)
                   metrics->counterSeries("packets_lost_total",
                        "estimated lost packets (pseq gaps)",
-                       {{"server", src}, {"stream", sclass}}) += gap;
+                       {{"site", srv.mtrSite}, {"server", srv.mtrServer},
+                        {"stream", sclass}}) += gap;
               }
            it->second = pseq;
           }
@@ -2953,7 +3046,7 @@ void XrdMonDecode::DecodeRStream(const std::string& src, int32_t stod,
 // "<host>:<path>" string occupying its Dent (slot) count of further records.
 //
    const int RSZ = 8;
-   if (plen < 16) {Malformed(src, XROOTD_MON_MAPREDR, "short_packet"); return;}
+   if (plen < 16) {Malformed(src, XROOTD_MON_MAPREDR, "short_packet", &srv); return;}
 
    int32_t tWin = 0;
    int off = 16;                              // past header + sID block
@@ -2979,7 +3072,7 @@ void XrdMonDecode::DecodeRStream(const std::string& src, int32_t stod,
          int savail = plen - (off + RSZ);
          int slen = (int)slots * RSZ;
          if (slen > savail)
-            {Malformed(src, XROOTD_MON_MAPREDR, "truncated_string");
+            {Malformed(src, XROOTD_MON_MAPREDR, "truncated_string", &srv);
              slen = savail;
             }
          std::string hp(sp, slen > 0 ? strnlen(sp, slen) : 0);
@@ -2990,7 +3083,7 @@ void XrdMonDecode::DecodeRStream(const std::string& src, int32_t stod,
          if (metrics)
             metrics->counterSeries("redirects_total",
                           "client redirects issued by the server",
-                          {{"server", src}, {"kind", kind}}) += 1;
+                          {{"site", srv.mtrSite}, {"server", srv.mtrServer}, {"kind", kind}}) += 1;
          if (redirects)
             {// A redirect concludes the operation from this (redirector) node's
              // point of view, so it is reported in the same concluded-operation

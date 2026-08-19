@@ -1427,9 +1427,12 @@ int main(int argc, char* argv[])
       {auto& s = decoder.GetStats();
 #define OBS(name, help, fld) \
        subsystem->observeCounter<std::uint64_t>(name, help).add({}, [&]{return (uint64_t)s.fld;})
-       // packets_total and malformed_total are emitted by the decoder itself,
-       // labeled by {server, stream} and {server, stream, reason} respectively;
-       // only the unlabeled aggregates live here.
+       // packets_total, malformed_total, orphan_closes_total and stale_opens_total
+       // are emitted by the decoder itself, labeled by {site, server, ...}; only
+       // the unlabeled aggregates live here. Registering a name through both
+       // paths does not merge them — observeCounter bypasses the registry's
+       // byName_ dedup — so it would put two families of the same name in the
+       // exposition, which strict OpenMetrics parsers reject.
        OBS("unknown_packets_total",
            "packets with an unhandled stream code", unknown);
        OBS("evicted_total",
@@ -1439,8 +1442,6 @@ int main(int argc, char* argv[])
        OBS("documents_total", "transfer documents produced", docs);
        OBS("filtered_documents_total",
            "documents suppressed before emission by a [filter] rule", filtered);
-       OBS("orphan_closes_total",
-           "closes with no matching open", orphanCls);
        OBS("disconnects_total",
            "f-stream session disconnect records", discs);
        OBS("trace_records_total", "t-stream records decoded", traces);

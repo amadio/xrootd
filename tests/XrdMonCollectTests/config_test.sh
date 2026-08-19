@@ -61,8 +61,27 @@ cat > "${TMP}/ok.cfg" <<EOF
 port = 9932
 no-resolve = true
 max-memory = 64M
+site = EXAMPLE-SITE
 EOF
 starts -c "${TMP}/ok.cfg" || fail "valid config should start the collector"
+
+# 5b. The site knob has to reach the metrics registry, and it can only do that
+#     before the first subsystem is created -- setGlobalLabels() declines the
+#     change afterwards. Scrape and look for the label rather than trusting that
+#     the collector merely started.
+if command -v curl >/dev/null 2>&1; then
+	"${BIN}" -c "${TMP}/ok.cfg" -p 9934 --metrics-port 9935 \
+	         >"${TMP}/site.log" 2>&1 </dev/null &
+	pid=$!
+	sleep 1
+	got=$(curl -sf http://localhost:9935/metrics || true)
+	kill "${pid}" 2>/dev/null || true
+	wait "${pid}" 2>/dev/null || true
+	case "${got}" in
+	  *'site="EXAMPLE-SITE"'*) ;;
+	  *) fail "site from the config file did not reach the metrics" ;;
+	esac
+fi
 
 # 6. A filter rule keyed on something that is not a known field is a hard error
 #    naming the key: a rule that silently matches nothing is indistinguishable

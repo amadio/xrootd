@@ -210,6 +210,9 @@ void usage(const char* prog)
      "  --rcvbuf <sz>    kernel UDP receive buffer, SO_RCVBUF (K/M/G; default 16M)\n"
      "  --queue-depth <n> receive->serialize batches in flight (default: 64)\n"
      "  --metrics-port <p> serve aggregated metrics over HTTP on port <p>\n"
+     "  --site <name>    tag everything this collector emits with a site: a\n"
+     "                   site label on every metric series and xrootd.site on\n"
+     "                   every document (default: none, and nothing is tagged)\n"
      "  --max-memory <sz> bound correlation state to ~<sz> bytes, evicting the\n"
      "                   least-recently-used entries (K/M/G suffix; default 256M;\n"
      "                   0=unbounded)\n"
@@ -745,6 +748,7 @@ int main(int argc, char* argv[])
    std::string scitags;
    long        scitagsRefresh = 3600;
    std::string dataset;              // --dataset capture regex (off if empty)
+   std::string site;                 // --site, this collector's site (or empty)
    bool        resolve = true;
    bool        sessions = false;      // per-session rollup + session documents
    bool        spans    = false;      // companion OTLP span documents
@@ -852,6 +856,7 @@ int main(int argc, char* argv[])
        scitags     = cfg.Get(sec, "scitags", scitags);
        scitagsRefresh = cfg.GetInteger(sec, "scitags-refresh", scitagsRefresh);
        dataset     = cfg.Get(sec, "dataset", dataset);
+       site        = cfg.Get(sec, "site", site);
        resolve     = !cfg.GetBoolean(sec, "no-resolve", !resolve);
        sessions    = cfg.GetBoolean(sec, "sessions", sessions);
        spans       = cfg.GetBoolean(sec, "spans", spans);
@@ -930,7 +935,7 @@ int main(int argc, char* argv[])
       OPT_FLUSH_SECS, OPT_RCVBUF, OPT_QUEUE_DEPTH,
       OPT_METRICS_PORT, OPT_MAX_MEMORY, OPT_MAX_ENTRIES,
       OPT_SERVER_TTL, OPT_FILE_TTL, OPT_STATE_FILE, OPT_STATE_TTL,
-      OPT_SCITAGS, OPT_SCITAGS_REFRESH, OPT_DATASET,
+      OPT_SCITAGS, OPT_SCITAGS_REFRESH, OPT_DATASET, OPT_SITE,
       OPT_NO_RESOLVE,
       OPT_SESSIONS, OPT_SPANS, OPT_TRACES, OPT_GSTREAM, OPT_REDIRECTS, OPT_DEBUG
    };
@@ -969,6 +974,7 @@ int main(int argc, char* argv[])
       {"scitags",         required_argument, nullptr, OPT_SCITAGS},
       {"scitags-refresh", required_argument, nullptr, OPT_SCITAGS_REFRESH},
       {"dataset",         required_argument, nullptr, OPT_DATASET},
+      {"site",            required_argument, nullptr, OPT_SITE},
       {"no-resolve",      no_argument,       nullptr, OPT_NO_RESOLVE},
       {"sessions",        no_argument,       nullptr, OPT_SESSIONS},
       {"spans",           no_argument,       nullptr, OPT_SPANS},
@@ -1039,6 +1045,7 @@ int main(int argc, char* argv[])
          case OPT_SCITAGS:       scitags      = optarg;               break;
          case OPT_SCITAGS_REFRESH: scitagsRefresh = atol(optarg);     break;
          case OPT_DATASET:       dataset      = optarg;               break;
+         case OPT_SITE:          site         = optarg;               break;
          case OPT_NO_RESOLVE:    resolve      = false;               break;
          case OPT_SESSIONS:      sessions     = true;                break;
          case OPT_SPANS:         spans        = true;                break;
@@ -1057,6 +1064,22 @@ int main(int argc, char* argv[])
       {fprintf(stderr, "%s: a valid -p/--udp-port or --tcp-port is required\n",
                argv[0]);
        usage(argv[0]); return 2;}
+
+// The site is a property of this collector, not of the servers reporting to it:
+// it is not on the monitoring wire at all (all.sitename names the storage
+// cluster), and the deployment model is one collector per site. As a global
+// label it prepends `site` to every series without touching any call site --
+// global labels sit outside the positional schema getOrAddLabeled freezes.
+//
+// This must run before the first subsystem is created, in either mode, or
+// setGlobalLabels() declines the change: every family captures the label set by
+// pointer and bakes its rendered prefix once. Hence here, ahead of the shoveler
+// branch below.
+//
+   if (!site.empty() && !collectorRegistry().setGlobalLabels({{"site", site}}))
+      {fprintf(stderr, "%s: internal error: --site applied too late to label "
+               "the metrics\n", argv[0]);
+       return 2;}
 
 // Shoveler mode: relay only. It needs the UDP port to receive on and must not
 // itself accept shoveled TCP traffic (no relay chaining — it would make
@@ -1360,6 +1383,7 @@ int main(int argc, char* argv[])
    decoder.SetServerTTL(serverTtl);
    decoder.SetFileTTL(fileTtl);
    decoder.SetResolveHosts(resolve);
+   decoder.SetSite(site);
    decoder.SetEmitSessions(sessions);
    decoder.SetEmitSpans(spans);
    if (!filter.Empty())

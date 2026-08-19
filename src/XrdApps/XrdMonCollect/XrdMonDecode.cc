@@ -674,6 +674,12 @@ void XrdMonDecode::otelResource(json& j, const std::string& src, int32_t stod,
    // no such spelling and uses the literal.
    if (clusterKnown(srv.ident.site)) r["service.namespace"]  = srv.ident.site;
    if (!srv.ident.pgm.empty())   r["process.executable.name"] = srv.ident.pgm;
+   // The site comes from this collector's configuration, not from the server:
+   // it is not on the wire, and one collector serves one site. Still a resource
+   // attribute rather than a scope field, because it describes where the
+   // reporting server sits -- and because Loki promotes resource attributes to
+   // stream labels, while the scope is fixed by the OTLP sink.
+   if (!site.empty())            r["xrootd.site"]            = site;
    if (srv.sID)                  r["xrootd.server.id"]       = srv.sID;
    r["xrootd.server.incarnation"] = stod;             // incarnation key
 }

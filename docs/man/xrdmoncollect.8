@@ -57,7 +57,7 @@ the consumer, which has \fBfile.size\fR and the byte counters
 (\fBxrootd.read_bytes\fR, \fBxrootd.readv_bytes\fR, \fBxrootd.write_bytes\fR)
 in the same document; the collector reports what the server measured and derives
 nothing from it. Operations are counted in
-\fBxrootd_collector_io_total{server,operation}\fR, whose \fBoperation\fR label
+\fBxrootd_collector_io_total{cluster,server,operation}\fR, whose \fBoperation\fR label
 is \fBopen\fR, \fBclose\fR, or -- when the server config includes the \fBops\fR
 block -- \fBread\fR, \fBreadv\fR and \fBwrite\fR per request.
 .P
@@ -100,7 +100,7 @@ earliest record naming the session) or \fBdisconnect\fR (nothing else was
 available, so the session is reported as an instant). Candidates are accepted
 only within the session's own bounds, so a skewed clock degrades the start to a
 later source rather than producing a wrong or missing one. The counter
-\fBxrootd_collector_session_starts_total{server,source}\fR shows the mix: mostly
+\fBxrootd_collector_session_starts_total{cluster,server,source}\fR shows the mix: mostly
 \fBdisconnect\fR means \fBu\fR records are being lost, or the server's
 \fBxrootd.monitor\fR destination lacks the \fBuser\fR flag.
 .P
@@ -234,12 +234,18 @@ Serve aggregated metrics in Prometheus exposition format over HTTP on
 \fIport\fR. A shoveler serves its own metric set under the
 \fBxrootd_shoveler_\fR prefix.
 .P
-Every per-server series carries \fBsite\fR and \fBserver\fR labels, so
-\fBsum by (site)\fR gives a whole storage cluster. Both come from the
-\fB=\fR identity record and are provisional until it arrives: a server not
-yet identified reads \fBsite="unknown"\fR with its numeric address as
-\fBserver\fR. That record defaults to hourly, so set \fBident 300\fR in
-the server's \fBxrootd.monitor\fR directive to shorten the window.
+Every per-server series carries \fBcluster\fR and \fBserver\fR labels, so
+\fBsum by (cluster)\fR gives a whole storage system. \fBcluster\fR is the
+server's \fBall.sitename\fR, which this collector reads as the name of the
+storage cluster (\fBeoscms\fR, \fBeosalice\fR) rather than the WLCG site: a
+site holds several storage systems and nothing else on the monitoring wire
+tells them apart. There is no \fBsite\fR label; derive one downstream from
+\fBserver\fR with a Prometheus \fBmetric_relabel_configs\fR rule. Both
+labels come from the \fB=\fR identity record and are provisional until it
+arrives: a server not yet identified reads \fBcluster="unknown"\fR with its
+numeric address as \fBserver\fR. That record defaults to hourly, so set
+\fBident 300\fR in the server's \fBxrootd.monitor\fR directive to shorten
+the window.
 .RE
 \fB--tcp-port\fR \fIport\fR
 .RS 5
@@ -453,8 +459,8 @@ populate.
 The \fBxrootd.client.site\fR field is populated when the connecting client
 advertises a site of its own: a client with \fBXRDSITE\fR (or \fBXRD_SITE\fR,
 which takes precedence) set in its environment sends it at login, and the server
-forwards it on the \fIu\fR-stream. This is independent of the reporting server's
-own \fBxrootd.server.site\fR.
+forwards it on the \fIu\fR-stream. This is independent of the reporting
+server's own \fBservice.namespace\fR.
 .SS Tuning for pipeline resilience
 The monitor streams are UDP: a datagram larger than the path MTU is fragmented
 at the IP layer and the loss of any one fragment drops the whole datagram.
@@ -470,12 +476,12 @@ must fit the buffer or the server drops it.
 .P
 \fBflush\fR/\fBfstat\fR/\fBwindow\fR bound latency, not loss: smaller buffers
 just flush more often. In the collector's metrics,
-\fBpackets_lost_total{site,server,stream}\fR reports pseq gaps per stream class
+\fBpackets_lost_total{cluster,server,stream}\fR reports pseq gaps per stream class
 (\fBmain\fR, \fBf\fR, \fBg:<provider>\fR — the server runs independent
 sequence counters for the fstat stream and each g-stream provider); loss
 concentrated on \fBf\fR while \fBt\fR arrives fine is the fragmentation
 signature, loss on all streams points at the network or the collector's
-receive buffer. \fBpackets_total{server,stream}\fR carries the same
+receive buffer. \fBpackets_total{cluster,server,stream}\fR carries the same
 \fB{server,stream}\fR labels, so a per-source loss percentage is
 \fBpackets_lost_total / packets_total\fR.
 \fBmalformed_total{server,stream,reason}\fR breaks out
@@ -542,7 +548,8 @@ Condition keys are \fBuser\fR, \fBuserid\fR, \fBrole\fR, \fBvo\fR, \fBgroups\fR,
 \fBexperiment\fR, \fBactivity\fR, \fBpath\fR, \fBdir\fR, \fBfilename\fR,
 \fBext\fR, \fBdataset\fR, \fBevent\fR, \fBop\fR, \fBstate\fR,
 \fBerror\fR, \fBprovider\fR, \fBtarget\fR, \fBsession\fR, \fBseverity\fR,
-\fBserver\fR, \fBsite\fR, \fBinstance\fR, \fBprogram\fR and \fBversion\fR, or a
+\fBserver\fR, \fBcluster\fR, \fBservice\fR, \fBprogram\fR and
+\fBversion\fR, or a
 raw \fBattributes.\fIkey\fR / \fBresource.\fIkey\fR path for any other field.
 .P
 Filtering applies to the emitted documents only: a dropped document is still

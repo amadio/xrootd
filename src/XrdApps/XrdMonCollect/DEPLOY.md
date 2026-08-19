@@ -208,7 +208,7 @@ The directives below go into the xrootd config file on **every data server**
 ### 2.1 Detailed monitoring stream
 
 ```
-all.sitename EXAMPLE-SITE
+all.sitename eoscms          # the storage cluster, not the WLCG site
 
 xrootd.monitor all auth flush io 60s fstat 60s lfn ops ssq xfr 10 \
                mbuff 1400 fbsz 1400 rbuff 1400 gbuff 1400 window 15s \
@@ -218,12 +218,20 @@ xrootd.monitor all auth flush io 60s fstat 60s lfn ops ssq xfr 10 \
 What matters and why:
 
 - `all.sitename` is carried in the identity records and becomes
-  `resource.xrootd.server.site` on every document and the `site` label on
-  every per-server metric — set it to your WLCG site name. It is the key
-  everything aggregates by, so keep it identical across a cluster's nodes.
-  Because it travels in the `=` record, which defaults to hourly, also set
-  `ident 300` in the `xrootd.monitor` directive: until the first one arrives
-  the collector labels that server `site="unknown"`.
+  `resource.service.namespace` on every document and the `cluster` label on
+  every per-server metric. **Set it to the name of the storage system, not
+  your WLCG site**: a site holds several, and nothing else on the monitoring
+  wire tells them apart, so a shared `CERN-PROD` would merge `eosalice`,
+  `eosatlas`, `eoscms` and `eoslhcb` into one set of numbers with no way to
+  separate them. The WLCG site is recovered downstream — see [Adding a site
+  label](#adding-a-site-label-downstream). It is the key everything
+  aggregates by, so keep it identical across one cluster's nodes and distinct
+  between clusters. Because it travels in the `=` record, which defaults to
+  hourly, also set `ident 300` in the `xrootd.monitor` directive: until the
+  first one arrives the collector labels that server `cluster="unknown"`.
+  Consumers that still read `&site=` as a WLCG site — the MONIT/OSG pipeline
+  does — will see the cluster name, so have the downstream mapping in place
+  before switching.
 - `lfn` — adds the file path to open events; without it documents have no
   file names.
 - `xfr 10` — emits in-progress transfer snapshots; **required** for the
@@ -1271,8 +1279,8 @@ scrape_configs:
           - "localhost:9100"       # local node_exporter
           # - "<REMOTE_IP>:9100"   # add remote machines here (see section 16)
 
-  # xrdmoncollect self-metrics: decoder/sink health, packet loss,
-  # per-VO/locality transfer aggregates (collector and shoveler nodes alike).
+  # xrdmoncollect metrics: decoder/sink health, packet loss, and the
+  # per-cluster I/O aggregates (collector and shoveler nodes alike).
   - job_name: moncollect
     static_configs:
       - targets:
@@ -1289,6 +1297,42 @@ scrape_configs:
       - targets:
           - "<XROOTD_HOST>:8443"
 ```
+
+### Adding a site label (downstream)
+
+`all.sitename` names the storage cluster, so nothing on the monitoring wire
+carries the WLCG site (section 2.1 explains why). Derive it at scrape time from
+the `server` label, which is the reporting node's host name:
+
+```yaml
+  - job_name: moncollect
+    metric_relabel_configs:
+      - source_labels: [server]
+        regex: '.*\.cern\.ch'
+        target_label: site
+        replacement: CERN-PROD
+      - source_labels: [server]
+        regex: '.*\.in2p3\.fr'
+        target_label: site
+        replacement: IN2P3-CC
+    static_configs:
+      - targets: ["<COLLECTOR_HOST>:9932"]
+```
+
+Rules are applied in order and the last match wins, so put the most specific
+patterns first. Series with no matching rule simply have no `site` label;
+`sum by (site)` then drops them, which is the honest outcome — add a catch-all
+`.*` → `unknown` rule at the end if you would rather see them.
+
+Once the label exists, a **Site** variable can be added to the Grafana
+dashboard (`label_values(xrootd_collector_servers, site)`) above the existing
+**Storage cluster** one. The shipped dashboard does not define it, because on a
+deployment without these rules it would be empty.
+
+For documents rather than metrics, do the same in the ingest path: an
+OpenSearch ingest-pipeline `grok`/`set` pair on `resource.server.address`, or
+an OTel Collector `transform` processor writing `resource.attributes["site"]`.
+
 
 ```bash
 sudo systemctl daemon-reload
@@ -2226,8 +2270,8 @@ All from the `moncollect` Prometheus job (section 9):
 | spool backlog | `xrootd_collector_cache_files` growing for >1 h | backend outage outlasting the buffer |
 | shovel spool dropping | `rate(xrootd_shoveler_spool_dropped_total[10m]) > 0` | outage exceeded `spool-max` — data loss |
 | state pressure | `xrootd_collector_evicted_total` climbing | raise `max-memory` or lower `server-ttl` |
-| servers gone quiet | `xrootd_collector_servers{site="..."} < N` | nodes stopped reporting — check their `xrootd.monitor dest` |
-| unattributed servers | `xrootd_collector_servers{site="unknown"} > 0` for >1 h | a server has no `all.sitename`, or its `ident` interval is longer than the alert window |
+| servers gone quiet | `xrootd_collector_servers{cluster="..."} < N` | nodes stopped reporting — check their `xrootd.monitor dest` |
+| unattributed servers | `xrootd_collector_servers{cluster="unknown"} > 0` for >1 h | a server has no `all.sitename`, or its `ident` interval is longer than the alert window |
 
 Loss on the `f` stream alone (label `stream="f"`), with other streams clean,
 is the fragmentation signature — some server is still emitting 64 KiB fstat
@@ -2273,11 +2317,11 @@ Follow the transfer through the pipeline:
    `packets_lost_total`/`malformed_total` stay flat; `io_total` and
    `io_bytes_total` tick after the file close arrives (up to one `fstat`
    interval — 60 s with the section 2.1 config), and
-   `xrootd_collector_servers{site="<your site>"}` shows the node.
+   `xrootd_collector_servers{cluster="<your cluster>"}` shows the node.
 3. **Documents**: Grafana → Explore → Loki,
-   `{service_name="xrootd"} |= "mon-smoke-test"` — one
+   `{service_namespace="<your cluster>"} |= "mon-smoke-test"` — one
    `xrootd.read` document with the file path, client, byte counts and
-   `resource.xrootd.server.site` (OpenSearch path: Lucene
+   `resource.service.namespace` (OpenSearch path: Lucene
    `attributes.file.path:*mon-smoke-test*` on `xrootd-transfers*`).
 4. **Traces** (with `spans = true`): Tempo → Search — a file-operation span
    whose duration matches open→close.

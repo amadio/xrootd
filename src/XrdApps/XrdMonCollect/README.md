@@ -96,11 +96,11 @@ an incarnation):
   past the TTL, so dead incarnations from restarts and rolling upgrades do not
   accumulate. Reaping the last incarnation of a sender also parks its
   `files_open`, `sessions_open` and `server_info` series at zero and recounts
-  `servers{site}`, so a restarted server does not strand a nonzero series.
+  `servers{cluster}`, so a restarted server does not strand a nonzero series.
 - A client disconnect sweeps that user's open-file entries whose close was
   never seen (the server reports a session's closes before its `isDisc`, so a
   leftover entry means the close record was lost). Swept entries are counted
-  in `xrootd_collector_stale_opens_total{site,server}`.
+  in `xrootd_collector_stale_opens_total{cluster,server}`.
 - `--file-ttl` (default `0` = off) expires open-file entries untouched for the
   given period, covering leaks whose disconnect was also lost. It only applies
   to servers that report in-flight snapshots (`xfr` on `xrootd.monitor
@@ -351,7 +351,7 @@ xrdmoncollect --tcp-port 9931 --tcp-token @/etc/xrootd/shovel.token \
 ## Streams and documents
 
 By default the `f` (file-stats) stream produces a per-close document on each
-file close and maintains the `xrootd_collector_files_open{site,server}` gauge
+file close and maintains the `xrootd_collector_files_open{cluster,server}` gauge
 (from the `isXfr` snapshots and open/close records). A
 file close is reported with `attributes["event.name"]` naming the direction:
 `xrootd.read` when the close carried no write bytes, `xrootd.write` when it did.
@@ -371,8 +371,8 @@ read_bytes + readv_bytes >= file.size      # the whole file was read
 open was joined at all, which is what decides whether `file.size` is available,
 and `xrootd.forced_close` says whether the client concluded the operation or was
 disconnected mid-way. Operations are counted in
-`xrootd_collector_io_total{site,server,operation}` and the bytes they moved in
-`xrootd_collector_io_bytes_total{site,server,operation}`.
+`xrootd_collector_io_total{cluster,server,operation}` and the bytes they moved in
+`xrootd_collector_io_bytes_total{cluster,server,operation}`.
 
 ### Streams
 
@@ -417,7 +417,7 @@ Several opt-in streams add finer-grained events:
   Candidates are admitted only within the session's own
   `[incarnation start, disconnect]` range, so a badly skewed clock degrades the
   start to a later rung rather than producing a wrong or missing one. The
-  companion counter `xrootd_collector_session_starts_total{site,server,source}`
+  companion counter `xrootd_collector_session_starts_total{cluster,server,source}`
   makes the mix visible: a server reporting mostly `disconnect` is losing `u`
   records, or its `xrootd.monitor` destination lacks the `user` flag.
 - `--spans` additionally emits an OpenTelemetry **span** document alongside each
@@ -464,7 +464,7 @@ Several opt-in streams add finer-grained events:
 - The `x` (FRM stage/migrate) and `p` (FRM purge) records are always decoded
   into an `frm` document (`attributes["event.name"]` = `xrootd.frm`;
   `xrootd.operation.name`, `user.name`, `file.path`, and — for purge — `file.size`)
-  and counted in `xrootd_collector_frm_total{site,server,op}` /
+  and counted in `xrootd_collector_frm_total{cluster,server,op}` /
   `xrootd_collector_frm_purge_bytes_total`. Emitted by a File Residency
   Manager.
 - `--redirects` turns each `r` (redirect) record into a concluded-operation
@@ -477,7 +477,7 @@ Several opt-in streams add finer-grained events:
   redirector's point of view (the data server that ultimately serves the file
   emits its own `Successful`/`Failed` close). Emitted mainly by
   redirectors/managers; requires `redir` in the monitor `dest` list. Redirects
-  are also counted in `xrootd_collector_redirects_total{site,server,kind}`
+  are also counted in `xrootd_collector_redirects_total{cluster,server,kind}`
   regardless of this flag.
 
 The `u` (user), `d` (path) and `i` (appinfo) dictionaries are always consumed:
@@ -491,9 +491,9 @@ records are also always consumed:
 
 - `=` (`MAPIDNT`) yields a one-off `server_ident` document
   (`attributes["event.name"]` = `xrootd.server_ident`) per server incarnation
-  (its `resource`: `xrootd.server.site`, `service.instance.id`,
-  `xrootd.server.program`, `service.version`, `server.address`,
-  `server.port`) and its host/site/instance are joined into every transfer
+  (its `resource`: `service.namespace`, `service.name`,
+  `service.instance.id`, `service.version`, `server.address`, `server.port`,
+  `process.executable.name`) and that identity is joined into every transfer
   document's `resource`. Re-sent identically each `ident` interval; the
   collector emits the document only when it changes.
 - `T` (`MAPTOKN`) carries the token identity (subject, VO, role, groups). Keyed
@@ -636,9 +636,9 @@ path (for example `attributes.xrootd.session.files`).
 | `app` | `user_agent.name` | `session` | `session.id` |
 | `appver` | `user_agent.version` | `severity` | `severityText` *(top level)* |
 | `appinfo` | `user_agent.original` | `server` | `server.address` *(resource)* |
-| `appid` | `xrootd.app` | `site` | `xrootd.server.site` *(resource)* |
-| `experiment` | `scitags.experiment` | `instance` | `service.instance.id` *(resource)* |
-| `activity` | `scitags.activity` | `program` | `xrootd.server.program` *(resource)* |
+| `appid` | `xrootd.app` | `cluster` | `service.namespace` *(resource)* |
+| `experiment` | `scitags.experiment` | `service` | `service.name` *(resource)* |
+| `activity` | `scitags.activity` | `program` | `process.executable.name` *(resource)* |
 | | | `version` | `service.version` *(resource)* |
 
 An array field (`role`) matches when any element does; numbers and booleans are
@@ -693,13 +693,13 @@ shows a fully-populated successful read (server configured with
 ```json
 {
   "resource": {
-    "service.name": "xrootd",
-    "service.instance.id": "srv1",
+    "service.namespace": "eosatlas",
+    "service.name": "fst",
+    "service.instance.id": "srv1.example.org:1094",
     "service.version": "5.6.1",
     "server.address": "srv1.example.org",
     "server.port": 1094,
-    "xrootd.server.site": "SITE-A",
-    "xrootd.server.program": "xrootd",
+    "process.executable.name": "xrootd",
     "xrootd.server.id": 42,
     "xrootd.server.incarnation": 1700000000
   },
@@ -940,7 +940,7 @@ on the wire. Mapping (and the server config each needs):
 | operation_state | `xrootd.operation.state` (`Successful`/`Failed`/`Redirected`) | `fstat` (terminal report); `Redirected` from `r` with `--redirects` |
 | error_message | `error.type` | `fstat` (failed open / I/O / close) |
 | error_category | `xrootd.operation.name` + `xrootd.error.code` | `fstat` (failed open / I/O / close) |
-| server_name/site | `server.address` / `xrootd.server.site` | `=` ident (`all.sitename`/`XRDSITE` for site) |
+| server_name/site | `server.address` / `service.namespace` | `=` ident (`all.sitename`/`XRDSITE` for the cluster) |
 | server_ip / hostname | `server.address` | `=` ident, else UDP source (loopback → public address / local FQDN) |
 | client_ip / hostname | `client.address` (name first, from `@host` or `&h=`) / `network.peer.address` (IP) | `u` descriptor / auth `&h=` (server DNS config) / login CGI `&a=` (numeric IP, 6.x+) |
 | client_app / version | `user_agent.name` (`&x=` executable, else `xrootd`) / `user_agent.version` / `user_agent.original` (`&y=`) | login appinfo (`&x=`/`&R=`/`&y=`) |
@@ -1010,7 +1010,7 @@ with `xrootd.operation.name` (the operation that failed:
 `nfs.operation.name`), `xrootd.error.code` (the XRootD error code), and
 `error.type` (the server's error message). On a failed *close* the record
 keeps its byte-derived `read`/`write` operation name — the error-category
-byte still drives the `xrootd_collector_errors_total{site,server,category}`
+byte still drives the `xrootd_collector_errors_total{cluster,server,category}`
 metric label. A
 failed open never produced any close record before; the server now emits a
 terminal `isError` f-stream record, and sets `hasERR` on the close for a failed
@@ -1039,11 +1039,11 @@ client that has `XRDSITE` (or `XRD_SITE`, which takes precedence) set in its
 environment sends it in the login CGI (`xrd.site`), the server folds it into the
 user-map appinfo (`&S=`), and the collector surfaces it as `xrootd.client.site`.
 It is absent when the client does not advertise one. (This is distinct from
-`xrootd.server.site`, which is the *reporting server's* site — `all.sitename`
-in its config, exported as `XRDSITE` — from the `=` ident record. A site that
-is only dots — `XrdOucSiteName`'s sanitization of an entirely invalid name,
-e.g. a stray `XRDSITE` env var inherited by a daemon with no `all.sitename`
-directive — is dropped as carrying no information.)
+`service.namespace`, which is the *reporting server's* storage cluster —
+`all.sitename` in its config, exported as `XRDSITE` — from the `=` ident
+record. A name that is only dots — `XrdOucSiteName`'s sanitization of an
+entirely invalid name, e.g. a stray `XRDSITE` env var inherited by a daemon
+with no `all.sitename` directive — is dropped as carrying no information.)
 
 ### Monitoring stream field mapping
 
@@ -1060,15 +1060,32 @@ spec](https://xrootd.web.cern.ch/doc/dev6/xrd_monitoring.htm).
 
 | Wire field | Canonical key |
 | :-- | :-- |
-| `&inst=` | `resource.service.instance.id` |
-| `&ver=` | `resource.service.version` |
+| `&site=` (`all.sitename`) | `resource.service.namespace` |
+| `&inst=` (`-n`), else `&pgm=` | `resource.service.name` |
+| `@host` / resolved / source IP, with `&port=` | `resource.service.instance.id` |
 | `@host` / resolved / source IP | `resource.server.address` |
 | `&port=` | `resource.server.port` |
-| `&site=` | `resource.xrootd.server.site` |
-| `&pgm=` | `resource.xrootd.server.program` |
+| `&ver=` | `resource.service.version` |
+| `&pgm=` | `resource.process.executable.name` |
 | f-stream `sID` | `resource.xrootd.server.id` |
 | header `stod` | `resource.xrootd.server.incarnation` |
-| — | `resource.service.name` = `xrootd` (constant) |
+
+The three `service.*` attributes carry the whole of the server's identity, as
+the [OTel service
+conventions](https://opentelemetry.io/docs/specs/semconv/resource/service/)
+define them. `service.namespace` is the storage cluster and the group the other
+two are unique within; **this collector reads `all.sitename` as the cluster
+name** (`eosalice`, `eoscms`), not as the WLCG site — see [Cluster and server
+labels](#cluster-and-server-labels). `service.name` is the daemon's `-n` name
+(`fst`, `mgm`), falling back to the program name, which is what semconv
+prescribes for a service that has not been named; `-n` defaults to the
+placeholder `anon`, which is treated as unnamed. `service.instance.id` must be
+unique per instance of a (namespace, name) pair, so it cannot be `&inst=` —
+that is one value for a whole fleet of storage nodes — and is the address and
+port instead, which is unique among daemons running at once and stable across
+restarts. The f-stream `sID` is unique too but stays 0 until an f-stream record
+arrives, so it cannot identify an ident-only document; it keeps its own vendor
+key.
 
 **Envelope** (per record, set by `otelBegin`):
 
@@ -1395,10 +1412,15 @@ xrootd.monitor all flush 30 fstat 30 lfn ops ssq xfr 1 auth ident 300 \
 it the collector reports opens, closes and byte volumes but no IOPS.
 
 `ident 300` is worth setting: the `=` identity record is what tells the
-collector a server's site and host name, and it defaults to hourly. Until it
-arrives every metric from that server is labelled `site="unknown"` with the
-numeric address as `server` (see [Site and server
-labels](#site-and-server-labels)).
+collector a server's cluster and host name, and it defaults to hourly. Until
+it arrives every metric from that server is labelled `cluster="unknown"` with
+the numeric address as `server` (see [Cluster and server
+labels](#cluster-and-server-labels)).
+
+`all.sitename` is what names the cluster. This collector reads it as the
+storage system (`eosalice`, `eoscms`), not the WLCG site — see [Cluster and
+server labels](#cluster-and-server-labels) for why, and for how the site is
+recovered downstream.
 
 ### Tuning `xrootd.monitor` for pipeline resilience
 
@@ -1453,15 +1475,15 @@ g-stream provider run their own independent `pseq` counters, while the
 trace/redirect/map streams share one. The collector therefore tracks loss per
 stream class, and the metrics tell them apart:
 
-- `packets_total{site,server,stream}` — packets received, labeled the same
-  `{site,server,stream}` as `packets_lost_total` so the two divide into a loss
+- `packets_total{cluster,server,stream}` — packets received, labeled the same
+  `{cluster,server,stream}` as `packets_lost_total` so the two divide into a loss
   percentage per source (and per stream class):
   `100 * sum by(server)(rate(packets_lost_total[5m]))
   / sum by(server)(rate(packets_total[5m]))`. Malformed packets rejected before
   a stream class is known are not counted here (they land in `malformed_total`),
   so this is the well-formed denominator. `sum(packets_total)` still gives the
   global receive rate.
-- `packets_lost_total{site,server,stream}` — pseq gaps, per stream class (`main`,
+- `packets_lost_total{cluster,server,stream}` — pseq gaps, per stream class (`main`,
   `f`, `g:<provider>`). Loss concentrated on `f` with `mbuff`-sized `t`
   packets arriving fine is the fragmentation signature above. Loss across
   *all* streams points at the network or at the collector's receive buffer
@@ -1584,8 +1606,9 @@ xrdmoncollect -p 9930 --otlp-url http://loki:3100/otlp
 `xrdmoncollect` appends `/v1/logs` to the OTLP URL, matching Loki's OTLP ingest
 path. This requires **Loki ≥ 3.0** with structured metadata and OTLP ingestion
 enabled (both on by default in 3.x). Loki promotes only a small set of *resource*
-attributes to stream labels — for our records `service.name` (always `xrootd`)
-and `service.instance.id` — and stores everything else, including all event
+attributes to stream labels — for our records `service.namespace` (the storage
+cluster), `service.name` (the daemon's `-n` name) and `service.instance.id`
+(its address and port) — and stores everything else, including all event
 attributes, as **structured metadata** with dots rewritten to underscores. So the
 OpenSearch field `attributes.xrootd.operation.name` becomes the queryable label
 `xrootd_operation_name`, and a typical query reads:
@@ -1650,21 +1673,21 @@ serves Prometheus metrics aggregated from the decoded records. Unlike the
 per-file documents (which belong in a document store), these are bounded in
 cardinality and suitable for a time-series database.
 
-Every per-server series carries `{site, server}`. Both come from the `=`
+Every per-server series carries `{cluster, server}`. Both come from the `=`
 identity record, so both are provisional until it arrives — see
-[Site and server labels](#site-and-server-labels) below.
+[Cluster and server labels](#cluster-and-server-labels) below.
 
-I/O, per site and server:
+I/O, per cluster and server:
 
 ```
-xrootd_collector_io_total{site,server,operation="open|close|read|readv|write"}
-xrootd_collector_io_bytes_total{site,server,operation="read|readv|write"}
-xrootd_collector_errors_total{site,server,category="open|read|write|close|auth|unknown"}
-xrootd_collector_app_io_bytes_total{site,app,operation="read|readv|write"}
+xrootd_collector_io_total{cluster,server,operation="open|close|read|readv|write"}
+xrootd_collector_io_bytes_total{cluster,server,operation="read|readv|write"}
+xrootd_collector_errors_total{cluster,server,category="open|read|write|close|auth|unknown"}
+xrootd_collector_app_io_bytes_total{cluster,app,operation="read|readv|write"}
 ```
 
 `rate(io_bytes_total)` is bandwidth and `rate(io_total)` is IOPS, both
-`sum by (site)` for a whole cluster. The two are not equally available: the
+`sum by (cluster)` for a whole cluster. The two are not equally available: the
 bytes come from the fstat `xfr` block and are always present, while
 `io_total`'s `read`/`readv`/`write` counts come from the optional `ops` block
 and only move when the server config includes it. `open` and `close` always
@@ -1676,28 +1699,28 @@ is the one label product here with real cardinality risk.
 Live state and identity:
 
 ```
-xrootd_collector_files_open{site,server}       (gauge)
-xrootd_collector_sessions_open{site,server}    (gauge)
-xrootd_collector_servers{site}                 (gauge: servers reporting)
-xrootd_collector_server_info{site,server,ip,instance_name,program,version}  (gauge, always 1)
+xrootd_collector_files_open{cluster,server}       (gauge)
+xrootd_collector_sessions_open{cluster,server}    (gauge)
+xrootd_collector_servers{cluster}                 (gauge: servers reporting)
+xrootd_collector_server_info{cluster,server,ip,service_name,program,version}  (gauge, always 1)
 ```
 
-`servers{site}` counts distinct servers, not incarnations, so a server that
-restarted is one server while its old incarnation waits out the TTL; a site
+`servers{cluster}` counts distinct servers, not incarnations, so a server that
+restarted is one server while its old incarnation waits out the TTL; a cluster
 whose last server went away is parked at zero. `server_info` carries the
-identity that would otherwise have to be a label on every series — which EOS
-instance a node belongs to (`instance_name`, from `&inst=`; not `instance`,
-which Prometheus stamps itself at scrape time) and which XRootD release it
-runs. Retired incarnations are parked at zero there too, so
-`count by (site) (server_info)` can outrun `servers{site}` after an upgrade:
-`servers{site}` is the live count.
+identity that would otherwise have to be a label on every series — the daemon's
+`-n` name (`service_name`, from `&inst=`, the same value as the documents'
+`resource.service.name`; not `instance`, which Prometheus stamps itself at
+scrape time) and which XRootD release it runs. Retired incarnations are parked at zero there too, so
+`count by (cluster) (server_info)` can outrun `servers{cluster}` after an upgrade:
+`servers{cluster}` is the live count.
 
 Sessions:
 
 ```
-xrootd_collector_sessions_total{site,server}    (sessions ended)
-xrootd_collector_session_starts_total{site,server,source="login|connect|first_activity|disconnect"}
-xrootd_collector_session_duration_seconds{site} (histogram)
+xrootd_collector_sessions_total{cluster,server}    (sessions ended)
+xrootd_collector_session_starts_total{cluster,server,source="login|connect|first_activity|disconnect"}
+xrootd_collector_session_duration_seconds{cluster} (histogram)
 ```
 
 Read the duration histogram next to `session_starts_total`: a guessed
@@ -1709,13 +1732,13 @@ includes a `user` destination.
 Collector health:
 
 ```
-xrootd_collector_documents_total{site}      (documents emitted, after filtering)
+xrootd_collector_documents_total{cluster}      (documents emitted, after filtering)
 xrootd_collector_filtered_documents_total   (documents suppressed by a [filter] rule)
-xrootd_collector_stale_opens_total{site,server}  (opens dropped: close lost)
-xrootd_collector_orphan_closes_total{site,server} (closes without an open)
-xrootd_collector_packets_total{site,server,stream}
-xrootd_collector_packets_lost_total{site,server,stream}
-xrootd_collector_malformed_total{site,server,stream,reason}
+xrootd_collector_stale_opens_total{cluster,server}  (opens dropped: close lost)
+xrootd_collector_orphan_closes_total{cluster,server} (closes without an open)
+xrootd_collector_packets_total{cluster,server,stream}
+xrootd_collector_packets_lost_total{cluster,server,stream}
+xrootd_collector_malformed_total{cluster,server,stream,reason}
 xrootd_collector_unknown_packets_total      (packets with an unhandled stream code)
 xrootd_collector_disconnects_total          (f-stream session disconnect records)
 xrootd_collector_evicted_total              (entries evicted by the memory budget)
@@ -1791,23 +1814,23 @@ xrootd_shoveler_spool_dropped_total         (oldest buffers evicted by --spool-m
 From the `g` (plugin) streams (when `--gstream` data is flowing):
 
 ```
-xrootd_collector_oss_ops_total{site,server,op="..."}
-xrootd_collector_oss_slow_ops_total{site,server,op="..."}
-xrootd_collector_pfc_files_total{site,server}
-xrootd_collector_pfc_bytes_total{site,server,source="hit|miss|bypass|disk|prefetch"}
-xrootd_collector_tpc_total{site,server,type="push|pull",result="ok|error"}
-xrootd_collector_tpc_bytes_total{site,server,type="push|pull"}
-xrootd_collector_tpc_size_bytes{site,server}   (histogram)
-xrootd_collector_throttle_io_total{site,server}
-xrootd_collector_throttle_io_active{site,server}   (gauge)
-xrootd_collector_http_requests_total{site,server,method="...",status="..."}
+xrootd_collector_oss_ops_total{cluster,server,op="..."}
+xrootd_collector_oss_slow_ops_total{cluster,server,op="..."}
+xrootd_collector_pfc_files_total{cluster,server}
+xrootd_collector_pfc_bytes_total{cluster,server,source="hit|miss|bypass|disk|prefetch"}
+xrootd_collector_tpc_total{cluster,server,type="push|pull",result="ok|error"}
+xrootd_collector_tpc_bytes_total{cluster,server,type="push|pull"}
+xrootd_collector_tpc_size_bytes{cluster,server}   (histogram)
+xrootd_collector_throttle_io_total{cluster,server}
+xrootd_collector_throttle_io_active{cluster,server}   (gauge)
+xrootd_collector_http_requests_total{cluster,server,method="...",status="..."}
 ```
 
 From the `x`/`p` (FRM) streams:
 
 ```
-xrootd_collector_frm_total{site,server,op="transfer|purge"}
-xrootd_collector_frm_purge_bytes_total{site,server}
+xrootd_collector_frm_total{cluster,server,op="transfer|purge"}
+xrootd_collector_frm_purge_bytes_total{cluster,server}
 ```
 
 `frm_total{op="transfer"}` and the `tpc_*` family are the only places the word
@@ -1815,18 +1838,38 @@ xrootd_collector_frm_purge_bytes_total{site,server}
 collector sees. Everything else counts individual I/O operations or file
 open→close lifecycles, and is named for what it counts.
 
-#### Site and server labels
+#### Cluster and server labels
 
-`site` is the server's `all.sitename`, and `server` is the same name the
-documents carry in `resource.server.address`: the `=` identity record's
-advertised host, or the local FQDN for a co-located server, falling back to
-the numeric source address with the UDP port stripped. Naming a server
-identically in both places is what lets a Grafana panel and an OpenSearch
-query talk about the same machine.
+`cluster` is the server's `all.sitename`, which **this collector reads as the
+name of the storage cluster** — `eosalice`, `eoscms`, `eospilot` — and not as
+the WLCG site. That is a deliberate reinterpretation, and the reason for it is
+that a site holds several storage systems: one `all.sitename CERN-PROD` covers
+`eosalice`, `eosatlas`, `eoscms` and `eoslhcb`, and nothing else on the
+monitoring wire tells them apart, so `sum by (site)` could never answer what
+any one of them was doing. `&inst=` cannot fill the gap either — it comes
+solely from the daemon's `-n` flag, defaults to `anon`, and names the role
+(`fst`, `mgm`) in a stock EOS deployment, because it also picks the config
+file, admin path and pid path.
+
+**There is no `site` label.** The WLCG site is derived downstream from the
+server name; see [Adding a site
+label](DEPLOY.md#adding-a-site-label-downstream) in DEPLOY.md for the
+Prometheus relabel rule and the ingest-pipeline equivalent. Note the knock-on
+effect of the reinterpretation: other consumers of the same wire field —
+notably the MONIT/OSG pipeline, which maps `&site=` straight to a `site` field
+— see the cluster name once a deployment switches, so the downstream mapping
+has to exist before the switch, not after.
+
+`server` is the same name the documents carry in `resource.server.address`:
+the `=` identity record's advertised host, or the local FQDN for a co-located
+server, falling back to the numeric source address with the UDP port stripped.
+Naming a server identically in both places is what lets a Grafana panel and an
+OpenSearch query talk about the same machine. `cluster` likewise equals
+`resource.service.namespace` byte for byte.
 
 Both come from the `=` record, so both flip together when it arrives: before
-it a server reads `{site="unknown", server="<ip>"}` and after it
-`{site="CERN-PROD", server="fst-096.cern.ch"}`. Nothing merges the two — the
+it a server reads `{cluster="unknown", server="<ip>"}` and after it
+`{cluster="eoscms", server="fst-096.cern.ch"}`. Nothing merges the two — the
 earlier series simply stops advancing, so `rate()` heals itself while
 `increase()` across the flip under-reports.
 
@@ -1834,18 +1877,17 @@ The window is the server's `xrootd.monitor ... ident` interval, **an hour by
 default**. Two things shorten it: `--state-file` persists the identity across
 a collector restart, and setting `ident 300` in the server's monitor
 directive (see [Server configuration](#server-configuration)) brings it down
-to five minutes. A site of only dots — `XrdOucSiteName`'s sanitization of an
+to five minutes. A name of only dots — `XrdOucSiteName`'s sanitization of an
 all-invalid name — carries no information and reads as `unknown`.
 
-Note that when several storage instances share one `all.sitename` (a CERN EOS
-deployment puts `eosalice`, `eosatlas`, `eoscms` and `eoslhcb` all under
-`CERN-PROD`), `sum by (site)` merges them. Separate them either by giving each
-instance its own sitename, or by joining on `server_info`:
+The daemon's `-n` name is not a label on every family: it is a payload label
+on `server_info` (`service_name`), and the same value as the documents'
+`resource.service.name`. To break a cluster's I/O down by role, join on it:
 
 ```
-sum by (instance_name) (
+sum by (service_name) (
   rate(xrootd_collector_io_bytes_total[5m])
-  * on(site, server) group_left(instance_name) xrootd_collector_server_info
+  * on(cluster, server) group_left(service_name) xrootd_collector_server_info
 )
 ```
 
@@ -1857,12 +1899,12 @@ memory, queue depth), sink health (POST failures, drops, queue and disk-cache
 backlog for both the OpenSearch and OTLP sinks), shovel transport (collector
 TCP connections and shoveled-datagram rates, plus per-shoveler pipeline, spool
 backlog, and connectivity — scrape the shovelers' `--metrics-port` with the
-same Prometheus), I/O activity per site and server
+same Prometheus), I/O activity per cluster and server
 (throughput, IOPS, open files and sessions, errors by category), and the
 `g`/`x`/`p`-stream backends (redirects, TPC, PFC, OSS, HTTP, throttle, FRM).
 Import it in Grafana (*Dashboards → New → Import*), then pick the Prometheus
-data source that scrapes the collector; **Site** and **Server** variables
-multi-select what to show.
+data source that scrapes the collector; **Storage cluster** and **Server**
+variables multi-select what to show.
 
 ## Limitations
 
@@ -1873,13 +1915,13 @@ multi-select what to show.
   `xrootd_collector_state_bytes` gauge; reclaimed incarnations are counted in
   `xrootd_collector_reaped_servers_total`.
 - UDP is lossy: a lost open record yields an orphan close
-  (`xrootd_collector_orphan_closes_total{site,server}`); a lost close leaves a
+  (`xrootd_collector_orphan_closes_total{cluster,server}`); a lost close leaves a
   stale open, reclaimed at that user's disconnect or by `--file-ttl` and
-  counted in `xrootd_collector_stale_opens_total{site,server}`; a lost dictionary
+  counted in `xrootd_collector_stale_opens_total{cluster,server}`; a lost dictionary
   record yields a document without identity/path. The server stamps every
   datagram to one destination with a single sequence number (header `pseq`), so
   the collector estimates loss from forward gaps in it —
-  `xrootd_collector_packets_lost_total{site,server}` and the `-v` `lost=` count.
+  `xrootd_collector_packets_lost_total{cluster,server}` and the `-v` `lost=` count.
   (Reordering, a small backward step, is not counted as loss. A disconnect
   overtaking its session's final closes can make the sweep drop opens whose
   closes arrive right after, turning them into orphan closes — already their

@@ -82,6 +82,35 @@
         "refresh": 1
       },
       {
+        "current": {
+          "selected": false,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(xrootd_collector_servers, site)",
+        "includeAll": true,
+        "label": "Site",
+        "multi": true,
+        "name": "site",
+        "options": [],
+        "query": {
+          "query": "label_values(xrootd_collector_servers, site)",
+          "refId": "site"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
         "name": "server",
         "type": "query",
         "label": "Server",
@@ -89,9 +118,9 @@
           "type": "prometheus",
           "uid": "${DS_PROMETHEUS}"
         },
-        "definition": "label_values(xrootd_collector_packets_total, server)",
+        "definition": "label_values(xrootd_collector_packets_total{site=~\"$site\"}, server)",
         "query": {
-          "query": "label_values(xrootd_collector_packets_total, server)",
+          "query": "label_values(xrootd_collector_packets_total{site=~\"$site\"}, server)",
           "refId": "server"
         },
         "refresh": 2,
@@ -1847,7 +1876,7 @@
     {
       "id": 20,
       "type": "row",
-      "title": "Transfer activity (per server)",
+      "title": "I/O activity (per site and server)",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -1913,7 +1942,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (operation) (rate(xrootd_collector_io_total{server=~\"$server\"}[$__rate_interval]))",
+          "expr": "sum by (operation) (rate(xrootd_collector_io_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "{{operation}}",
           "range": true,
           "refId": "A"
@@ -1923,8 +1952,8 @@
     {
       "id": 22,
       "type": "timeseries",
-      "title": "Read / write throughput",
-      "description": "Byte throughput aggregated from close records.",
+      "title": "Throughput by direction",
+      "description": "Bytes moved, from the fstat \"xfr\" block. Present whether or not the servers report the \"ops\" block.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -1976,29 +2005,18 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (server) (rate(xrootd_collector_read_bytes_total{server=~\"$server\"}[$__rate_interval]))",
-          "legendFormat": "{{server}} read",
+          "expr": "sum by (operation) (rate(xrootd_collector_io_bytes_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
+          "legendFormat": "{{operation}}",
           "range": true,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (server) (rate(xrootd_collector_write_bytes_total{server=~\"$server\"}[$__rate_interval]))",
-          "legendFormat": "{{server}} write",
-          "range": true,
-          "refId": "B"
         }
       ]
     },
     {
       "id": 23,
       "type": "timeseries",
-      "title": "Active transfers",
-      "description": "Files currently open per server (gauge).",
+      "title": "Open files and sessions",
+      "description": "Live state per server. sessions_open needs the \"user\" destination in the servers' monitor config.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -2050,10 +2068,21 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (server) (xrootd_collector_active_transfers{server=~\"$server\"})",
-          "legendFormat": "{{server}}",
+          "expr": "sum by (server) (xrootd_collector_files_open{site=~\"$site\",server=~\"$server\"})",
+          "legendFormat": "files {{server}}",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (server) (xrootd_collector_sessions_open{site=~\"$site\",server=~\"$server\"})",
+          "legendFormat": "sessions {{server}}",
+          "range": true,
+          "refId": "B"
         }
       ]
     },
@@ -2113,7 +2142,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (category) (rate(xrootd_collector_failed_operations_total{server=~\"$server\"}[$__rate_interval]))",
+          "expr": "sum by (category) (rate(xrootd_collector_errors_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "{{category}}",
           "range": true,
           "refId": "A"
@@ -2123,8 +2152,8 @@
     {
       "id": 25,
       "type": "timeseries",
-      "title": "Transfer duration (s)",
-      "description": "Wall-clock transfer duration quantiles (from the histogram).",
+      "title": "Session duration (s)",
+      "description": "Client session wall-clock, per site. A guessed \"disconnect\" session start reads as zero -- see session_starts_total.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -2173,7 +2202,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(xrootd_collector_transfer_duration_seconds_bucket{server=~\"$server\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(xrootd_collector_session_duration_seconds_bucket{site=~\"$site\"}[$__rate_interval])))",
           "legendFormat": "p50",
           "range": true,
           "refId": "A"
@@ -2184,7 +2213,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(xrootd_collector_transfer_duration_seconds_bucket{server=~\"$server\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(xrootd_collector_session_duration_seconds_bucket{site=~\"$site\"}[$__rate_interval])))",
           "legendFormat": "p95",
           "range": true,
           "refId": "B"
@@ -2195,7 +2224,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(xrootd_collector_transfer_duration_seconds_bucket{server=~\"$server\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(xrootd_collector_session_duration_seconds_bucket{site=~\"$site\"}[$__rate_interval])))",
           "legendFormat": "p99",
           "range": true,
           "refId": "C"
@@ -2205,8 +2234,8 @@
     {
       "id": 26,
       "type": "timeseries",
-      "title": "Transfer size (bytes)",
-      "description": "Bytes moved per transfer (from the histogram).",
+      "title": "Operations/s by kind",
+      "description": "IOPS. The read/readv/write counts come from the fstat \"ops\" block, so they only move when the servers report it.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -2219,7 +2248,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "bytes",
+          "unit": "ops",
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
@@ -2255,39 +2284,17 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(xrootd_collector_transfer_size_bytes_bucket{server=~\"$server\"}[$__rate_interval])))",
-          "legendFormat": "p50",
+          "expr": "sum by (operation) (rate(xrootd_collector_io_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
+          "legendFormat": "{{operation}}",
           "range": true,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(xrootd_collector_transfer_size_bytes_bucket{server=~\"$server\"}[$__rate_interval])))",
-          "legendFormat": "p95",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(xrootd_collector_transfer_size_bytes_bucket{server=~\"$server\"}[$__rate_interval])))",
-          "legendFormat": "p99",
-          "range": true,
-          "refId": "C"
         }
       ]
     },
     {
       "id": 27,
-      "type": "piechart",
-      "title": "Transfers by VO",
+      "type": "timeseries",
+      "title": "Read volume by application",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -2333,18 +2340,19 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (vo) (rate(xrootd_collector_vo_transfers_total{server=~\"$server\"}[$__rate_interval]))",
-          "legendFormat": "{{vo}}",
+          "expr": "sum by (app) (rate(xrootd_collector_app_io_bytes_total{site=~\"$site\",operation=~\"read|readv\"}[$__rate_interval]))",
+          "legendFormat": "{{app}}",
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "From the i-stream appid when the site sets one, else the client executable. This metric carries no server label."
     },
     {
       "id": 28,
       "type": "timeseries",
-      "title": "Locality (local vs remote)/s",
-      "description": "Completed transfers split by client/server locality.",
+      "title": "Servers reporting",
+      "description": "Distinct servers per site, live. Retired incarnations are excluded, unlike count() over server_info.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -2393,8 +2401,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (locality) (rate(xrootd_collector_locality_transfers_total{server=~\"$server\"}[$__rate_interval]))",
-          "legendFormat": "{{locality}}",
+          "expr": "xrootd_collector_servers{site=~\"$site\"}",
+          "legendFormat": "{{site}}",
           "range": true,
           "refId": "A"
         }
@@ -2453,7 +2461,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (server) (rate(xrootd_collector_sessions_total{server=~\"$server\"}[$__rate_interval]))",
+          "expr": "sum by (server) (rate(xrootd_collector_sessions_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "{{server}}",
           "range": true,
           "refId": "A"
@@ -2526,7 +2534,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (kind) (rate(xrootd_collector_redirects_total{server=~\"$server\"}[$__rate_interval]))",
+          "expr": "sum by (kind) (rate(xrootd_collector_redirects_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "{{kind}}",
           "range": true,
           "refId": "A"
@@ -2586,7 +2594,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (type, result) (rate(xrootd_collector_tpc_total{server=~\"$server\"}[$__rate_interval]))",
+          "expr": "sum by (type, result) (rate(xrootd_collector_tpc_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "{{type}} {{result}}",
           "range": true,
           "refId": "A"
@@ -2646,7 +2654,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (type) (rate(xrootd_collector_tpc_bytes_total{server=~\"$server\"}[$__rate_interval]))",
+          "expr": "sum by (type) (rate(xrootd_collector_tpc_bytes_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "{{type}}",
           "range": true,
           "refId": "A"
@@ -2709,7 +2717,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (method, status) (rate(xrootd_collector_http_requests_total{server=~\"$server\"}[$__rate_interval]))",
+          "expr": "sum by (method, status) (rate(xrootd_collector_http_requests_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "{{method}} {{status}}",
           "range": true,
           "refId": "A"
@@ -2772,7 +2780,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (op) (rate(xrootd_collector_oss_ops_total{server=~\"$server\"}[$__rate_interval]))",
+          "expr": "sum by (op) (rate(xrootd_collector_oss_ops_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "{{op}}",
           "range": true,
           "refId": "A"
@@ -2783,7 +2791,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (op) (rate(xrootd_collector_oss_slow_ops_total{server=~\"$server\"}[$__rate_interval]))",
+          "expr": "sum by (op) (rate(xrootd_collector_oss_slow_ops_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "{{op}} slow",
           "range": true,
           "refId": "B"
@@ -2843,7 +2851,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(xrootd_collector_pfc_files_total{server=~\"$server\"}[$__rate_interval]))",
+          "expr": "sum(rate(xrootd_collector_pfc_files_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "files closed/s",
           "range": true,
           "refId": "A"
@@ -2854,7 +2862,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (source) (rate(xrootd_collector_pfc_bytes_total{server=~\"$server\"}[$__rate_interval]))",
+          "expr": "sum by (source) (rate(xrootd_collector_pfc_bytes_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "{{source}} B/s",
           "range": true,
           "refId": "B"
@@ -2914,7 +2922,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(xrootd_collector_throttle_io_total{server=~\"$server\"}[$__rate_interval]))",
+          "expr": "sum(rate(xrootd_collector_throttle_io_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "io ops/s",
           "range": true,
           "refId": "A"
@@ -2925,7 +2933,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(xrootd_collector_throttle_io_active{server=~\"$server\"})",
+          "expr": "sum(xrootd_collector_throttle_io_active{site=~\"$site\",server=~\"$server\"})",
           "legendFormat": "io active",
           "range": true,
           "refId": "B"
@@ -2985,7 +2993,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (op) (rate(xrootd_collector_frm_total{server=~\"$server\"}[$__rate_interval]))",
+          "expr": "sum by (op) (rate(xrootd_collector_frm_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "{{op}} ops/s",
           "range": true,
           "refId": "A"
@@ -2996,7 +3004,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(xrootd_collector_frm_purge_bytes_total{server=~\"$server\"}[$__rate_interval]))",
+          "expr": "sum(rate(xrootd_collector_frm_purge_bytes_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "purge B/s",
           "range": true,
           "refId": "B"
@@ -3056,7 +3064,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (server) (rate(xrootd_collector_packets_lost_total{server=~\"$server\"}[$__rate_interval]))",
+          "expr": "sum by (server) (rate(xrootd_collector_packets_lost_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "{{server}}",
           "range": true,
           "refId": "A"
@@ -3117,7 +3125,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "100 * sum by (server) (rate(xrootd_collector_packets_lost_total{server=~\"$server\"}[$__rate_interval])) / sum by (server) (rate(xrootd_collector_packets_total{server=~\"$server\"}[$__rate_interval]))",
+          "expr": "100 * sum by (server) (rate(xrootd_collector_packets_lost_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval])) / sum by (server) (rate(xrootd_collector_packets_total{site=~\"$site\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "{{server}}",
           "range": true,
           "refId": "A"

@@ -217,8 +217,13 @@ xrootd.monitor all auth flush io 60s fstat 60s lfn ops ssq xfr 10 \
 
 What matters and why:
 
-- `all.sitename` is carried in the identity records and becomes the
-  `wlcg.site` attribute on every document — set it to your WLCG site name.
+- `all.sitename` is carried in the identity records and becomes
+  `resource.xrootd.server.site` on every document and the `site` label on
+  every per-server metric — set it to your WLCG site name. It is the key
+  everything aggregates by, so keep it identical across a cluster's nodes.
+  Because it travels in the `=` record, which defaults to hourly, also set
+  `ident 300` in the `xrootd.monitor` directive: until the first one arrives
+  the collector labels that server `site="unknown"`.
 - `lfn` — adds the file path to open events; without it documents have no
   file names.
 - `xfr 10` — emits in-progress transfer snapshots; **required** for the
@@ -2221,6 +2226,8 @@ All from the `moncollect` Prometheus job (section 9):
 | spool backlog | `xrootd_collector_cache_files` growing for >1 h | backend outage outlasting the buffer |
 | shovel spool dropping | `rate(xrootd_shoveler_spool_dropped_total[10m]) > 0` | outage exceeded `spool-max` — data loss |
 | state pressure | `xrootd_collector_evicted_total` climbing | raise `max-memory` or lower `server-ttl` |
+| servers gone quiet | `xrootd_collector_servers{site="..."} < N` | nodes stopped reporting — check their `xrootd.monitor dest` |
+| unattributed servers | `xrootd_collector_servers{site="unknown"} > 0` for >1 h | a server has no `all.sitename`, or its `ident` interval is longer than the alert window |
 
 Loss on the `f` stream alone (label `stream="f"`), with other streams clean,
 is the fragmentation signature — some server is still emitting 64 KiB fstat
@@ -2263,13 +2270,14 @@ Follow the transfer through the pipeline:
    increase; the spool gauges stay at zero.
 2. **Collector** (`curl -s <collector>:9932/metrics`):
    `xrootd_collector_packets_total` increases;
-   `packets_lost_total`/`malformed_total` stay flat; the transfer aggregates
-   (per-VO/locality counters) tick after the file close arrives (up to one
-   `fstat` interval — 60 s with the section 2.1 config).
+   `packets_lost_total`/`malformed_total` stay flat; `io_total` and
+   `io_bytes_total` tick after the file close arrives (up to one `fstat`
+   interval — 60 s with the section 2.1 config), and
+   `xrootd_collector_servers{site="<your site>"}` shows the node.
 3. **Documents**: Grafana → Explore → Loki,
    `{service_name="xrootd"} |= "mon-smoke-test"` — one
    `xrootd.read` document with the file path, client, byte counts and
-   `wlcg.site` (OpenSearch path: Lucene
+   `resource.xrootd.server.site` (OpenSearch path: Lucene
    `attributes.file.path:*mon-smoke-test*` on `xrootd-transfers*`).
 4. **Traces** (with `spans = true`): Tempo → Search — a file-operation span
    whose duration matches open→close.

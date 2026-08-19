@@ -2096,22 +2096,26 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
    const bool forced = (recFlag & XrdXrootdMonFileHdr::forced) != 0;
    const bool hasErr = (recFlag & XrdXrootdMonFileHdr::hasERR) != 0;
 
+// Read/write categorisation (WLCG operation_type): any write bytes make it a
+// write, otherwise it is a read. It names the event, the operation and the span,
+// so decide it once.
+//
+   const char* const opName = (wrBytes > 0) ? "write" : "read";
+
 // One OTel log record: process-level j["resource"] (server) plus event-level
 // j["attributes"] with dotted semantic-convention keys. Empty/zero fields are
 // omitted. See README.md for the field-to-semconv/WLCG mapping.
 //
    json j;
    otelResource(j, src, stod, srv);
-   otelBegin(j, "xrootd.transfer", tRec, hasErr);
+   otelBegin(j, (wrBytes > 0) ? "xrootd.write" : "xrootd.read", tRec, hasErr);
    json& a = j["attributes"];
 
    a["xrootd.transfer.forced_close"] = forced;
    a["xrootd.transfer.read_bytes"]   = rdBytes;
    a["xrootd.transfer.readv_bytes"]  = rvBytes;
    a["xrootd.transfer.write_bytes"]  = wrBytes;
-   // Explicit read/write categorisation (WLCG operation_type): any write bytes
-   // make it a write, otherwise it is a read.
-   a["xrootd.operation.name"] = (wrBytes > 0) ? "write" : "read";
+   a["xrootd.operation.name"] = opName;
 
 // Join the matching open record (held since the open packet) to recover the
 // path, the user, and the open time. Resolve the user dictid if we have it.
@@ -2293,7 +2297,7 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
 // span. Start at the open time when known, else the close time.
 //
    if (emitDoc(j))
-      emitSpan(j, (wrBytes > 0) ? "write" : "read",
+      emitSpan(j, opName,
                openTBeg > 0 ? openTBeg : tRec, tRec,
                spanIdOf(sessKey(src, stod, openUser) + "|session"));
 }
@@ -2340,7 +2344,6 @@ void XrdMonDecode::EmitError(const std::string& src, int32_t stod, Server& srv,
 
    json j;
    otelResource(j, src, stod, srv);
-   otelBegin(j, "xrootd.transfer", tRec, true);   // a terminal error: ERROR
    json& a = j["attributes"];
 
    uint32_t user = 0;
@@ -2358,6 +2361,17 @@ void XrdMonDecode::EmitError(const std::string& src, int32_t stod, Server& srv,
       }
 
    std::string cat = otelError(a, rec + off, recSize - off);
+
+// The event names the operation that failed, which only the error block's
+// category byte knows -- hence the envelope is written here rather than up
+// front. A record too short to carry that byte leaves the category unknown.
+// Severity is ERROR: this record is terminal. Filling j["attributes"]["event.name"]
+// after `a` was taken is safe; a json object is a std::map, so inserting keys
+// never invalidates a reference to an existing one.
+//
+   const std::string evName = "xrootd." + (cat.empty() ? std::string("unknown")
+                                                       : cat);
+   otelBegin(j, evName.c_str(), tRec, true);
 
 // Trace context: session trace keyed by the (inline) user dictid; the failed
 // operation is its own span.
@@ -2466,7 +2480,7 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
         if ((disc & 0x80) == 0)            // read/write I/O entry
            {int64_t  offset = ri64(a0);
             int32_t  length = ri32(a1);
-            ev = length < 0 ? "xrootd.write" : "xrootd.read";
+            ev = length < 0 ? "xrootd.io.write" : "xrootd.io.read";
             a["xrootd.io.offset"] = offset;
             a["xrootd.io.length"] = length < 0 ? -(int64_t)length
                                                :  (int64_t)length;
@@ -2475,20 +2489,20 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
         else switch(disc)
            {case XROOTD_MON_OPEN:
                  {unsigned char b[8]; std::memcpy(b, a0, 8); b[0] = 0;
-                  ev = "xrootd.open"; a["file.size"] = (int64_t)rd64(b);
+                  ev = "xrootd.io.open"; a["file.size"] = (int64_t)rd64(b);
                   lfnOf(rd32(a2));
                  }
                  break;
             case XROOTD_MON_CLOSE:
                  {uint64_t rB = (uint64_t)rd32(a0 + 4) << a0[1];
                   uint64_t wB = (uint64_t)rd32(a1)     << a0[2];
-                  ev = "xrootd.close";
+                  ev = "xrootd.io.close";
                   a["xrootd.transfer.read_bytes"]  = rB;
                   a["xrootd.transfer.write_bytes"] = wB; lfnOf(rd32(a2));
                  }
                  break;
             case XROOTD_MON_DISC:
-                 {ev = "xrootd.disconnect";
+                 {ev = "xrootd.io.disconnect";
                   discUser = rd32(a2);
                   // The connect duration bounds the session at both ends, so
                   // report them the same way the session document does -- same
@@ -2505,11 +2519,11 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
                  break;
             case XROOTD_MON_READV:
             case XROOTD_MON_READU:
-                 ev = "xrootd.readv"; lfnOf(rd32(a2));
+                 ev = "xrootd.io.readv"; lfnOf(rd32(a2));
                  break;
             case XROOTD_MON_APPID:
                  {char b[13]; std::memcpy(b, a0 + 4, 12); b[12] = 0;
-                  ev = "xrootd.appid"; a["xrootd.app"] = b;
+                  ev = "xrootd.io.appid"; a["xrootd.app"] = b;
                  }
                  break;
             default: continue;   // REDHOST and anything else: skip
@@ -2551,12 +2565,13 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
         const bool sent = emitDoc(j);
 
 // With --spans, an I/O op also appears as a child span under the file's transfer
-// span (emitSpan is a no-op otherwise); ev is "xrootd.<op>", so ev+7 names the
-// span with the bare operation. I/O entries are instants: the span is
-// zero-length at the record's (interpolated) time.
+// span (emitSpan is a no-op otherwise); ev is "xrootd.io.<op>", so skipping the
+// prefix names the span with the bare operation. I/O entries are instants: the
+// span is zero-length at the record's (interpolated) time.
 //
+        constexpr std::size_t kIoEvPfx = sizeof("xrootd.io.") - 1;
         if (sent && ioOp && fileID)
-           emitSpan(j, ev + 7, tRec, tRec, fileSpanId(src, stod, fileID));
+           emitSpan(j, ev + kIoEvPfx, tRec, tRec, fileSpanId(src, stod, fileID));
        }
 }
 
@@ -2962,7 +2977,7 @@ void XrdMonDecode::DecodeRStream(const std::string& src, int32_t stod,
              // "Redirected" and the destination under xrootd.redirect.*.
              json j;
              otelResource(j, src, stod, srv);
-             otelBegin(j, "xrootd.transfer", tWin, false);
+             otelBegin(j, "xrootd.redirect", tWin, false);
              json& a = j["attributes"];
 
              a["xrootd.operation.name"]  = redirOp(type & 0x0f);

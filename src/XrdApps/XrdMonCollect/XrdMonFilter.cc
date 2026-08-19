@@ -153,11 +153,14 @@ XrdMonFilter::Shortcuts()
       {"target",     "attributes.xrootd.redirect.target.address"},
       {"session",    "attributes.session.id"},
       {"severity",   "severityText"},
-      // server
+      // server. `cluster` is all.sitename, which this collector reads as the
+      // storage cluster; `service` is the daemon's -n name (fst, mgm). There
+      // is no `instance` shortcut: service.instance.id is the address and port,
+      // which `server` already filters on.
       {"server",     "resource.server.address"},
-      {"site",       "resource.xrootd.server.site"},
-      {"instance",   "resource.service.instance.id"},
-      {"program",    "resource.xrootd.server.program"},
+      {"cluster",    "resource.service.namespace"},
+      {"service",    "resource.service.name"},
+      {"program",    "resource.process.executable.name"},
       {"version",    "resource.service.version"}
    };
    return tbl;

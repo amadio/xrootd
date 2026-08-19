@@ -246,6 +246,13 @@ arrives: a server not yet identified reads \fBcluster="unknown"\fR with its
 numeric address as \fBserver\fR. That record defaults to hourly, so set
 \fBident 300\fR in the server's \fBxrootd.monitor\fR directive to shorten
 the window.
+.P
+Two ready-to-import Grafana dashboards for these metrics ship beside the
+README: \fBgrafana-collector-dashboard.json\fR for the health of the
+collector pipeline itself, and \fBgrafana-cluster-dashboard.json\fR for what
+the monitored servers are doing. Neither carries per-user, per-VO or
+per-dataset panels, because no metric here carries those labels; that detail
+is in the documents.
 .RE
 \fB--site\fR \fIname\fR
 .RS 5

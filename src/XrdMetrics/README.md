@@ -318,7 +318,7 @@ Grafana, pick your Prometheus data source, then use the **Job** / **Instance**
 template variables to scope the panels. It groups every native subsystem —
 protocol, OFS, HTTP, links, scheduler, buffers, process, proxy, disk cache, and
 the cmsd cluster view — into collapsible rows. (Metrics from the separate
-`xrdmoncollect` daemon have their own dashboard under `src/XrdApps/XrdMonCollect/`.)
+`xrdmoncollect` daemon have their own dashboards under `src/XrdApps/XrdMonCollect/`.)
 
 ## Where to look
 

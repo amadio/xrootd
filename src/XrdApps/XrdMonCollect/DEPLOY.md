@@ -223,8 +223,8 @@ What matters and why:
   your WLCG site**: a site holds several, and nothing else on the monitoring
   wire tells them apart, so a shared `CERN-PROD` would merge `eosalice`,
   `eosatlas`, `eoscms` and `eoslhcb` into one set of numbers with no way to
-  separate them. The WLCG site is recovered downstream — see [Adding a site
-  label](#adding-a-site-label-downstream). It is the key everything
+  separate them. The WLCG site comes from the collector's own `site` setting
+  instead — see [The site label](#the-site-label). This is the key everything
   aggregates by, so keep it identical across one cluster's nodes and distinct
   between clusters. Because it travels in the `=` record, which defaults to
   hourly, also set `ident 300` in the `xrootd.monitor` directive: until the
@@ -238,7 +238,7 @@ What matters and why:
   collector to report bytes for long-running transfers and to notice
   transfers that never close cleanly.
 - `auth` — enriches the user stream with the authentication method and
-  VO/role, which feed the `wlcg.vo` and auth attributes.
+  VO/role, which feed the `xrootd.vo` and auth attributes.
 - `ops ssq` — operation counts and sum-of-squares statistics on close.
 - **Buffer sizes**: every buffer becomes one UDP datagram. A datagram larger
   than the path MTU is IP-fragmented and **one lost fragment discards the
@@ -1298,11 +1298,29 @@ scrape_configs:
           - "<XROOTD_HOST>:8443"
 ```
 
-### Adding a site label (downstream)
+### The site label
 
 `all.sitename` names the storage cluster, so nothing on the monitoring wire
-carries the WLCG site (section 2.1 explains why). Derive it at scrape time from
-the `server` label, which is the reporting node's host name:
+carries the WLCG site (section 2.1 explains why). The site is the collector's
+own, and it is configured here:
+
+```ini
+# /etc/xrootd/xrdmoncollect.cfg
+[xrdmoncollect]
+site = CERN-PROD
+```
+
+or `--site CERN-PROD` on the command line. Every metric series then carries a
+`site` label and every document an `xrootd.site` resource attribute, and the
+shipped Grafana dashboard's **Site** variable picks it up with no further
+configuration. This is the intended arrangement: **one collector per site**.
+Leave it unset and nothing is tagged — no label, no attribute.
+
+#### A collector serving several sites
+
+Only if one collector receives from more than one site does the site have to be
+derived per server rather than configured. Do it at scrape time from the
+`server` label, which is the reporting node's host name:
 
 ```yaml
   - job_name: moncollect
@@ -1322,17 +1340,13 @@ the `server` label, which is the reporting node's host name:
 Rules are applied in order and the last match wins, so put the most specific
 patterns first. Series with no matching rule simply have no `site` label;
 `sum by (site)` then drops them, which is the honest outcome — add a catch-all
-`.*` → `unknown` rule at the end if you would rather see them.
+`.*` → `unknown` rule at the end if you would rather see them. Do not combine
+this with the `site` config knob: the knob's label is already on the series and
+`metric_relabel_configs` would overwrite it.
 
-Once the label exists, a **Site** variable can be added to the Grafana
-dashboard (`label_values(xrootd_collector_servers, site)`) above the existing
-**Storage cluster** one. The shipped dashboard does not define it, because on a
-deployment without these rules it would be empty.
-
-For documents rather than metrics, do the same in the ingest path: an
-OpenSearch ingest-pipeline `grok`/`set` pair on `resource.server.address`, or
-an OTel Collector `transform` processor writing `resource.attributes["site"]`.
-
+For documents rather than metrics, the equivalent is an OpenSearch
+ingest-pipeline `grok`/`set` pair on `resource.server.address`, or an OTel
+Collector `transform` processor writing `resource.attributes["xrootd.site"]`.
 
 ```bash
 sudo systemctl daemon-reload

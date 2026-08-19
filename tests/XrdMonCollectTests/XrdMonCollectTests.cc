@@ -3166,7 +3166,38 @@ TEST(XrdMonCollect, ServerIdentDecoded)
   EXPECT_EQ(j["resource"]["process.executable.name"], "xrootd");
   EXPECT_EQ(j["resource"]["service.version"], "v6.1.0");
   EXPECT_EQ(j["resource"]["server.port"], 1094);
+  // No --site configured, so documents carry no site at all -- the knob is
+  // inert by default.
+  EXPECT_FALSE(j["resource"].contains("xrootd.site"));
   EXPECT_EQ(dec.GetStats().mapIdnt, 2u);
+}
+
+// The site is not on the monitoring wire: all.sitename names the storage
+// cluster, and one site holds several. It comes from the collector's own
+// configuration instead, on the deployment model of one collector per site,
+// and rides on every document alongside the cluster the server advertises.
+TEST(XrdMonCollect, ConfiguredSiteTagsEveryDocument)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetSite("CERN-PROD");
+
+  std::string info = "=/xrootd.4321:99@srv.example.org"
+                     "\n&site=eoscms&port=1094&inst=fst&pgm=xrootd&ver=v6";
+  W body; body.u32(0);
+  std::vector<unsigned char> pl = body.b;
+  pl.insert(pl.end(), info.begin(), info.end());
+  auto pkt = packet('=', kStod, pl);
+  dec.Process("srv:9930", (const char*)pkt.data(), pkt.size());
+
+  ASSERT_EQ(docs.size(), 1u);
+  json j = json::parse(docs[0]);
+  EXPECT_EQ(j["resource"]["xrootd.site"], "CERN-PROD");
+  // Site and cluster are independent: one site holds several clusters, so the
+  // collector's site must not be confused with the server's all.sitename.
+  EXPECT_EQ(j["resource"]["service.namespace"], "eoscms");
+  // The scope keeps naming the software that produced the record.
+  EXPECT_EQ(j["scope"]["name"], "xrdmoncollect");
 }
 
 // An unnamed daemon -- no -n, so the ident carries xrootd's "anon" filler --

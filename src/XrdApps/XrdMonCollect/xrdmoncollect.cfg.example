@@ -118,6 +118,13 @@ port = 9930
 # (/store/<class>/<era>/<primary-dataset>/...):
 # dataset = ^/store/[^/]+/[^/]+/([^/]+)/
 
+# The site this collector serves. It is not on the monitoring wire --
+# all.sitename names the storage cluster (eosalice, eoscms), and one site holds
+# several -- so it comes from here, on the deployment model of one collector per
+# site. When set, every metric series gains a `site` label and every document an
+# `xrootd.site` resource attribute; when unset, nothing is tagged.
+# site = CERN-PROD
+
 # Do not substitute the local FQDN for a loopback (co-located) server.
 # no-resolve = false
 

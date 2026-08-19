@@ -147,6 +147,13 @@ void ReapServers(time_t now);
 //! blocking lookup would stall the UDP receive loop).
 void SetResolveHosts(bool v) {resolveHosts = v;}
 
+//! Name the site this collector serves. It is not on the monitoring wire --
+//! all.sitename names the storage cluster, and one site holds several -- so it
+//! comes from the collector's own configuration, on the deployment model of one
+//! collector per site. When set it is emitted as the `xrootd.site` resource
+//! attribute on every document; when empty, documents carry no site at all.
+void SetSite(const std::string& s) {site = s;}
+
 //! Enable per-session activity correlation (off by default). When on, each file
 //! close is folded into its user's session rollup and a `session` document
 //! (identity plus aggregated file activity) is emitted on disconnect. When off,
@@ -727,6 +734,7 @@ std::string localIP6;
 // file.path/file.name/file.directory attributes from an LFN, plus the
 // xrootd.dataset capture when a --dataset pattern is set.
 void    setFile(nlohmann::json& a, const std::string& lfn) const;
+std::string site;                 // --site, this collector's site (or empty)
 regex_t datasetRe;                // compiled --dataset pattern
 bool    hasDataset = false;       // datasetRe holds a compiled pattern
 

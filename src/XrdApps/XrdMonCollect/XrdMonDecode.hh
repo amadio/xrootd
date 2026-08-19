@@ -424,6 +424,11 @@ struct OpenFile
    int64_t     fsz  = 0;  // file size at open
    double      tOpen = 0; // open time, interpolated within the open packet's
                           // reporting window (fractional Unix seconds)
+   double      tIoLast = 0; // latest t-stream I/O record attributed to this
+                          // file, after clamping (see DecodeTStream). The
+                          // file's span has to reach it, since those records
+                          // are emitted as its children long before the close
+                          // that would have bounded them. 0 = none seen.
    time_t      lastSeen = 0; // wall-clock of the open or last xfr snapshot
                              // naming this file (drives the file TTL sweep)
    bool        rw   = false;

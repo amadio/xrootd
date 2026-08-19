@@ -746,9 +746,11 @@ reason) and `xrootd.error.code`; a session over the HTTP bridge carries
 redirect report (`--redirects`) carries `xrootd.operation.state`
 `"Redirected"` plus `xrootd.redirect.kind` and
 `xrootd.redirect.target.{address,port}`. The request-size extremes
-(`*_min`/`*_max`) are omitted for operation kinds that never ran (here a pure
-read carries no `write_min`/`write_max`), and the `*_sumsq` fields appear
-only with `ssq` in the server config.
+(`*_min`/`*_max`, and `readv_segs_min`/`readv_segs_max` for the segment count
+per `readv()`) arrive with the `ops` block and are always present once it does:
+the server zeroes a pair whose operation never ran, so a pure read reports
+`write_min`/`write_max` as `0`. The `*_sumsq` fields appear only with `ssq` in
+the server config.
 
 Failures come in two shapes (both logged at `severityText` `ERROR`,
 `severityNumber` 17; see [WLCG field mapping](#wlcg-field-mapping) for the

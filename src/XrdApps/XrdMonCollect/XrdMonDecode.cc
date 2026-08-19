@@ -62,6 +62,7 @@ inline uint32_t rd32(const unsigned char* p)
 inline uint64_t rd64(const unsigned char* p)
    {return (uint64_t(rd32(p)) << 32) | uint64_t(rd32(p + 4));}
 
+inline int16_t  ri16(const unsigned char* p) {return (int16_t) rd16(p);}
 inline int32_t  ri32(const unsigned char* p) {return (int32_t) rd32(p);}
 inline int64_t  ri64(const unsigned char* p) {return (int64_t) rd64(p);}
 
@@ -2206,8 +2207,13 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
        a["xrootd.write_ops"]  = wrOps;
        a["xrootd.readv_segs"] = ri64(o + 16);
 
-       // Request-size extremes use 0x7fffffff as the "unset" sentinel; omit
-       // them rather than emit a misleading minimum.
+       // Request-size extremes, which say two different things by their
+       // presence. The server zeroes a pair whose operation never ran
+       // (XrdXrootdMonFile.cc), so 0/0 means "did not happen". But the extremes
+       // are only maintained for a file tracked at XrdXrootdFileStats::monOps
+       // or above; at monOn the counts are real while the extremes still hold
+       // the unset sentinel, which reaches the wire. Omit those rather than
+       // report 2^31-1 as a minimum: absent means "not measured".
        //
        auto minmax = [&](const char* kmn, const char* kmx, int32_t mn, int32_t mx)
                        {if (mn != 0x7fffffff) {a[kmn] = mn; a[kmx] = mx;}};
@@ -2217,6 +2223,16 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
               ri32(o + 32), ri32(o + 36));
        minmax("xrootd.write_min", "xrootd.write_max",
               ri32(o + 40), ri32(o + 44));
+
+       // Segments per readv (the OSG collector's read_vector_count_min/max):
+       // 16-bit, so a sentinel of its own, and it tells a few large vectored
+       // reads apart from many small ones at the same byte total. Same
+       // presence rule as the size extremes above.
+       //
+       if (int16_t rsMin = ri16(o + 12); rsMin != 0x7fff)
+          {a["xrootd.readv_segs_min"] = rsMin;
+           a["xrootd.readv_segs_max"] = ri16(o + 14);
+          }
 
        // Optional sum-of-squares (XrdXrootdMonStatSSQ) when "ssq" configured.
        //

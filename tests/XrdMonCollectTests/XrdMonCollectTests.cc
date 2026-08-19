@@ -1479,6 +1479,46 @@ std::vector<unsigned char> closePkt(int64_t rd, int64_t rv, int64_t wr,
 }
 }
 
+// The ops block's readv segment extremes reach the document, so a consumer can
+// tell a few large vectored reads from many small ones at the same byte total.
+TEST_F(Transfer, ReportsReadvSegmentExtremes)
+{
+  feedUserMap();
+  feedOpen();
+
+  W body;
+  body.u32(100);                     // fileID
+  body.u64(0);                       // Xfr.read
+  body.u64(65536);                   // Xfr.readv
+  body.u64(0);                       // Xfr.write
+  body.u32(0);                       // read ops
+  body.u32(4);                       // readv ops
+  body.u32(0);                       // write ops
+  body.u16(2); body.u16(17);         // rsMin, rsMax
+  body.u64(41);                      // rsegs
+  body.u32(0); body.u32(0);          // rdMin, rdMax
+  body.u32(1024); body.u32(32768);   // rvMin, rvMax
+  body.u32(0); body.u32(0);          // wrMin, wrMax
+  auto payload = todRec(kCloseT, 42);
+  auto r = rec(0 /*isClose*/, 0x02 /*hasOPS*/, body.b);
+  payload.insert(payload.end(), r.begin(), r.end());
+  auto pkt = packet('f', kStod, payload);
+  dec.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size());
+
+  json j = json::parse(lastDoc);
+  const json& a = j["attributes"];
+  EXPECT_EQ(a["xrootd.readv_ops"],       4);
+  EXPECT_EQ(a["xrootd.readv_segs"],      41);
+  EXPECT_EQ(a["xrootd.readv_segs_min"],  2);
+  EXPECT_EQ(a["xrootd.readv_segs_max"],  17);
+  EXPECT_EQ(a["xrootd.readv_min"],       1024);
+  EXPECT_EQ(a["xrootd.readv_max"],       32768);
+  // The server zeroes the pairs whose operation never ran, so they are present
+  // as 0/0 rather than absent: every close carries the same field set.
+  EXPECT_EQ(a["xrootd.read_min"],  0);
+  EXPECT_EQ(a["xrootd.write_max"], 0);
+}
+
 // A close reports its raw byte totals and nothing derived from them: whether
 // the file moved in its entirety is left to the consumer, which has file.size
 // and the counters right here in the document.

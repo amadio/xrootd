@@ -209,6 +209,32 @@ constexpr const char* kIoBytesHelp =
 constexpr const char* kFilesOpenHelp =
    "files currently open on the server";
 
+constexpr const char* kAppBytesHelp =
+   "bytes moved on behalf of each client application, by direction";
+
+// Longest `app` label value kept. The name is client-supplied -- a site using
+// xrd.appid for job identifiers or whole command lines would otherwise put
+// unbounded strings in the exposition. Distinct applications sharing a prefix
+// this long fold together, which is the cheaper failure.
+constexpr std::size_t kAppLabelMax = 64;
+
+// The application behind a file close, for the app_io_bytes_total label. The
+// 'i'-stream appid is the more specific of the two when the site sets one;
+// otherwise the client executable from the login's '&x='.
+//
+std::string appLabel(const json& a)
+{
+   std::string v;
+   if (auto it = a.find("xrootd.app"); it != a.end() && it->is_string())
+      v = it->get<std::string>();
+   else if (auto it = a.find("user_agent.name"); it != a.end()
+                                              && it->is_string())
+      v = it->get<std::string>();
+   if (v.empty()) return "unknown";
+   if (v.size() > kAppLabelMax) v.resize(kAppLabelMax);
+   return v;
+}
+
 constexpr const char* kServersHelp =
    "servers currently reporting to this collector, by site";
 
@@ -2519,6 +2545,24 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
        perOp("io_bytes_total", kIoBytesHelp, "read",  rdBytes);
        perOp("io_bytes_total", kIoBytesHelp, "readv", rvBytes);
        perOp("io_bytes_total", kIoBytesHelp, "write", wrBytes);
+
+       // The same volumes again, attributed to the client application rather
+       // than to the server: which workload is reading a cluster, not which
+       // node served it. Read the name back off the attributes otelIdentity
+       // already resolved, so the precedence lives in exactly one place.
+       // No server label here -- app x server is the one product with real
+       // cardinality risk, and the question this answers is a per-site one.
+       const std::string app = appLabel(a);
+       auto perApp = [&](const char* op, int64_t n)
+                       {if (n <= 0) return;
+                        metrics->counterSeries("app_io_bytes_total",
+                                 kAppBytesHelp,
+                                 {{"site", srv.mtrSite}, {"app", app},
+                                  {"operation", op}}) += (uint64_t)n;
+                       };
+       perApp("read",  rdBytes);
+       perApp("readv", rvBytes);
+       perApp("write", wrBytes);
       }
 
    stats.docs++;

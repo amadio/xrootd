@@ -24,14 +24,8 @@
     },
     {
       "type": "panel",
-      "id": "timeseries",
-      "name": "Time series",
-      "version": ""
-    },
-    {
-      "type": "panel",
-      "id": "stat",
-      "name": "Stat",
+      "id": "barchart",
+      "name": "Bar chart",
       "version": ""
     },
     {
@@ -42,14 +36,20 @@
     },
     {
       "type": "panel",
-      "id": "barchart",
-      "name": "Bar chart",
+      "id": "stat",
+      "name": "Stat",
       "version": ""
     },
     {
       "type": "panel",
       "id": "table",
       "name": "Table",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
       "version": ""
     }
   ],
@@ -73,7 +73,21 @@
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
-  "links": [],
+  "links": [
+    {
+      "title": "XRootD dashboards",
+      "type": "dashboards",
+      "tags": [
+        "xrootd"
+      ],
+      "asDropdown": true,
+      "includeVars": false,
+      "keepTime": true,
+      "icon": "external link",
+      "targetBlank": false,
+      "url": ""
+    }
+  ],
   "liveNow": false,
   "refresh": "30s",
   "schemaVersion": 39,
@@ -131,10 +145,10 @@
           "type": "loki",
           "uid": "${DS_LOKI}"
         },
-        "definition": "label_values({service_namespace=~\"$cluster\"}, service_name)",
+        "definition": "label_values({service_name=~\".+\"}, service_name)",
         "query": {
           "label": "service_name",
-          "stream": "{service_namespace=~\"$cluster\"}",
+          "stream": "{service_name=~\".+\"}",
           "type": 1,
           "refId": "service"
         },
@@ -160,10 +174,10 @@
           "type": "loki",
           "uid": "${DS_LOKI}"
         },
-        "definition": "label_values({service_namespace=~\"$cluster\", service_name=~\"$service\"}, service_instance_id)",
+        "definition": "label_values({service_instance_id=~\".+\"}, service_instance_id)",
         "query": {
           "label": "service_instance_id",
-          "stream": "{service_namespace=~\"$cluster\", service_name=~\"$service\"}",
+          "stream": "{service_instance_id=~\".+\"}",
           "type": 1,
           "refId": "server"
         },
@@ -191,15 +205,28 @@
   "timezone": "",
   "title": "XRootD Transfers (Loki)",
   "uid": "xrootd-transfers-loki",
-  "description": "Detailed transfer/session monitoring from xrdmoncollect OpenTelemetry log records, ingested into Loki via OTLP.",
+  "description": "Per-transfer detail from the xrdmoncollect OpenTelemetry log records in Loki: who moved what, how fast, and what failed. The cluster-wide rates behind these documents are in the Prometheus dashboards; dataset popularity has its own Loki dashboard.",
   "version": 1,
   "weekStart": "",
   "panels": [
     {
-      "id": 3,
+      "id": 1,
+      "type": "row",
+      "title": "Overview",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
       "type": "stat",
       "title": "Bytes read",
-      "description": "Total bytes read across all transfers.",
+      "description": "Read volume over the dashboard window.",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"
@@ -207,8 +234,8 @@
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 8,
-        "y": 0
+        "x": 0,
+        "y": 1
       },
       "fieldConfig": {
         "defaults": {
@@ -251,16 +278,16 @@
           "editorMode": "code",
           "expr": "sum(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__range]))",
           "legendFormat": "",
-          "queryType": "instant",
-          "refId": "A"
+          "refId": "A",
+          "queryType": "instant"
         }
       ]
     },
     {
-      "id": 4,
+      "id": 3,
       "type": "stat",
       "title": "Bytes written",
-      "description": "Total bytes written across all transfers.",
+      "description": "Write volume over the dashboard window.",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"
@@ -268,8 +295,8 @@
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 12,
-        "y": 0
+        "x": 4,
+        "y": 1
       },
       "fieldConfig": {
         "defaults": {
@@ -312,16 +339,16 @@
           "editorMode": "code",
           "expr": "sum(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_write_bytes [$__range]))",
           "legendFormat": "",
-          "queryType": "instant",
-          "refId": "A"
+          "refId": "A",
+          "queryType": "instant"
         }
       ]
     },
     {
-      "id": 5,
+      "id": 4,
       "type": "stat",
-      "title": "Failed operations",
-      "description": "Transfers whose terminal operation state is Failed.",
+      "title": "Transfers",
+      "description": "Concluded file operations.",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"
@@ -329,8 +356,8 @@
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 16,
-        "y": 0
+        "x": 8,
+        "y": 1
       },
       "fieldConfig": {
         "defaults": {
@@ -371,18 +398,18 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_operation_state=\"Failed\" [$__range]))",
+          "expr": "sum(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range]))",
           "legendFormat": "",
-          "queryType": "instant",
-          "refId": "A"
+          "refId": "A",
+          "queryType": "instant"
         }
       ]
     },
     {
-      "id": 6,
+      "id": 5,
       "type": "stat",
-      "title": "Distinct clients",
-      "description": "Approximate distinct client addresses (LogQL has no native count-distinct; count of grouped series).",
+      "title": "Failed",
+      "description": "Operations that concluded unsuccessfully.",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"
@@ -390,8 +417,73 @@
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 20,
-        "y": 0
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "sum(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_operation_state=\"Failed\" [$__range]))",
+          "legendFormat": "",
+          "refId": "A",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Distinct clients",
+      "description": "Client addresses seen transferring.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
       },
       "fieldConfig": {
         "defaults": {
@@ -434,29 +526,103 @@
           "editorMode": "code",
           "expr": "count(sum by (client_address)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range])))",
           "legendFormat": "",
-          "queryType": "instant",
-          "refId": "A"
+          "refId": "A",
+          "queryType": "instant"
         }
       ]
     },
     {
       "id": 7,
+      "type": "stat",
+      "title": "Distinct users",
+      "description": "Mapped user names seen transferring.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "count(sum by (user_name)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range])))",
+          "legendFormat": "",
+          "refId": "A",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "row",
+      "title": "Throughput",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "panels": []
+    },
+    {
+      "id": 9,
       "type": "timeseries",
-      "title": "Throughput over time (read vs write)",
-      "description": "Bytes read and written per time bucket.",
+      "title": "Throughput (read vs write)",
+      "description": "Bytes per second, attributed to the moment each operation concluded rather than spread over its lifetime -- a long transfer lands entirely in the bucket where it closed.",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"
       },
       "gridPos": {
         "h": 8,
-        "w": 16,
+        "w": 12,
         "x": 0,
-        "y": 4
+        "y": 6
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "bytes",
+          "unit": "Bps",
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
@@ -492,9 +658,8 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__auto]))",
-          "legendFormat": "read bytes",
-          "queryType": "range",
+          "expr": "sum(rate({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__auto]))",
+          "legendFormat": "read",
           "refId": "A"
         },
         {
@@ -503,84 +668,26 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_write_bytes [$__auto]))",
-          "legendFormat": "write bytes",
-          "queryType": "range",
+          "expr": "sum(rate({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_write_bytes [$__auto]))",
+          "legendFormat": "write",
           "refId": "B"
-        }
-      ]
-    },
-    {
-      "id": 8,
-      "type": "piechart",
-      "title": "Operations by state",
-      "description": "Terminal operation state distribution.",
-      "datasource": {
-        "type": "loki",
-        "uid": "${DS_LOKI}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 4
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": false
-        },
-        "pieType": "donut",
-        "displayLabels": [
-          "percent"
-        ],
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "values": [
-            "value"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "${DS_LOKI}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (xrootd_operation_state)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range]))",
-          "legendFormat": "{{xrootd_operation_state}}",
-          "queryType": "instant",
-          "refId": "A"
         }
       ]
     },
     {
       "id": 10,
       "type": "timeseries",
-      "title": "Transfer duration quantiles (s)",
-      "description": "p50/p90/p99 transfer duration. Substitutes the OpenSearch fixed-bucket histogram, which LogQL cannot reproduce.",
+      "title": "Operation duration",
+      "description": "How long each file operation stayed open.",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 6,
         "x": 12,
-        "y": 12
+        "y": 6
       },
       "fieldConfig": {
         "defaults": {
@@ -588,7 +695,7 @@
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
-            "fillOpacity": 10,
+            "fillOpacity": 0,
             "showPoints": "never",
             "stacking": {
               "mode": "none",
@@ -620,9 +727,8 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "quantile_over_time(0.5, {service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_duration [$__auto]) by (service_name)",
-          "legendFormat": "p50",
-          "queryType": "range",
+          "expr": "quantile_over_time(0.50, {service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_operation_duration [$__auto]) by (service_name)",
+          "legendFormat": "p50 {{service_name}}",
           "refId": "A"
         },
         {
@@ -631,9 +737,8 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "quantile_over_time(0.9, {service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_duration [$__auto]) by (service_name)",
-          "legendFormat": "p90",
-          "queryType": "range",
+          "expr": "quantile_over_time(0.90, {service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_operation_duration [$__auto]) by (service_name)",
+          "legendFormat": "p90 {{service_name}}",
           "refId": "B"
         },
         {
@@ -642,18 +747,109 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "quantile_over_time(0.99, {service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_duration [$__auto]) by (service_name)",
-          "legendFormat": "p99",
-          "queryType": "range",
+          "expr": "quantile_over_time(0.99, {service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_operation_duration [$__auto]) by (service_name)",
+          "legendFormat": "p99 {{service_name}}",
           "refId": "C"
         }
       ]
     },
     {
       "id": 11,
+      "type": "timeseries",
+      "title": "Bytes read per operation",
+      "description": "The size distribution of individual reads. A p99 far above the p50 is a few large sequential reads among many small ones.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisCenteredZero": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.50, {service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__auto]) by (service_name)",
+          "legendFormat": "p50 {{service_name}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.90, {service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__auto]) by (service_name)",
+          "legendFormat": "p90 {{service_name}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.99, {service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__auto]) by (service_name)",
+          "legendFormat": "p99 {{service_name}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "row",
+      "title": "Clients and users",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "panels": []
+    },
+    {
+      "id": 13,
       "type": "piechart",
       "title": "Transfers by VO",
-      "description": "Transfer count grouped by WLCG VO.",
+      "description": "From the client's credential. Requires the servers to send the u (user) stream.",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"
@@ -662,7 +858,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 20
+        "y": 15
       },
       "fieldConfig": {
         "defaults": {
@@ -701,16 +897,16 @@
           "editorMode": "code",
           "expr": "sum by (xrootd_vo)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range]))",
           "legendFormat": "{{xrootd_vo}}",
-          "queryType": "instant",
-          "refId": "A"
+          "refId": "A",
+          "queryType": "instant"
         }
       ]
     },
     {
-      "id": 12,
+      "id": 14,
       "type": "piechart",
-      "title": "Locality (LAN vs WAN)",
-      "description": "Local vs remote transfers.",
+      "title": "Authentication method",
+      "description": "The security protocol each session authenticated with.",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"
@@ -719,64 +915,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 20
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": false
-        },
-        "pieType": "donut",
-        "displayLabels": [
-          "percent"
-        ],
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "values": [
-            "value"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "${DS_LOKI}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (xrootd_is_local)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range]))",
-          "legendFormat": "{{xrootd_is_local}}",
-          "queryType": "instant",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 13,
-      "type": "piechart",
-      "title": "Authentication method",
-      "description": "Transfer count grouped by auth protocol.",
-      "datasource": {
-        "type": "loki",
-        "uid": "${DS_LOKI}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 20
+        "y": 15
       },
       "fieldConfig": {
         "defaults": {
@@ -815,94 +954,25 @@
           "editorMode": "code",
           "expr": "sum by (xrootd_auth_method)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range]))",
           "legendFormat": "{{xrootd_auth_method}}",
-          "queryType": "instant",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 14,
-      "type": "barchart",
-      "title": "Errors by category",
-      "description": "Failed transfers grouped by error.type.",
-      "datasource": {
-        "type": "loki",
-        "uid": "${DS_LOKI}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 28
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisPlacement": "auto"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "orientation": "horizontal",
-        "showValue": "auto",
-        "stacking": "none",
-        "xTickLabelRotation": 0,
-        "xTickLabelSpacing": 0,
-        "legend": {
-          "displayMode": "hidden",
-          "placement": "bottom",
-          "calcs": []
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "${DS_LOKI}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (xrootd_operation_name)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_operation_state=\"Failed\" [$__range]))",
-          "legendFormat": "{{xrootd_operation_name}}",
-          "queryType": "instant",
-          "refId": "A"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true
-            },
-            "indexByName": {},
-            "renameByName": {}
-          }
+          "refId": "A",
+          "queryType": "instant"
         }
       ]
     },
     {
       "id": 15,
       "type": "piechart",
-      "title": "g-stream providers",
-      "description": "g-stream records grouped by provider.",
+      "title": "Locality (LAN vs WAN)",
+      "description": "Whether the client was inside the server's own domain. Present only once the client's site can be established.",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 28
+        "w": 8,
+        "x": 16,
+        "y": 15
       },
       "fieldConfig": {
         "defaults": {
@@ -939,27 +1009,27 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum by (xrootd_gstream_provider)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | event_name=\"xrootd.gstream\" [$__range]))",
-          "legendFormat": "{{xrootd_gstream_provider}}",
-          "queryType": "instant",
-          "refId": "A"
+          "expr": "sum by (xrootd_is_local)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range]))",
+          "legendFormat": "{{xrootd_is_local}}",
+          "refId": "A",
+          "queryType": "instant"
         }
       ]
     },
     {
       "id": 16,
       "type": "table",
-      "title": "Top files by bytes read",
-      "description": "Top 20 file paths by bytes read.",
+      "title": "Top users by bytes read",
+      "description": "The twenty heaviest readers over the window.",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"
       },
       "gridPos": {
-        "h": 10,
-        "w": 12,
+        "h": 9,
+        "w": 8,
         "x": 0,
-        "y": 36
+        "y": 23
       },
       "fieldConfig": {
         "defaults": {
@@ -1009,10 +1079,10 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "topk(20, sum by (file_path)(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__range])))",
+          "expr": "topk(20, sum by (user_name)(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__range])))",
           "legendFormat": "",
-          "queryType": "instant",
-          "refId": "A"
+          "refId": "A",
+          "queryType": "instant"
         }
       ],
       "transformations": [
@@ -1023,7 +1093,9 @@
               "Time": true
             },
             "indexByName": {},
-            "renameByName": {}
+            "renameByName": {
+              "user_name": "User"
+            }
           }
         }
       ]
@@ -1031,99 +1103,17 @@
     {
       "id": 17,
       "type": "table",
-      "title": "Top users by transfers",
-      "description": "Top 20 users by transfer count.",
+      "title": "Top client sites by bytes read",
+      "description": "Where the read traffic came from, as advertised by the client.",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"
       },
       "gridPos": {
-        "h": 10,
-        "w": 6,
-        "x": 12,
-        "y": 36
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "filterable": true
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Value"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "short"
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "gauge",
-                  "mode": "gradient"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "showHeader": true,
-        "sortBy": [
-          {
-            "displayName": "Value",
-            "desc": true
-          }
-        ]
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "${DS_LOKI}"
-          },
-          "editorMode": "code",
-          "expr": "topk(20, sum by (user_name)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range])))",
-          "legendFormat": "",
-          "queryType": "instant",
-          "refId": "A"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true
-            },
-            "indexByName": {},
-            "renameByName": {}
-          }
-        }
-      ]
-    },
-    {
-      "id": 18,
-      "type": "table",
-      "title": "Top client sites by bytes",
-      "description": "Top 20 client sites by bytes read.",
-      "datasource": {
-        "type": "loki",
-        "uid": "${DS_LOKI}"
-      },
-      "gridPos": {
-        "h": 10,
-        "w": 6,
-        "x": 18,
-        "y": 36
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 23
       },
       "fieldConfig": {
         "defaults": {
@@ -1175,8 +1165,260 @@
           "editorMode": "code",
           "expr": "topk(20, sum by (xrootd_client_site)(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__range])))",
           "legendFormat": "",
-          "queryType": "instant",
-          "refId": "A"
+          "refId": "A",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "xrootd_client_site": "Client site"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "table",
+      "title": "Top applications by transfers",
+      "description": "The client executable behind each session, from the login record. Useful for telling framework traffic from interactive use.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 23
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Value",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "topk(20, sum by (user_agent_name)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range])))",
+          "legendFormat": "",
+          "refId": "A",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "user_agent_name": "Application"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "row",
+      "title": "Files",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "panels": []
+    },
+    {
+      "id": 20,
+      "type": "table",
+      "title": "Top files by bytes read",
+      "description": "The twenty most-read paths over the window.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 33
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Value",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "topk(20, sum by (file_path)(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__range])))",
+          "legendFormat": "",
+          "refId": "A",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "file_path": "Path"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "barchart",
+      "title": "Bytes read by file extension",
+      "description": "Read volume by file type, which is the cheapest proxy for what kind of work the cluster is doing.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 33
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "stacking": "none",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0,
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "topk(15, sum by (file_extension)(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__range])))",
+          "legendFormat": "{{file_extension}}",
+          "refId": "A",
+          "queryType": "instant"
         }
       ],
       "transformations": [
@@ -1193,19 +1435,227 @@
       ]
     },
     {
-      "id": 19,
-      "type": "timeseries",
-      "title": "Sessions over time",
-      "description": "Login/session records per time bucket.",
+      "id": 22,
+      "type": "row",
+      "title": "Errors and data quality",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "panels": []
+    },
+    {
+      "id": 23,
+      "type": "piechart",
+      "title": "Operations by state",
+      "description": "Successful against failed, over the window.",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 8,
         "x": 0,
-        "y": 46
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "pieType": "donut",
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "values": [
+            "value"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (xrootd_operation_state)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__range]))",
+          "legendFormat": "{{xrootd_operation_state}}",
+          "refId": "A",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "barchart",
+      "title": "Failed operations by kind",
+      "description": "Which operation was being attempted when it failed.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "stacking": "none",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0,
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (xrootd_operation_name)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_operation_state=\"Failed\" [$__range]))",
+          "legendFormat": "{{xrootd_operation_name}}",
+          "refId": "A",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {}
+          }
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "type": "barchart",
+      "title": "Failed operations by error code",
+      "description": "The XRootD error code the server returned. Grouped by code rather than by error.type, which carries the full message including the path and so has one value per file.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "stacking": "none",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0,
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (xrootd_error_code)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | xrootd_operation_state=\"Failed\" [$__range]))",
+          "legendFormat": "{{xrootd_error_code}}",
+          "refId": "A",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {}
+          }
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "Clean vs forced closes",
+      "description": "A forced close is one the collector synthesised because the client disconnected without closing the file, so its byte counts are whatever had been reported by then.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 52
       },
       "fieldConfig": {
         "defaults": {
@@ -1213,7 +1663,136 @@
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
-            "fillOpacity": 10,
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisCenteredZero": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (xrootd_forced_close)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" [$__auto]))",
+          "legendFormat": "forced={{xrootd_forced_close}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "type": "piechart",
+      "title": "g-stream providers",
+      "description": "Which plugins are sending g-stream records. Empty unless the collector runs with gstream enabled.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "pieType": "donut",
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "values": [
+            "value"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (xrootd_gstream_provider)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | event_name=\"xrootd.gstream\" [$__range]))",
+          "legendFormat": "{{xrootd_gstream_provider}}",
+          "refId": "A",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "row",
+      "title": "Sessions",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "panels": []
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Sessions over time",
+      "description": "Session rollups emitted on client disconnect. Empty unless the collector runs with sessions enabled.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 61
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 20,
             "showPoints": "never",
             "stacking": {
               "mode": "none",
@@ -1247,7 +1826,144 @@
           "editorMode": "code",
           "expr": "sum(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | event_name=\"xrootd.session\" [$__auto]))",
           "legendFormat": "sessions",
-          "queryType": "range",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Session duration",
+      "description": "How long clients stayed connected.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 61
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisCenteredZero": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.50, {service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | event_name=\"xrootd.session\" | unwrap xrootd_session_duration [$__auto]) by (service_name)",
+          "legendFormat": "p50 {{service_name}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.90, {service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | event_name=\"xrootd.session\" | unwrap xrootd_session_duration [$__auto]) by (service_name)",
+          "legendFormat": "p90 {{service_name}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.99, {service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | event_name=\"xrootd.session\" | unwrap xrootd_session_duration [$__auto]) by (service_name)",
+          "legendFormat": "p99 {{service_name}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Session start resolution",
+      "description": "How each session's start time was established. login and connect are exact; first_activity is inferred from the first record seen, and disconnect means nothing was known, so that session's duration is reported as zero and drags the quantiles beside it down.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 61
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisCenteredZero": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (xrootd_session_start_time_source)(count_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | event_name=\"xrootd.session\" [$__auto]))",
+          "legendFormat": "{{xrootd_session_start_time_source}}",
           "refId": "A"
         }
       ]

@@ -648,7 +648,8 @@ matched as their printed form (`attributes.xrootd.error.code = 3011`,
 **What filtering does not touch.** Rules run on the finished document,
 immediately before it reaches the sinks, and after everything else in the
 pipeline. So a dropped document is still fully accounted for in the Prometheus
-series ([Metrics](#metrics)) and still folded into its session rollup — the
+series ([Aggregated metrics](#aggregated-metrics-prometheus)) and still folded
+into its session rollup — the
 aggregate view of the cluster stays complete while the document stream is
 cleaned up. `filtered_documents_total` counts what was suppressed, and the
 `-v` exit summary reports it as `filtered=`. Filtering also does not reduce

@@ -182,7 +182,6 @@ TEST_F(Transfer, CorrelatesCloseWithOpenAndUser)
   // deprecated attribute kept as a duplicate for Loki (grafana/loki#19260).
   EXPECT_EQ(j["eventName"], "xrootd.read");
   EXPECT_EQ(j["attributes"]["event.name"], "xrootd.read");
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.kind"], "transfer");
   EXPECT_EQ(j["attributes"]["file.path"], "/store/data/file.root");
   EXPECT_EQ(j["attributes"]["user.name"], "alice");
   EXPECT_EQ(j["attributes"]["network.protocol.name"], "xroot");
@@ -678,7 +677,7 @@ TEST_F(Transfer, AggregatesIntoMetricsRegistry)
 {
   // Re-run the open/close/user sequence through a decoder bound to a registry.
   // Mirror production naming: root prefix "xrootd", subsystem "collector", so a
-  // bare series name like "transfers_total" renders as xrootd_collector_*.
+  // bare series name like "io_total" renders as xrootd_collector_*.
   XrdMetrics::Collector collector("xrootd");
   std::string sink;
   XrdMonDecode d([&](const std::string& s){ sink = s; }, nullptr,
@@ -709,7 +708,7 @@ TEST_F(Transfer, AggregatesIntoMetricsRegistry)
 
   std::string out;
   XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_transfers_total{server=\"10.0.0.1:9930\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_io_total{server=\"10.0.0.1:9930\",operation=\"close\"} 1"),
             std::string::npos);
   EXPECT_NE(out.find("xrootd_collector_read_bytes_total{server=\"10.0.0.1:9930\"} 10485760"),
             std::string::npos);
@@ -960,7 +959,7 @@ TEST(XrdMonCollect, FilterDoesNotAffectMetrics)
   EXPECT_EQ(d.GetStats().filtered, 1u);
   std::string out;                            // ... but everything was measured
   XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_transfers_total{server=\"10.0.0.1:9930\"} 1"),
+  EXPECT_NE(out.find("xrootd_collector_io_total{server=\"10.0.0.1:9930\",operation=\"close\"} 1"),
             std::string::npos);
   EXPECT_NE(out.find("xrootd_collector_read_bytes_total{server=\"10.0.0.1:9930\"} 10485760"),
             std::string::npos);
@@ -1459,7 +1458,7 @@ TEST_F(Transfer, WriteOperationDerived)
   json j = json::parse(lastDoc);
   EXPECT_EQ(j["attributes"]["xrootd.operation.name"], "write");
   EXPECT_EQ(j["attributes"]["xrootd.write_bytes"], 2097152);
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.kind"], "transfer");  // a clean write produces a whole file
+  EXPECT_EQ(j["eventName"], "xrootd.write");
 }
 
 namespace
@@ -1480,20 +1479,10 @@ std::vector<unsigned char> closePkt(int64_t rd, int64_t rv, int64_t wr,
 }
 }
 
-// A read that covered the whole file (read+readv >= size at open) is a transfer.
-TEST_F(Transfer, WholeFileReadIsTransfer)
-{
-  feedUserMap();
-  feedOpen();                                  // fsz = 123456
-  auto pkt = closePkt(123456, 0, 0, 0);        // read exactly the whole file
-  dec.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size());
-
-  json j = json::parse(lastDoc);
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.kind"], "transfer");
-}
-
-// A read that touched only part of the file is finer-grained data access.
-TEST_F(Transfer, PartialReadIsAccess)
+// A close reports its raw byte totals and nothing derived from them: whether
+// the file moved in its entirety is left to the consumer, which has file.size
+// and the counters right here in the document.
+TEST_F(Transfer, ReportsRawByteTotalsOnly)
 {
   feedUserMap();
   feedOpen();                                  // fsz = 123456
@@ -1501,24 +1490,19 @@ TEST_F(Transfer, PartialReadIsAccess)
   dec.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size());
 
   json j = json::parse(lastDoc);
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.kind"], "access");
-  EXPECT_EQ(j["attributes"]["xrootd.operation.name"], "read");   // shared schema otherwise
+  const json& a = j["attributes"];
+  EXPECT_EQ(a["file.size"],            123456);
+  EXPECT_EQ(a["xrootd.read_bytes"],    4096);
+  EXPECT_EQ(a["xrootd.readv_bytes"],   0);
+  EXPECT_EQ(a["xrootd.write_bytes"],   0);
+  EXPECT_EQ(a["xrootd.operation.name"], "read");
+  EXPECT_FALSE(a.contains("xrootd.transfer.kind"));
+  EXPECT_FALSE(a.contains("xrootd.whole_file"));
 }
 
-// readv bytes count toward whole-file coverage just like plain reads.
-TEST_F(Transfer, WholeFileReadvIsTransfer)
-{
-  feedUserMap();
-  feedOpen();
-  auto pkt = closePkt(60000, 70000, 0, 0);     // 130000 >= 123456
-  dec.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size());
-
-  json j = json::parse(lastDoc);
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.kind"], "transfer");
-}
-
-// A write cut short by a forced (disconnect-driven) close is partial access.
-TEST_F(Transfer, ForcedWriteIsAccess)
+// A disconnect-driven close is flagged, so a consumer can tell an interrupted
+// operation from one the client concluded itself.
+TEST_F(Transfer, ForcedCloseIsFlagged)
 {
   feedUserMap();
   feedOpen();
@@ -1526,24 +1510,26 @@ TEST_F(Transfer, ForcedWriteIsAccess)
   dec.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size());
 
   json j = json::parse(lastDoc);
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.kind"], "access");
+  EXPECT_EQ(j["attributes"]["xrootd.forced_close"], true);
   EXPECT_EQ(j["attributes"]["xrootd.operation.name"], "write");
 }
 
-// A close with no matching open has no known size, so it cannot be proven a
-// whole-file transfer: it is reported as access.
-TEST_F(Transfer, OrphanCloseIsAccess)
+// A close with no matching open carries no file.size and says so, which is what
+// a consumer needs to know before comparing bytes against a size.
+TEST_F(Transfer, OrphanCloseReportsNoOpen)
 {
   auto pkt = closePkt(10485760, 0, 0, 0);      // no preceding open
   dec.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size());
 
   json j = json::parse(lastDoc);
-  EXPECT_EQ(j["attributes"]["xrootd.transfer.kind"], "access");
   EXPECT_EQ(j["attributes"]["xrootd.open_seen"], false);
+  EXPECT_FALSE(j["attributes"].contains("file.size"));
+  EXPECT_EQ(j["attributes"]["xrootd.read_bytes"], 10485760);
 }
 
-// A partial-access close increments the accesses counter, not transfers.
-TEST_F(Transfer, AccessAggregatesIntoMetrics)
+// Opens, closes and -- when the server sends the ops block -- the individual
+// requests all land in one series, separated by the operation label.
+TEST_F(Transfer, OperationsAggregateIntoIoTotal)
 {
   XrdMetrics::Collector collector("xrootd");
   std::string sink;
@@ -1559,22 +1545,37 @@ TEST_F(Transfer, AccessAggregatesIntoMetrics)
   { W body; body.u32(100); body.u64(123456); body.u32(7);
     std::string lfn = "/store/data/file.root"; body.raw(lfn); body.u8(0);
     auto payload = todRec(kOpenT, 42);
-    auto r = rec(1, 0x03, body.b);
+    auto r = rec(1 /*isOpen*/, 0x03, body.b);
     payload.insert(payload.end(), r.begin(), r.end());
     auto pkt = packet('f', kStod, payload);
     d.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size()); }
-  { W body; body.u32(100); body.u64(4096); body.u64(0); body.u64(0);
+  { W body; body.u32(100); body.u64(4096); body.u64(8192); body.u64(0);
+    body.u32(3);                   // read ops
+    body.u32(2);                   // readv ops
+    body.u32(0);                   // write ops
+    body.u16(0); body.u16(0);      // rsMin, rsMax
+    body.u64(0);                   // rsegs
+    body.u32(0); body.u32(0);      // rdMin, rdMax
+    body.u32(0); body.u32(0);      // rvMin, rvMax
+    body.u32(0); body.u32(0);      // wrMin, wrMax
     auto payload = todRec(kCloseT, 42);
-    auto r = rec(0, 0, body.b);                // partial read -> access
+    auto r = rec(0 /*isClose*/, 0x02 /*hasOPS*/, body.b);
     payload.insert(payload.end(), r.begin(), r.end());
     auto pkt = packet('f', kStod, payload);
     d.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size()); }
 
   std::string out;
   XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_accesses_total{server=\"10.0.0.1:9930\"} 1"),
-            std::string::npos) << out;
+  const std::string pfx = "xrootd_collector_io_total{server=\"10.0.0.1:9930\"";
+  EXPECT_NE(out.find(pfx + ",operation=\"open\"} 1"),  std::string::npos) << out;
+  EXPECT_NE(out.find(pfx + ",operation=\"close\"} 1"), std::string::npos) << out;
+  EXPECT_NE(out.find(pfx + ",operation=\"read\"} 3"),  std::string::npos) << out;
+  EXPECT_NE(out.find(pfx + ",operation=\"readv\"} 2"), std::string::npos) << out;
+  // A write count of zero is not a series: nothing was written.
+  EXPECT_EQ(out.find(",operation=\"write\""), std::string::npos) << out;
+  // The two counters the classification used to feed are gone for good.
   EXPECT_EQ(out.find("xrootd_collector_transfers_total"), std::string::npos) << out;
+  EXPECT_EQ(out.find("xrootd_collector_accesses_total"),  std::string::npos) << out;
 }
 
 // Feed a '=' server-ident record so srv.ident.host is populated for the
@@ -2252,8 +2253,8 @@ TEST(XrdMonCollect, SessionSurvivesLostUserMap)
   ASSERT_FALSE(j.is_null());
   const json& a = j["attributes"];
   EXPECT_EQ(a["xrootd.session.files"], 0);
-  EXPECT_EQ(a["xrootd.session.transfers"], 0);
-  EXPECT_EQ(a["xrootd.session.accesses"], 0);
+  EXPECT_EQ(a["xrootd.session.reads"],  0);
+  EXPECT_EQ(a["xrootd.session.writes"], 0);
   EXPECT_EQ(a["xrootd.session.start_time"], isoOf(kCloseT));
   EXPECT_EQ(a["xrootd.session.end_time"],   isoOf(kCloseT));
   EXPECT_EQ(a["xrootd.session.duration"].get<double>(), 0.0);
@@ -2641,7 +2642,7 @@ void feedUserN(XrdMonDecode& dec, const std::string& src, uint32_t dictid)
 // bytes, with file size `fsz` captured at open.
 void openClose(XrdMonDecode& dec, const std::string& src, uint32_t fileID,
                uint32_t user, int64_t fsz, int64_t rd, int64_t wr,
-               const std::string& lfn)
+               const std::string& lfn, int64_t rv = 0)
 {
    { W body; body.u32(fileID); body.u64((uint64_t)fsz); body.u32(user);
      body.raw(lfn); body.u8(0);
@@ -2650,7 +2651,7 @@ void openClose(XrdMonDecode& dec, const std::string& src, uint32_t fileID,
      payload.insert(payload.end(), r.begin(), r.end());
      auto pkt = packet('f', kStod, payload);
      dec.Process(src, (const char*)pkt.data(), pkt.size()); }
-   { W body; body.u32(fileID); body.u64((uint64_t)rd); body.u64(0);
+   { W body; body.u32(fileID); body.u64((uint64_t)rd); body.u64((uint64_t)rv);
      body.u64((uint64_t)wr);
      auto payload = todRec(kCloseT, 42);
      auto r = rec(0 /*isClose*/, 0, body.b);
@@ -2672,8 +2673,8 @@ void feedDisc(XrdMonDecode& dec, const std::string& src, uint32_t user)
 }
 
 // A session's closed files are aggregated into the 'session' document at
-// disconnect: running totals plus a recent-file list. The per-file transfer/
-// access documents are still emitted independently.
+// disconnect: running totals plus a recent-file list. The per-file documents
+// are still emitted independently.
 TEST(XrdMonCollect, SessionAggregatesFileActivity)
 {
   std::vector<std::string> docs;
@@ -2681,30 +2682,36 @@ TEST(XrdMonCollect, SessionAggregatesFileActivity)
   dec.SetEmitSessions(true);
 
   feedUserN(dec, "h:1", 7);
-  openClose(dec, "h:1", 1, 7, 1000,  1000, 0, "/a.root");   // whole read -> transfer
-  openClose(dec, "h:1", 2, 7, 1000,  1000, 0, "/b.root");   // whole read -> transfer
-  openClose(dec, "h:1", 3, 7, 100000, 4096, 0, "/c.root");  // partial   -> access
+  openClose(dec, "h:1", 1, 7, 1000,  1000, 0, "/a.root");
+  openClose(dec, "h:1", 2, 7, 1000,   600, 0, "/b.root", 400);  // 600 read, 400 readv
+  openClose(dec, "h:1", 3, 7, 100000,   0, 4096, "/c.root");    // a write
   feedDisc(dec, "h:1", 7);
 
   // Three close documents, then the session document.
   ASSERT_EQ(docs.size(), 4u);
   json j = json::parse(docs.back());
-  EXPECT_EQ(j["attributes"]["event.name"], "xrootd.session");
-  EXPECT_EQ(j["attributes"]["user.name"], "u7");
-  EXPECT_EQ(j["attributes"]["xrootd.session.files"], 3);
-  EXPECT_EQ(j["attributes"]["xrootd.session.transfers"], 2);
-  EXPECT_EQ(j["attributes"]["xrootd.session.accesses"], 1);
-  EXPECT_EQ(j["attributes"]["xrootd.session.read_bytes"], 1000 + 1000 + 4096);
-  EXPECT_FALSE(j["attributes"].contains("xrootd.session.write_bytes"));
-  ASSERT_TRUE(j["attributes"].contains("xrootd.session.recent_files"));
-  ASSERT_EQ(j["attributes"]["xrootd.session.recent_files"].size(), 3u);
-  EXPECT_EQ(j["attributes"]["xrootd.session.recent_files"][2]["file.path"], "/c.root");
-  EXPECT_EQ(j["attributes"]["xrootd.session.recent_files"][2]["xrootd.transfer.kind"], "access");
-  EXPECT_EQ(j["attributes"]["xrootd.session.recent_files"][0]["xrootd.transfer.kind"], "transfer");
+  const json& a = j["attributes"];
+  EXPECT_EQ(a["event.name"], "xrootd.session");
+  EXPECT_EQ(a["user.name"], "u7");
+  EXPECT_EQ(a["xrootd.session.files"],  3);
+  EXPECT_EQ(a["xrootd.session.reads"],  2);
+  EXPECT_EQ(a["xrootd.session.writes"], 1);
+  // read() and readv() bytes are reported apart, so a consumer can tell
+  // sequential access from vectored.
+  EXPECT_EQ(a["xrootd.session.read_bytes"],  1000 + 600);
+  EXPECT_EQ(a["xrootd.session.readv_bytes"], 400);
+  EXPECT_EQ(a["xrootd.session.write_bytes"], 4096);
+  ASSERT_TRUE(a.contains("xrootd.session.recent_files"));
+  ASSERT_EQ(a["xrootd.session.recent_files"].size(), 3u);
+  EXPECT_EQ(a["xrootd.session.recent_files"][2]["file.path"], "/c.root");
+  EXPECT_EQ(a["xrootd.session.recent_files"][2]["xrootd.operation.name"], "write");
+  EXPECT_EQ(a["xrootd.session.recent_files"][0]["xrootd.operation.name"], "read");
+  // The classification the rollup used to carry is gone with the counters.
+  EXPECT_FALSE(a["xrootd.session.recent_files"][0].contains("xrootd.transfer.kind"));
 
   // The individual close documents were still emitted (not replaced).
-  EXPECT_EQ(json::parse(docs[0])["attributes"]["xrootd.transfer.kind"], "transfer");
-  EXPECT_EQ(json::parse(docs[2])["attributes"]["xrootd.transfer.kind"], "access");
+  EXPECT_EQ(json::parse(docs[0])["eventName"], "xrootd.read");
+  EXPECT_EQ(json::parse(docs[2])["eventName"], "xrootd.write");
 }
 
 // Dropping the per-file documents must not disturb the session rollup: the
@@ -2796,7 +2803,7 @@ TEST(XrdMonCollect, SessionRecentFilesCapped)
   json j = json::parse(docs.back());
   EXPECT_EQ(j["attributes"]["event.name"], "xrootd.session");
   EXPECT_EQ(j["attributes"]["xrootd.session.files"], 100);        // every file counted
-  EXPECT_EQ(j["attributes"]["xrootd.session.transfers"], 100);
+  EXPECT_EQ(j["attributes"]["xrootd.session.reads"], 100);
   EXPECT_EQ(j["attributes"]["xrootd.session.recent_files"].size(), 64u);// list bounded (cap)
 }
 

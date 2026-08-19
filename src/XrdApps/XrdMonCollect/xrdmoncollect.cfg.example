@@ -155,7 +155,7 @@ port = 9930
 #
 # Condition keys: user userid role vo groups authprot proto scheme client
 # clientip clientsite app appver appinfo appid experiment activity path dir
-# filename ext dataset event op state kind error provider target session
+# filename ext dataset event op state error provider target session
 # severity server site instance program version -- or a raw
 # attributes.<key> / resource.<key> path for anything else in the document.
 #

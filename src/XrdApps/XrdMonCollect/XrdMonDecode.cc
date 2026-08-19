@@ -177,24 +177,11 @@ bool authConveysVO(const std::string& m)
        || m == "https" || m == "http";
 }
 
-// Whole-file transfer vs. partial access. XRootD serves both whole-file copies
-// (the file moved in or out in its entirety) and finer-grained remote data
-// access (sparse/partial reads, random or appended writes). A close is a
-// whole-file "transfer" when:
-//   * it carries write bytes and ended cleanly — a completed write produces the
-//     whole file; a write cut short by a forced close or an error block is
-//     partial, so it is an "access"; or
-//   * it is read-only and covered the whole file, i.e. read+readv bytes reached
-//     the size captured at open (only decidable when that open size is known).
-// Everything else (short reads, reads with no known open size, aborted writes)
-// is a partial "access". Callers map true -> "transfer", false -> "access".
-//
-bool wholeFileClose(bool haveOpen, int64_t fsz, int64_t rdBytes,
-                    int64_t rvBytes, int64_t wrBytes, bool forced, bool hasErr)
-{
-   if (wrBytes > 0) return !(forced || hasErr);
-   return haveOpen && fsz > 0 && (rdBytes + rvBytes) >= fsz;
-}
+// Help text of the io_total family, shared by its call sites: XrdMetrics freezes
+// a family's help and label schema at first use, so they must not drift.
+constexpr const char* kIoTotalHelp =
+   "file operations reported by the servers (the read/readv/write counts come "
+   "from the fstat \"ops\" block, so they only move when it is configured)";
 
 // Cap on the per-session recent-file list (UserInfo::sRecent). The running
 // session totals always cover every closed file; only this most-recent detail
@@ -716,21 +703,31 @@ std::string XrdMonDecode::otelIdentity(json& a, const Server& srv,
 /******************************************************************************/
 
 void XrdMonDecode::foldSession(Server& srv, uint32_t userID,
-                               const std::string& lfn, int64_t bytes,
-                               bool write, bool whole, bool error, int32_t tWin)
+                               const std::string& lfn, int64_t rdBytes,
+                               int64_t rvBytes, int64_t wrBytes, bool error,
+                               int32_t tWin)
 {
    if (!emitSessions) return;              // session correlation disabled
    auto uit = srv.users.find(userID);
    if (uit == srv.users.end()) return;     // user dictid unknown -> nothing to do
    UserInfo& u = uit->second;
 
+// The direction of a close is the direction of the file: any write bytes make
+// it a write. Its byte totals are folded in whole, though -- a file both read
+// and written contributes to both, which a single "moved" figure could not say.
+//
+   const bool write = wrBytes > 0;
+
    u.sFiles++;
-   if (whole) u.sTransfers++; else u.sAccesses++;
+   if (write) u.sWrites++; else u.sReads++;
    if (error) u.sErrors++;
-   if (write) u.sWriteBytes += bytes; else u.sReadBytes += bytes;
+   u.sReadBytes  += rdBytes;
+   u.sReadvBytes += rvBytes;
+   u.sWriteBytes += wrBytes;
    if (tWin > u.sLast) u.sLast = tWin;
 
-   u.sRecent.push_back(UserInfo::FileSummary{lfn, bytes, write, whole});
+   const int64_t bytes = write ? wrBytes : rdBytes + rvBytes;
+   u.sRecent.push_back(UserInfo::FileSummary{lfn, bytes, write});
    if (u.sRecent.size() > kSessionFilesMax) u.sRecent.pop_front();
 
 // The rollup grew; re-charge the entry against the budget and keep it warm (an
@@ -790,11 +787,12 @@ void XrdMonDecode::otelSession(json& a, const UserInfo* u, double sBeg,
 // The rollup reads as zero rather than being omitted when the login record was
 // never seen: a consumer gets the same field set from every session document.
 //
-   a["xrootd.session.files"]     = u ? u->sFiles     : 0u;
-   a["xrootd.session.transfers"] = u ? u->sTransfers : 0u;
-   a["xrootd.session.accesses"]  = u ? u->sAccesses  : 0u;
+   a["xrootd.session.files"]  = u ? u->sFiles  : 0u;
+   a["xrootd.session.reads"]  = u ? u->sReads  : 0u;
+   a["xrootd.session.writes"] = u ? u->sWrites : 0u;
    if (u && u->sErrors)     a["xrootd.session.errors"]      = u->sErrors;
    if (u && u->sReadBytes)  a["xrootd.session.read_bytes"]  = u->sReadBytes;
+   if (u && u->sReadvBytes) a["xrootd.session.readv_bytes"] = u->sReadvBytes;
    if (u && u->sWriteBytes) a["xrootd.session.write_bytes"] = u->sWriteBytes;
 
 // sessionSpanOf guarantees a usable, ordered pair, so the three time fields are
@@ -810,10 +808,9 @@ void XrdMonDecode::otelSession(json& a, const UserInfo* u, double sBeg,
       {json files = json::array();
        for (const auto& f : u->sRecent)
           {json fj;
-           fj["file.path"]            = f.lfn;
-           fj["xrootd.transfer.kind"]   = f.whole ? "transfer" : "access";
-           fj["xrootd.operation.name"]  = f.write ? "write" : "read";
-           fj["xrootd.bytes"]         = f.bytes;
+           fj["file.path"]             = f.lfn;
+           fj["xrootd.operation.name"] = f.write ? "write" : "read";
+           fj["xrootd.bytes"]          = f.bytes;
            files.push_back(std::move(fj));
           }
        a["xrootd.session.recent_files"] = std::move(files);
@@ -876,8 +873,10 @@ namespace
 {
 // On-disk state format version. Bump whenever the persisted shape changes; a
 // mismatched snapshot is discarded on load (one restart's blind window instead
-// of misdecoded state). v2: per-stream pseq tracking.
-constexpr int kStateVersion = 2;
+// of misdecoded state). v2: per-stream pseq tracking. v3: session rollups count
+// by direction rather than by whole-file/partial, so the old counters cannot be
+// carried across -- their names would restore, their meaning would not.
+constexpr int kStateVersion = 3;
 
 // One list of Stats counters shared by save and load so they cannot diverge.
 #define XRDMON_STATS_FIELDS(X) \
@@ -931,15 +930,15 @@ bool XrdMonDecode::SaveState(const std::string& path) const
            // go missing, so the times alone are enough to write the block.
            if (u.sFiles || u.sErrors || u.sLogin || u.sFirst)
               {json& ss = e["session"];
-               ss = {{"files", u.sFiles},     {"xfers", u.sTransfers},
-                     {"accs",  u.sAccesses},  {"errs",  u.sErrors},
-                     {"rb",    u.sReadBytes}, {"wb",    u.sWriteBytes},
-                     {"login", u.sLogin},
-                     {"first", u.sFirst},     {"last",  u.sLast}};
+               ss = {{"files", u.sFiles},      {"rds",   u.sReads},
+                     {"wrs",   u.sWrites},     {"errs",  u.sErrors},
+                     {"rb",    u.sReadBytes},  {"rvb",   u.sReadvBytes},
+                     {"wb",    u.sWriteBytes}, {"login", u.sLogin},
+                     {"first", u.sFirst},      {"last",  u.sLast}};
                json& fr = ss["recent"] = json::array();
                for (const auto& f : u.sRecent)
                    fr.push_back({{"lfn", f.lfn}, {"b", f.bytes},
-                                 {"w", f.write}, {"whole", f.whole}});
+                                 {"w", f.write}});
               }
            ju[std::to_string(id)] = std::move(e);
           }
@@ -1077,11 +1076,12 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
                   u.connT      = (time_t)e.value("conn", (int64_t)0);
                   if (auto sn = e.find("session"); sn != e.end())
                      {u.sFiles      = sn->value("files", 0u);
-                      u.sTransfers  = sn->value("xfers", 0u);
-                      u.sAccesses   = sn->value("accs",  0u);
+                      u.sReads      = sn->value("rds",   0u);
+                      u.sWrites     = sn->value("wrs",   0u);
                       u.sErrors     = sn->value("errs",  0u);
-                      u.sReadBytes  = sn->value("rb", (int64_t)0);
-                      u.sWriteBytes = sn->value("wb", (int64_t)0);
+                      u.sReadBytes  = sn->value("rb",  (int64_t)0);
+                      u.sReadvBytes = sn->value("rvb", (int64_t)0);
+                      u.sWriteBytes = sn->value("wb",  (int64_t)0);
                       u.sLogin      = sn->value("login", 0);
                       u.sFirst      = sn->value("first", 0);
                       u.sLast       = sn->value("last",  0);
@@ -1090,7 +1090,7 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
                              u.sRecent.push_back(
                                 {f.value("lfn", std::string()),
                                  f.value("b", (int64_t)0),
-                                 f.value("w", false), f.value("whole", false)});
+                                 f.value("w", false)});
                      }
                   uint32_t k32 = (uint32_t)std::stoul(id);
                   std::size_t w = bytesOf(u);
@@ -1832,6 +1832,10 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
 
                 case XrdXrootdMonFileHdr::isOpen:
                      {stats.opens++;
+                      if (metrics)
+                         metrics->counterSeries("io_total", kIoTotalHelp,
+                                  {{"server", src}, {"operation", "open"}})
+                                 += 1;
                       uint32_t fileID = rd32(rec + 4);
                       OpenFile of;
                       of.fsz   = ri64(rec + 8);
@@ -2082,6 +2086,7 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
    int64_t wrBytes = ri64(rec + 24);
 
    double durSecs = -1;
+   int32_t rdOps = 0, rvOps = 0, wrOps = 0;   // set from the optional ops block
    std::string vo;
    bool     haveOpen = false;  // matched the open record (so fsz is known)
    int64_t  openFsz  = 0;      // file size captured at open
@@ -2170,15 +2175,6 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
                              "(open lost or evicted)", {{"server", src}}) += 1;
            }
 
-// Whole-file transfer vs. partial access. The document schema is identical; only
-// xrootd.transfer.kind differs (see wholeFileClose). A write needs to have ended
-// cleanly to count as a whole-file producer, so this must be decided after the
-// forced/error flags are known.
-//
-   const bool whole  = wholeFileClose(haveOpen, openFsz, rdBytes, rvBytes,
-                                      wrBytes, forced, hasErr);
-   a["xrootd.transfer.kind"] = whole ? "transfer" : "access";
-
 // Trace context: the client session is the trace (keyed by the open's user
 // dictid); this file open->close is a span within it.
 //
@@ -2190,9 +2186,7 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
 // disconnect). Only possible when the open was joined, which carries the user.
 //
    if (haveOpen)
-      {const bool    write = wrBytes > 0;
-       const int64_t moved = write ? wrBytes : rdBytes + rvBytes;
-       foldSession(srv, openUser, openLfn, moved, write, whole, hasErr,
+      {foldSession(srv, openUser, openLfn, rdBytes, rvBytes, wrBytes, hasErr,
                    (int32_t)tRec);
        // The open normally supplies the earlier bound, but a close whose open
        // was never seen (packet lost, or the session predates this decoder)
@@ -2204,9 +2198,12 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
 //
    if ((recFlag & XrdXrootdMonFileHdr::hasOPS) && recSize >= 8 + 24 + 48)
       {const unsigned char* o = rec + 8 + 24;
-       a["xrootd.read_ops"]   = ri32(o + 0);
-       a["xrootd.readv_ops"]  = ri32(o + 4);
-       a["xrootd.write_ops"]  = ri32(o + 8);
+       rdOps = ri32(o + 0);
+       rvOps = ri32(o + 4);
+       wrOps = ri32(o + 8);
+       a["xrootd.read_ops"]   = rdOps;
+       a["xrootd.readv_ops"]  = rvOps;
+       a["xrootd.write_ops"]  = wrOps;
        a["xrootd.readv_segs"] = ri64(o + 16);
 
        // Request-size extremes use 0x7fffffff as the "unset" sentinel; omit
@@ -2260,12 +2257,20 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
 //
    if (metrics)
       {std::vector<XrdMetrics::ConstLabel> sl = {{"server", src}};
-       if (whole)
-          metrics->counterSeries("transfers_total",
-                           "completed whole-file transfers seen", sl) += 1;
-          else
-          metrics->counterSeries("accesses_total",
-                           "completed partial-access closes seen", sl) += 1;
+       // One series counts the operations this close reports, by kind. The
+       // close itself always ticks; the request counts arrive only with the
+       // optional ops block. Negative would mean a corrupt record, and the
+       // counter is unsigned, so guard rather than wrap.
+       auto ioOps = [&](const char* op, int64_t n)
+                      {if (n > 0)
+                          metrics->counterSeries("io_total", kIoTotalHelp,
+                                   {{"server", src}, {"operation", op}})
+                                  += (uint64_t)n;
+                      };
+       ioOps("close", 1);
+       ioOps("read",  rdOps);
+       ioOps("readv", rvOps);
+       ioOps("write", wrOps);
        metrics->counterSeries("read_bytes_total",
                         "bytes read (read+readv)", sl) += rdBytes + rvBytes;
        metrics->counterSeries("write_bytes_total",

@@ -196,18 +196,14 @@
                     }
                   }
                 },
-                "transfer": {
-                  "properties": {
-                    "kind": { "type": "keyword" }
-                  }
-                },
                 "session": {
                   "properties": {
                     "files":        { "type": "long" },
-                    "transfers":    { "type": "long" },
-                    "accesses":     { "type": "long" },
+                    "reads":        { "type": "long" },
+                    "writes":       { "type": "long" },
                     "errors":       { "type": "long" },
                     "read_bytes":   { "type": "long" },
+                    "readv_bytes":  { "type": "long" },
                     "write_bytes":  { "type": "long" },
                     "start_time":   { "type": "date" },
                     "end_time":     { "type": "date" },

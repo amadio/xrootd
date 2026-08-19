@@ -113,7 +113,7 @@ missing a field) are covered under [Limitations](#limitations).
 
 ### Serialization
 
-Every document — the file-close transfer/access records, `session`,
+Every document — the per-file close records, `session`,
 `server_ident`, `frm`, `redirect`, the `t`-stream traces and `gstream` — shares
 one OpenTelemetry-aligned schema: a process-level `resource` object and an
 event-level `attributes` object, both keyed by dotted semantic-convention names
@@ -126,6 +126,24 @@ queryable structured metadata ([grafana/loki#19260](https://github.com/grafana/l
 the attribute can be dropped once Loki surfaces the field. This one in-memory
 shape is then framed differently per wire sink.
 
+The event names the operation, not the stream it came from:
+
+| `eventName` | Record |
+|---|---|
+| `xrootd.read` / `xrootd.write` | a file close, named by whether it carried write bytes |
+| `xrootd.open`, `xrootd.close`, `xrootd.read`, `xrootd.write`, `xrootd.auth`, `xrootd.unknown` | an operation that failed without producing a close, named by the error category |
+| `xrootd.redirect` | a redirect (`--redirects`) |
+| `xrootd.session` | a client's session rollup (`--sessions`) |
+| `xrootd.io.read`, `.write`, `.readv`, `.open`, `.close`, `.disconnect`, `.appid` | per-I/O trace detail (`--traces`) |
+| `xrootd.gstream` | a plugin g-stream record (`--gstream`) |
+| `xrootd.frm` | a File Residency Manager stage/migrate/purge record |
+| `xrootd.server_ident` | a server identity announcement |
+
+The first three families are the *concluded operations*, and they are the only
+documents carrying `xrootd.operation.state` — so the presence of that attribute
+selects them as a group, which is what a dashboard wants when it does not care
+which operation concluded.
+
 #### OpenSearch `_bulk`
 
 The `_bulk` framing (`XrdMonOpenSearch::Add`) emits, per document, an
@@ -133,7 +151,7 @@ action/metadata line followed by the source line:
 
 ```
 {"index":{"_index":"xrootd-transfers"}}
-{"resource":{…},"attributes":{"event.name":"xrootd.transfer",…}}
+{"resource":{…},"attributes":{"event.name":"xrootd.read",…}}
 ```
 
 A rolling index uses the `index` action (an upsert); a **data stream** uses the
@@ -161,8 +179,8 @@ in the LogRecord `eventName` field with a matching human-readable `body`:
   "resource":{"attributes":[{"key":"service.name","value":{"stringValue":"xrootd"}}, …]},
   "scopeLogs":[{"scope":{"name":"xrdmoncollect"},
     "logRecords":[{"timeUnixNano":"…","severityNumber":9,
-      "eventName":"xrootd.transfer",
-      "body":{"stringValue":"xrootd.transfer"},
+      "eventName":"xrootd.read",
+      "body":{"stringValue":"xrootd.read"},
       "attributes":[{"key":"file.path","value":{"stringValue":"/store/…"}}, …]}]}]}]}
 ```
 
@@ -335,20 +353,25 @@ xrdmoncollect --tcp-port 9931 --tcp-token @/etc/xrootd/shovel.token \
 By default the `f` (file-stats) stream produces a per-close document on each
 file close and maintains the `xrootd_collector_active_transfers{server}` gauge
 (open files in progress, from the `isXfr` snapshots and open/close records). A
-file close is reported with `attributes["event.name"]` = `xrootd.transfer` and
-one of two values of `attributes["xrootd.transfer.kind"]` that share an identical
-schema:
+file close is reported with `attributes["event.name"]` naming the direction:
+`xrootd.read` when the close carried no write bytes, `xrootd.write` when it did.
+That is the same distinction as `xrootd.operation.name`, which the document also
+carries for consumers that key on attributes only.
 
-- `transfer` — a **whole-file** copy: a read that covered the whole file
-  (`xrootd.transfer.read_bytes + xrootd.transfer.readv_bytes >= file.size`, the
-  size captured at open) or a write that completed cleanly (an upload producing
-  the file).
-- `access` — finer-grained or partial data access: a short read, a read whose
-  open size is unknown (no matching open record), or a write cut short by a
-  forced (disconnect-driven) close or an error. XRootD serves both whole-file
-  copies and partial/random data access; this lets a consumer separate the two
-  without recomputing coverage. The two are counted separately in
-  `xrootd_collector_transfers_total` and `xrootd_collector_accesses_total`.
+XRootD serves both whole-file copies and partial or random data access, and the
+close says which without the collector having to decide: `file.size` (the size
+captured at open) sits next to `xrootd.read_bytes`, `xrootd.readv_bytes` and
+`xrootd.write_bytes`, so a consumer applies whatever coverage rule it means —
+
+```
+read_bytes + readv_bytes >= file.size      # the whole file was read
+```
+
+— rather than inheriting one baked in here. `xrootd.open_seen` says whether the
+open was joined at all, which is what decides whether `file.size` is available,
+and `xrootd.forced_close` says whether the client concluded the operation or was
+disconnected mid-way. Operations are counted in
+`xrootd_collector_io_total{server,operation}`.
 
 ### Streams
 
@@ -358,18 +381,19 @@ Several opt-in streams add finer-grained events:
   named the user is folded into a per-session rollup, and a `session` document
   (`attributes["event.name"]` = `xrootd.session`) is emitted on each client
   disconnect (`isDisc`). The session `attributes` carry running totals
-  (`xrootd.session.files`, `.transfers`, `.accesses`, `.read_bytes`,
+  (`xrootd.session.files`, `.reads`, `.writes`, `.read_bytes`, `.readv_bytes`,
   `.write_bytes`, `.errors`, `.start_time`/`.end_time`/`.duration` — see
-  [Session times](#session-times) below) and a capped
+  [Session times](#session-times) below; `read_bytes` and `readv_bytes` are kept
+  apart so vectored access stays distinguishable from sequential) and a capped
   `xrootd.session.recent_files` list (the most recent closed files, each with
-  `file.path`, `xrootd.transfer.kind`, `xrootd.operation.name`, `xrootd.bytes`). The
+  `file.path`, `xrootd.operation.name`, `xrootd.bytes`). The
   totals cover every closed file; only the `recent_files` list is bounded, so a
   long session (a batch job opening many files in a dataset) stays
   memory-bounded. A client that hits an error and disconnects therefore yields
   one document with as much of its activity as the server reported. **Off by
   default** — when disabled no rollup is accumulated and no `session` document is
   produced, saving the per-session memory and receive-thread work for
-  deployments that only consume the per-transfer/access documents.
+  deployments that only consume the per-file documents.
 
   <a id="session-times"></a>
   **Session times.** `xrootd.session.start_time`, `.end_time` and `.duration`
@@ -411,9 +435,11 @@ Several opt-in streams add finer-grained events:
   logs-only export — however many `traceId`s the logs carry — shows no traces in
   Tempo/Grafana (logs correlate *to* traces, they do not create them).
 - `--traces` turns each `t` (I/O trace) record into a document
-  (`attributes["event.name"]` = `xrootd.read`/`xrootd.write` with
-  `xrootd.io.offset`, `xrootd.io.length` and the resolved `file.path`,
-  `xrootd.open`, `xrootd.close`, `xrootd.disconnect`, and `xrootd.appid`). This
+  (`attributes["event.name"]` = `xrootd.io.read`/`xrootd.io.write` with
+  `xrootd.io.offset`, `xrootd.io.length` and the resolved `file.path`, plus
+  `xrootd.io.readv`, `xrootd.io.open`, `xrootd.io.close`,
+  `xrootd.io.disconnect`, and `xrootd.io.appid`; the `xrootd.io.` prefix keeps
+  the detail stream apart from the per-file documents). This
   is **high volume** (one record per I/O) — enable only when the detail is
   needed. Requires `io` in the server's monitor `dest` list and the path
   dictionary (`d` stream) to resolve file names. Every record carries the client
@@ -441,9 +467,9 @@ Several opt-in streams add finer-grained events:
   `xrootd_collector_frm_purge_bytes_total`. Emitted by a File Residency
   Manager.
 - `--redirects` turns each `r` (redirect) record into a concluded-operation
-  document: an `attributes["event.name"]` = `xrootd.transfer` report with
-  `attributes["xrootd.transfer.kind"]` `"transfer"` and `xrootd.operation.state`
-  `"Redirected"`, the triggering `xrootd.operation.name`, the destination
+  document: an `attributes["event.name"]` = `xrootd.redirect` report with
+  `xrootd.operation.state` `"Redirected"`, the triggering
+  `xrootd.operation.name`, the destination
   (`xrootd.redirect.kind`, `xrootd.redirect.target.address`,
   `xrootd.redirect.target.port`), the redirected `file.path`, and the joined
   user/client attributes. A redirect concludes the operation from the
@@ -603,21 +629,20 @@ path (for example `attributes.xrootd.session.files`).
 | `authprot` | `xrootd.auth.method` | `event` | `event.name` |
 | `proto` | `network.protocol.name` | `op` | `xrootd.operation.name` |
 | `scheme` | `url.scheme` | `state` | `xrootd.operation.state` |
-| `client` | `client.address` | `kind` | `xrootd.transfer.kind` |
-| `clientip` | `network.peer.address` | `error` | `error.type` |
-| `clientsite` | `xrootd.client.site` | `provider` | `xrootd.gstream.provider` |
-| `app` | `user_agent.name` | `target` | `xrootd.redirect.target.address` |
-| `appver` | `user_agent.version` | `session` | `session.id` |
-| `appinfo` | `user_agent.original` | `severity` | `severityText` *(top level)* |
-| `appid` | `xrootd.app` | `server` | `server.address` *(resource)* |
-| `experiment` | `scitags.experiment` | `site` | `xrootd.server.site` *(resource)* |
-| `activity` | `scitags.activity` | `instance` | `service.instance.id` *(resource)* |
-| | | `program` | `xrootd.server.program` *(resource)* |
+| `client` | `client.address` | `error` | `error.type` |
+| `clientip` | `network.peer.address` | `provider` | `xrootd.gstream.provider` |
+| `clientsite` | `xrootd.client.site` | `target` | `xrootd.redirect.target.address` |
+| `app` | `user_agent.name` | `session` | `session.id` |
+| `appver` | `user_agent.version` | `severity` | `severityText` *(top level)* |
+| `appinfo` | `user_agent.original` | `server` | `server.address` *(resource)* |
+| `appid` | `xrootd.app` | `site` | `xrootd.server.site` *(resource)* |
+| `experiment` | `scitags.experiment` | `instance` | `service.instance.id` *(resource)* |
+| `activity` | `scitags.activity` | `program` | `xrootd.server.program` *(resource)* |
 | | | `version` | `service.version` *(resource)* |
 
 An array field (`role`) matches when any element does; numbers and booleans are
 matched as their printed form (`attributes.xrootd.error.code = 3011`,
-`attributes.xrootd.transfer.open_seen = true`); objects never match.
+`attributes.xrootd.open_seen = true`); objects never match.
 
 **What filtering does not touch.** Rules run on the finished document,
 immediately before it reaches the sinks, and after everything else in the
@@ -660,7 +685,7 @@ xrdmoncollect: 3 filter rule(s) loaded (1 tag, 1 drop, 1 keep)
 The per-transfer document uses the OpenTelemetry-aligned schema described under
 [Serialization](#serialization): a process-level `resource` object and an
 event-level `attributes` object. One object per file close. The example below
-shows a fully-populated successful whole-file read (server configured with
+shows a fully-populated successful read (server configured with
 `lfn ops ssq xfr auth`, token and SciTags records present, `--dataset` and
 `--scitags` set):
 
@@ -684,10 +709,9 @@ shows a fully-populated successful whole-file read (server configured with
   "severityNumber": 9, "severityText": "INFO",
   "traceId": "9f1c8b0d4e2a6f37c1a8b0d4e2a6f371",
   "spanId": "3ab4c1d2e3f40516",
-  "eventName": "xrootd.transfer",
+  "eventName": "xrootd.read",
   "attributes": {
-    "event.name": "xrootd.transfer",
-    "xrootd.transfer.kind": "transfer",
+    "event.name": "xrootd.read",
     "file.path": "/store/data/Run2026A-PromptReco/file.root",
     "file.name": "file.root",
     "file.directory": "/store/data/Run2026A-PromptReco",
@@ -714,26 +738,30 @@ shows a fully-populated successful whole-file read (server configured with
     "scitags.activity_id": 3, "scitags.activity": "analysis",
     "xrootd.operation.name": "read",
     "xrootd.operation.state": "Successful",
-    "xrootd.transfer.open_seen": true,
-    "xrootd.transfer.forced_close": false,
-    "xrootd.transfer.start_time": "2026-07-02T09:55:32.000Z",
-    "xrootd.transfer.duration": 300.25,
-    "xrootd.transfer.read_bytes": 805306368,
-    "xrootd.transfer.readv_bytes": 268435456,
-    "xrootd.transfer.write_bytes": 0,
-    "xrootd.transfer.read_ops": 320,
-    "xrootd.transfer.readv_ops": 16,
-    "xrootd.transfer.write_ops": 0,
-    "xrootd.transfer.readv_segs": 4096,
-    "xrootd.transfer.read_min": 4096,
-    "xrootd.transfer.read_max": 8388608,
-    "xrootd.transfer.readv_min": 1024,
-    "xrootd.transfer.readv_max": 4194304,
-    "xrootd.transfer.read_sumsq": 8.1e18,
-    "xrootd.transfer.readv_sumsq": 2.9e17,
-    "xrootd.transfer.rsegs_sumsq": 1.2e9,
-    "xrootd.transfer.write_sumsq": 0.0,
-    "xrootd.transfer.is_local": true
+    "xrootd.open_seen": true,
+    "xrootd.forced_close": false,
+    "xrootd.operation.start_time": "2026-07-02T09:55:32.000Z",
+    "xrootd.operation.duration": 300.25,
+    "xrootd.read_bytes": 805306368,
+    "xrootd.readv_bytes": 268435456,
+    "xrootd.write_bytes": 0,
+    "xrootd.read_ops": 320,
+    "xrootd.readv_ops": 16,
+    "xrootd.write_ops": 0,
+    "xrootd.readv_segs": 4096,
+    "xrootd.read_min": 4096,
+    "xrootd.read_max": 8388608,
+    "xrootd.readv_min": 1024,
+    "xrootd.readv_max": 4194304,
+    "xrootd.readv_segs_min": 4,
+    "xrootd.readv_segs_max": 512,
+    "xrootd.write_min": 0,
+    "xrootd.write_max": 0,
+    "xrootd.read_sumsq": 8.1e18,
+    "xrootd.readv_sumsq": 2.9e17,
+    "xrootd.rsegs_sumsq": 1.2e9,
+    "xrootd.write_sumsq": 0.0,
+    "xrootd.is_local": true
   }
 }
 ```
@@ -745,19 +773,28 @@ reason) and `xrootd.error.code`; a session over the HTTP bridge carries
 `url.scheme` (`http`/`https`, with `network.protocol.name` `"http"`); a
 redirect report (`--redirects`) carries `xrootd.operation.state`
 `"Redirected"` plus `xrootd.redirect.kind` and
-`xrootd.redirect.target.{address,port}`. The request-size extremes
-(`*_min`/`*_max`, and `readv_segs_min`/`readv_segs_max` for the segment count
-per `readv()`) arrive with the `ops` block and are always present once it does:
-the server zeroes a pair whose operation never ran, so a pure read reports
-`write_min`/`write_max` as `0`. The `*_sumsq` fields appear only with `ssq` in
-the server config.
+`xrootd.redirect.target.{address,port}`. The `*_sumsq` fields appear only with
+`ssq` in the server config.
+
+The request-size extremes (`*_min`/`*_max`, and `readv_segs_min`/`_max` for the
+segment count per `readv()`) arrive with the `ops` block, and their presence
+carries information:
+
+- **`0`/`0`** — the operation never ran. The server zeroes the pair in that
+  case, so a pure read reports `write_min`/`write_max` as `0`.
+- **absent** — the operation ran but the extremes were not measured. XRootD
+  maintains them only for a file tracked at `XrdXrootdFileStats::monOps` or
+  above; at the lower level the op *counts* are real while the extremes keep
+  their unset sentinel. Reporting that sentinel would look like a 2 GiB minimum
+  request, so the collector omits the pair instead. A close can therefore carry
+  `xrootd.read_ops` with no `xrootd.read_min`.
 
 Failures come in two shapes (both logged at `severityText` `ERROR`,
 `severityNumber` 17; see [WLCG field mapping](#wlcg-field-mapping) for the
 semantics). A **failed open** never produced a close, so the server reports it
 as a dedicated terminal record: the document carries the identity and `file.*`
-attributes but no `xrootd.transfer.*` byte totals, and the failed operation
-*is* the operation name. Abbreviated to the fields that differ from the
+attributes but no byte totals, and the failed operation *is* the event name and
+the operation name. Abbreviated to the fields that differ from the
 successful example (`resource` and the remaining identity attributes are as
 above):
 
@@ -771,9 +808,9 @@ above):
   "severityNumber": 17, "severityText": "ERROR",
   "traceId": "9f1c8b0d4e2a6f37c1a8b0d4e2a6f371",
   "spanId": "5c6d7e8f90a1b2c3",
-  "eventName": "xrootd.transfer",
+  "eventName": "xrootd.open",
   "attributes": {
-    "event.name": "xrootd.transfer",
+    "event.name": "xrootd.open",
     "file.path": "/store/data/missing.root",
     "file.name": "missing.root",
     "file.directory": "/store/data",
@@ -791,8 +828,8 @@ above):
 
 A **failed transfer** (a terminal read/write error recorded during the
 session, or a failed close) is reported on the close record itself, so the
-document keeps the full transfer shape — partial byte totals, `ops`/`ssq`
-detail, `open_seen`, the byte-derived `read`/`write` operation name — and adds
+document keeps the full close shape — partial byte totals, `ops`/`ssq`
+detail, `open_seen`, the byte-derived `read`/`write` direction — and adds
 the error fields (the error-category byte, `read` here, feeds the
 `failed_operations_total{category}` metric label instead):
 
@@ -806,10 +843,9 @@ the error fields (the error-category byte, `read` here, feeds the
   "severityNumber": 17, "severityText": "ERROR",
   "traceId": "9f1c8b0d4e2a6f37c1a8b0d4e2a6f371",
   "spanId": "7a8b9c0d1e2f3041",
-  "eventName": "xrootd.transfer",
+  "eventName": "xrootd.read",
   "attributes": {
-    "event.name": "xrootd.transfer",
-    "xrootd.transfer.kind": "access",
+    "event.name": "xrootd.read",
     "file.path": "/store/data/Run2026A-PromptReco/file.root",
     "file.name": "file.root",
     "file.directory": "/store/data/Run2026A-PromptReco",
@@ -822,24 +858,26 @@ the error fields (the error-category byte, `read` here, feeds the
     "xrootd.operation.state": "Failed",
     "xrootd.error.code": 3005,
     "error.type": "Unable to readv /store/data/Run2026A-PromptReco/file.root; illegal seek",
-    "xrootd.transfer.open_seen": true,
-    "xrootd.transfer.forced_close": false,
-    "xrootd.transfer.start_time": "2026-07-02T10:02:52.000Z",
-    "xrootd.transfer.duration": 20.5,
-    "xrootd.transfer.read_bytes": 4096,
-    "xrootd.transfer.readv_bytes": 0,
-    "xrootd.transfer.write_bytes": 0
+    "xrootd.open_seen": true,
+    "xrootd.forced_close": false,
+    "xrootd.operation.start_time": "2026-07-02T10:02:52.000Z",
+    "xrootd.operation.duration": 20.5,
+    "xrootd.read_bytes": 4096,
+    "xrootd.readv_bytes": 0,
+    "xrootd.write_bytes": 0
   }
 }
 ```
 
-Note the `kind` here: an aborted or failed *write* is always an `access` (a
-whole-file producer must end cleanly), while a *read* is classed purely by
-coverage — this failed read moved 4 KiB of a 1 GiB file, hence `access`.
+Note that the failure does not change the event name: the close still reports
+the direction it had, with `xrootd.operation.state` carrying the outcome. The
+byte totals are what the operation managed before it aborted — 4 KiB of a 1 GiB
+file here — so a consumer comparing them against `file.size` sees the shortfall
+directly.
 
-`xrootd.transfer.open_seen` is `false` (and the `file.*`, `user.*`, `client.*`
+`xrootd.open_seen` is `false` (and the `file.*`, `user.*`, `client.*`
 attributes are absent) for a close whose open record was lost or predates the
-collector — the `xrootd.transfer.*` byte totals are still reported. Empty/zero
+collector — the byte totals are still reported. Empty/zero
 fields are omitted, so a given document only carries what the server actually
 reported.
 
@@ -868,16 +906,15 @@ rolling up everything it did — the root of its trace:
     "xrootd.session.duration": 1117.0,
     "xrootd.session.start_time_source": "login",
     "xrootd.session.files": 2,
-    "xrootd.session.transfers": 1,
-    "xrootd.session.accesses": 1,
-    "xrootd.session.read_bytes": 1073745920,
+    "xrootd.session.reads": 2,
+    "xrootd.session.writes": 0,
+    "xrootd.session.read_bytes": 805310464,
+    "xrootd.session.readv_bytes": 268435456,
     "xrootd.session.recent_files": [
       { "file.path": "/store/data/Run2026A-PromptReco/file.root",
-        "xrootd.transfer.kind": "transfer",
         "xrootd.operation.name": "read",
         "xrootd.bytes": 1073741824 },
       { "file.path": "/store/data/Run2026A-PromptReco/other.root",
-        "xrootd.transfer.kind": "access",
         "xrootd.operation.name": "read",
         "xrootd.bytes": 4096 }
     ]
@@ -912,9 +949,9 @@ on the wire. Mapping (and the server config each needs):
 | user | `user.name` (token `&n=` preferred over descriptor) / `user.id` (token `&s=`, else login DN `&n=`) | `u` / `T` token |
 | vo | `wlcg.vo` | `T` token, else `… auth` (`&o=` from a VO-bearing method: gsi/sss/ztn/http(s)) |
 | activity | `scitags.experiment`/`scitags.activity` (names), `scitags.*_id` (numeric), `user.roles` | `U` SciTags + `--scitags` registry; `T` token for role |
-| start_time / end_time | `xrootd.transfer.start_time` / `.end_time` | f-stream `FileTOD` window, interpolated per record |
-| bytes | `xrootd.transfer.{read,readv,write}_bytes` | `fstat … xfr` |
-| is_local (LAN/WAN) | `xrootd.transfer.is_local` | derived: client vs server domain (needs `=` ident) |
+| start_time / end_time | `xrootd.operation.start_time` / the record's `@timestamp` | f-stream `FileTOD` window, interpolated per record |
+| bytes | `xrootd.{read,readv,write}_bytes` | `fstat … xfr` |
+| is_local (LAN/WAN) | `xrootd.is_local` | derived: client vs server domain (needs `=` ident) |
 
 `client.address` carries the client's resolved name when one is known, with
 the IP address only as a fallback (per the OTel semantic conventions). The
@@ -957,7 +994,7 @@ addresses and names as received). A *remote* server is never reverse-resolved
 here — that hostname comes from its `=` ident, and a blocking reverse-DNS
 lookup of an arbitrary source IP would stall the UDP receive loop.
 
-`xrootd.transfer.is_local` is a heuristic: it is `true` when the client
+`xrootd.is_local` is a heuristic: it is `true` when the client
 (`client.address`, which is name-first) and the reporting
 server share a registered domain (the part after the first host label),
 `false` when they differ, and **omitted** when either side is an IP literal or
@@ -983,7 +1020,7 @@ failure). The `isError` record covers open failures reported synchronously
 denials that bypass `fsError` — notably a second writer rejected with
 `kXR_FileLocked`. This requires only
 the existing `fstat` setup — no extra directive. A disconnect-driven
-(`xrootd.transfer.forced_close`) close is **not** a failure unless an error was
+(`xrootd.forced_close`) close is **not** a failure unless an error was
 actually recorded. The `error.type` is the server's own SFS reason verbatim
 (e.g. `Unable to open …; no such file or directory` for a missing file); the
 `XRootD::moncollect` test asserts that specific reason per-document for both a
@@ -1047,8 +1084,8 @@ carries only window boundaries (the f-stream `isTime` record's `tBeg`/`tEnd`
 plus its record count; the t-stream's `WINDOW` marks), but records are
 appended to the server's buffer in time order, so each record's time is
 estimated by linear interpolation over its position in the packet. Event
-times, `xrootd.transfer.start_time`, span start/end and
-`xrootd.transfer.duration` (a fractional-seconds number) therefore carry
+times, `xrootd.operation.start_time`, span start/end and
+`xrootd.operation.duration` (a fractional-seconds number) therefore carry
 sub-window, millisecond-formatted *estimates* — accurate to well under the
 flush interval, rather than collapsing onto the window boundary (which used
 to make every open/close pair reported in one window compute a zero
@@ -1099,29 +1136,29 @@ duration). The window endpoints themselves have one-second wire granularity.
 | `&Ec=` | `attributes.scitags.experiment_id` (+ `scitags.experiment` name via registry) |
 | `&Ac=` | `attributes.scitags.activity_id` (+ `scitags.activity` name via registry) |
 
-**`f` — file stream (`MAPFSTA`) → `xrootd.transfer` / `xrootd.session` docs:**
+**`f` — file stream (`MAPFSTA`) → `xrootd.read`/`xrootd.write` / `xrootd.session` docs:**
 
 | Record | Wire field | Canonical key |
 | :-- | :-- | :-- |
 | `isTime` | tBeg / tEnd / nRecs / sID | per-record time interpolation / `resource.xrootd.server.id` |
 | `isOpen` | fsz / RW / lfn / user | `attributes.file.size`, `.xrootd.file.read_write`, `.file.*`, → identity |
-| `isClose` (`xfr`) | read/readv/write bytes | `attributes.xrootd.transfer.{read,readv,write}_bytes` |
-| `isClose` (`ops`) | op counts, readv segs, min/max | `attributes.xrootd.transfer.{read,readv,write}_{ops,min,max}`, `.readv_segs` |
-| `isClose` (`ssq`) | Σx² | `attributes.xrootd.transfer.{read,readv,rsegs,write}_sumsq` |
-| `isClose` | derived | `.kind`, `.operation.name`, `.operation.state`, `.open_seen`, `.forced_close`, `.duration`, `.is_local` |
+| `isClose` (`xfr`) | read/readv/write bytes | `attributes.xrootd.{read,readv,write}_bytes` |
+| `isClose` (`ops`) | op counts, readv segs, min/max | `attributes.xrootd.{read,readv,write}_{ops,min,max}`, `.readv_segs`, `.readv_segs_{min,max}` |
+| `isClose` (`ssq`) | Σx² | `attributes.xrootd.{read,readv,rsegs,write}_sumsq` |
+| `isClose` | derived | `event.name`, `.operation.name`, `.operation.state`, `.open_seen`, `.forced_close`, `.operation.duration`, `.is_local` |
 | `isClose`/`isError` | error text / code | `attributes.error.type`, `.xrootd.error.code` |
-| `isDisc` | session rollup | `attributes.xrootd.session.{files,transfers,accesses,errors,read_bytes,write_bytes,start_time,end_time,duration,start_time_source,recent_files}` |
+| `isDisc` | session rollup | `attributes.xrootd.session.{files,reads,writes,errors,read_bytes,readv_bytes,write_bytes,start_time,end_time,duration,start_time_source,recent_files}` |
 
 **`t` — trace stream (`MAPTRCE`, `--traces`):**
 
 | Record | Wire field | Canonical key / `eventName` |
 | :-- | :-- | :-- |
-| read / write | offset, length | `attributes.xrootd.io.offset`, `.xrootd.io.length`; `xrootd.read`/`xrootd.write` |
-| readv / readu | file dictid | `attributes.file.*`, `.xrootd.file.id`; `xrootd.readv` |
-| open | fsz | `attributes.file.size`; `xrootd.open` |
-| close | read/write bytes | `attributes.xrootd.transfer.{read,write}_bytes`; `xrootd.close` |
-| disc | duration, user | `attributes.xrootd.session.{start_time,end_time,duration}` + identity; `xrootd.disconnect`. Also dates the session document's login exactly (see [Session times](#session-times)) |
-| appid | 12-byte app id | `attributes.xrootd.app`; `xrootd.appid` |
+| read / write | offset, length | `attributes.xrootd.io.offset`, `.xrootd.io.length`; `xrootd.io.read`/`xrootd.io.write` |
+| readv / readu | file dictid | `attributes.file.*`, `.xrootd.file.id`; `xrootd.io.readv` |
+| open | fsz | `attributes.file.size`; `xrootd.io.open` |
+| close | read/write bytes | `attributes.xrootd.{read,write}_bytes`; `xrootd.io.close` |
+| disc | duration, user | `attributes.xrootd.session.{start_time,end_time,duration}` + identity; `xrootd.io.disconnect`. Also dates the session document's login exactly (see [Session times](#session-times)) |
+| appid | 12-byte app id | `attributes.xrootd.app`; `xrootd.io.appid` |
 | window | time | (sets envelope time; no document) |
 
 **`g` — g-stream (`MAPGSTA`, `--gstream`) → `xrootd.gstream`:**
@@ -1143,7 +1180,7 @@ same `xrootd.gstream` events and provider metrics; the provider comes from the
 header's `gs.type` (or `unknown` under `nohdr`). Point a `send json` destination
 only at a JSON consumer or at this collector — never mix it into a binary sink.
 
-**`r` — redirect (`MAPREDR`, `--redirects`) → `xrootd.transfer`:**
+**`r` — redirect (`MAPREDR`, `--redirects`) → `xrootd.redirect`:**
 
 | Wire field | Canonical key |
 | :-- | :-- |
@@ -1508,7 +1545,7 @@ use a plain rolling index with an ISM rollover policy instead.
 A ready-to-import OpenSearch Dashboards saved-objects file is provided in
 [`opensearch-dashboards.ndjson`](opensearch-dashboards.ndjson): an
 `xrootd-transfers*` index pattern plus a *XRootD Transfers (xrdmoncollect)*
-dashboard built on the log records — throughput over time, transfer/access
+dashboard built on the log records — throughput over time, read/write
 rates, VO / auth-method / locality breakdowns, error categories, transfer
 duration distribution, and top files/users/sites. Import it under **Dashboards
 Management → Saved Objects → Import** (or via the API):
@@ -1540,18 +1577,22 @@ enabled (both on by default in 3.x). Loki promotes only a small set of *resource
 attributes to stream labels — for our records `service.name` (always `xrootd`)
 and `service.instance.id` — and stores everything else, including all event
 attributes, as **structured metadata** with dots rewritten to underscores. So the
-OpenSearch field `attributes.xrootd.transfer.kind` becomes the queryable label
-`xrootd_transfer_kind`, and a typical query reads:
+OpenSearch field `attributes.xrootd.operation.name` becomes the queryable label
+`xrootd_operation_name`, and a typical query reads:
 
 ```logql
-sum by (xrootd_transfer_kind) (
-  count_over_time({service_name="xrootd"} | event_name="xrootd.transfer" [$__auto])
+sum by (xrootd_operation_name) (
+  count_over_time({service_name="xrootd"} | xrootd_operation_state=~".+" [$__auto])
 )
 ```
 
+`xrootd_operation_state` is set by exactly the close, error and redirect
+documents, which makes its presence the way to select concluded operations as a
+family now that each names its own operation.
+
 A ready-to-import dashboard is provided in
 [`grafana-loki-dashboard.json`](grafana-loki-dashboard.json) — the same panels as
-the OpenSearch dashboard (throughput, rate by kind, VO / auth / locality / state
+the OpenSearch dashboard (throughput, VO / auth / locality / state
 breakdowns, error categories, top files/users/sites, sessions). Import it under
 **Grafana → Dashboards → New → Import** and select your Loki data source for the
 `DS_LOKI` input. Two panels are approximations, because LogQL lacks the matching
@@ -1601,8 +1642,7 @@ in cardinality — labelled only by the reporting `server` — and suitable for 
 time-series database:
 
 ```
-xrootd_collector_transfers_total{server="..."}   (whole-file closes)
-xrootd_collector_accesses_total{server="..."}    (partial-access closes)
+xrootd_collector_io_total{server="...",operation="open|close|read|readv|write"}
 xrootd_collector_read_bytes_total{server="..."}
 xrootd_collector_write_bytes_total{server="..."}
 xrootd_collector_vo_transfers_total{server="...",vo="..."}

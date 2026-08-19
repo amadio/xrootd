@@ -34,7 +34,7 @@ process-level \fBresource\fR object and an event-level \fBattributes\fR object
 keyed by dotted semantic-convention names (with XRootD/WLCG-specific fields under
 the \fBxrootd.*\fR/\fBwlcg.*\fR vendor namespaces; for example
 \fBresource.server.address\fR, \fBattributes.client.address\fR,
-\fBattributes.wlcg.vo\fR, \fBattributes.xrootd.transfer.read_bytes\fR).
+\fBattributes.wlcg.vo\fR, \fBattributes.xrootd.read_bytes\fR).
 A store that expands dotted field names (such as OpenSearch) indexes each key as
 a nested field, and empty or zero-valued fields are omitted. The OpenSearch
 \fB_bulk\fR and OTLP sinks serialize this one canonical document, so they carry
@@ -44,18 +44,22 @@ the per-stream wire-field-to-JSON mapping tables. There is no
 top-level \fBtype\fR field: the record kind is the top-level \fBeventName\fR
 (the OTLP LogRecord EventName field), duplicated as
 \fBattributes["event.name"]\fR for stores that only query attributes (such as
-Loki structured metadata), and the whole-file/partial
-distinction is \fBattributes["xrootd.transfer.kind"]\fR.
+Loki structured metadata).
 .P
-Each close is a whole-file \fItransfer\fR or a partial \fIaccess\fR
-(the \fBxrootd.transfer.kind\fR value), which share the same schema. A close is a
-\fItransfer\fR when a read covered the whole file
-(\fBxrootd.transfer.read_bytes\fR + \fBxrootd.transfer.readv_bytes\fR reaches
-\fBfile.size\fR, the size captured at open) or a write completed cleanly;
-otherwise — a short read, a read with no known open size, or a write cut short
-by a forced close or an error — it is an \fIaccess\fR. This separates whole-file
-copies from finer-grained remote data access; the two are also counted in
-\fBxrootd_collector_transfers_total\fR and \fBxrootd_collector_accesses_total\fR.
+The event names the operation. A file close is \fBxrootd.read\fR or
+\fBxrootd.write\fR depending on whether it carried write bytes; an operation
+that failed without producing a close is \fBxrootd.\fIcategory\fR
+(\fBxrootd.open\fR, \fBxrootd.auth\fR and so on); a redirect is
+\fBxrootd.redirect\fR. Per-I/O trace records (\fB--traces\fR) are named
+\fBxrootd.io.*\fR, keeping the much higher volume detail stream apart from the
+per-file documents. Whether a close moved the file in its entirety is left to
+the consumer, which has \fBfile.size\fR and the byte counters
+(\fBxrootd.read_bytes\fR, \fBxrootd.readv_bytes\fR, \fBxrootd.write_bytes\fR)
+in the same document; the collector reports what the server measured and derives
+nothing from it. Operations are counted in
+\fBxrootd_collector_io_total{server,operation}\fR, whose \fBoperation\fR label
+is \fBopen\fR, \fBclose\fR, or -- when the server config includes the \fBops\fR
+block -- \fBread\fR, \fBreadv\fR and \fBwrite\fR per request.
 .P
 A transfer document also carries the terminal status of the operation in
 \fBxrootd.operation.state\fR: a normal close reports \fBSuccessful\fR, while a
@@ -76,10 +80,10 @@ With \fB--sessions\fR, a \fIsession\fR document
 disconnecting client's whole session (off by default; when disabled no session
 rollup is kept and no session document is emitted):
 every file close that named the user is folded into running totals
-(\fBxrootd.session.files\fR, \fB.transfers\fR, \fB.accesses\fR,
-\fB.read_bytes\fR, \fB.write_bytes\fR, \fB.errors\fR, and
+(\fBxrootd.session.files\fR, \fB.reads\fR, \fB.writes\fR,
+\fB.read_bytes\fR, \fB.readv_bytes\fR, \fB.write_bytes\fR, \fB.errors\fR, and
 start/end/duration) plus a capped \fBxrootd.session.recent_files\fR list (each
-with \fBfile.path\fR, \fBxrootd.transfer.kind\fR, \fBxrootd.operation.name\fR, and
+with \fBfile.path\fR, \fBxrootd.operation.name\fR, and
 \fBxrootd.bytes\fR). The totals cover every closed file; only the recent-file
 list is bounded, so a long session that opens many files stays memory-bounded.
 .P
@@ -529,7 +533,7 @@ Condition keys are \fBuser\fR, \fBuserid\fR, \fBrole\fR, \fBvo\fR, \fBgroups\fR,
 \fBauthprot\fR, \fBproto\fR, \fBscheme\fR, \fBclient\fR, \fBclientip\fR,
 \fBclientsite\fR, \fBapp\fR, \fBappver\fR, \fBappinfo\fR, \fBappid\fR,
 \fBexperiment\fR, \fBactivity\fR, \fBpath\fR, \fBdir\fR, \fBfilename\fR,
-\fBext\fR, \fBdataset\fR, \fBevent\fR, \fBop\fR, \fBstate\fR, \fBkind\fR,
+\fBext\fR, \fBdataset\fR, \fBevent\fR, \fBop\fR, \fBstate\fR,
 \fBerror\fR, \fBprovider\fR, \fBtarget\fR, \fBsession\fR, \fBseverity\fR,
 \fBserver\fR, \fBsite\fR, \fBinstance\fR, \fBprogram\fR and \fBversion\fR, or a
 raw \fBattributes.\fIkey\fR / \fBresource.\fIkey\fR path for any other field.

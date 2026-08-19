@@ -1837,14 +1837,25 @@ curl -ku admin:'<StrongAdminPassword>' -X PUT \
   --data-binary @opensearch-template.json
 ```
 
-> **Upgrading an existing deployment.** `xrootd.transfer.duration` and
-> `xrootd.session.duration` are mapped `double` (they were `long`, but both
-> carry fractional seconds since record times are interpolated within a
-> reporting window), and `xrootd.session.start_time_source` is a new `keyword`.
+> **Upgrading an existing deployment.** The document schema changed. Event
+> names now name the operation (`xrootd.read`/`xrootd.write` for a file close,
+> `xrootd.<category>` for a failed operation, `xrootd.redirect`, and
+> `xrootd.io.*` for the trace stream) instead of a blanket `xrootd.transfer`;
+> the `xrootd.transfer.*` attributes lost that level (`xrootd.read_bytes` and
+> so on, with the two timing fields under `xrootd.operation.*`);
+> `xrootd.transfer.kind` is gone, since `file.size` and the byte counters let a
+> consumer apply whatever coverage rule it means; and the session rollup counts
+> by direction (`xrootd.session.reads`/`.writes`, with `readv_bytes` split out).
+> `xrootd.operation.duration` and `xrootd.session.duration` are mapped `double`
+> (they carry fractional seconds, since record times are interpolated within a
+> reporting window), and `xrootd.session.start_time_source` is a `keyword`.
 > A mapping change applies only to **newly created** backing indices: re-apply
 > the template, then roll the data stream over, or the existing index keeps
-> truncating sub-second durations to whole seconds and leaves the new field
-> unindexed.
+> truncating sub-second durations to whole seconds and leaves the new fields
+> unindexed. Saved searches and dashboards that keyed on
+> `event.name:"xrootd.transfer"` should select on the presence of
+> `attributes.xrootd.operation.state` instead: it is set by exactly the close,
+> error and redirect documents.
 >
 > ```bash
 > curl -ku admin:'<StrongAdminPassword>' -X POST \
@@ -2257,7 +2268,7 @@ Follow the transfer through the pipeline:
    `fstat` interval — 60 s with the section 2.1 config).
 3. **Documents**: Grafana → Explore → Loki,
    `{service_name="xrootd"} |= "mon-smoke-test"` — one
-   `xrootd.transfer` document with the file path, client, byte counts and
+   `xrootd.read` document with the file path, client, byte counts and
    `wlcg.site` (OpenSearch path: Lucene
    `attributes.file.path:*mon-smoke-test*` on `xrootd-transfers*`).
 4. **Traces** (with `spans = true`): Tempo → Search — a file-operation span

@@ -710,9 +710,8 @@ TEST_F(Transfer, AggregatesIntoMetricsRegistry)
   XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
   EXPECT_NE(out.find("xrootd_collector_io_total{site=\"unknown\",server=\"10.0.0.1\",operation=\"close\"} 1"),
             std::string::npos);
-  EXPECT_NE(out.find("xrootd_collector_read_bytes_total{site=\"unknown\",server=\"10.0.0.1\"} 10485760"),
-            std::string::npos);
-  EXPECT_NE(out.find("# TYPE xrootd_collector_transfer_duration_seconds histogram"),
+  EXPECT_NE(out.find("xrootd_collector_io_bytes_total{site=\"unknown\","
+                     "server=\"10.0.0.1\",operation=\"read\"} 10485760"),
             std::string::npos);
 }
 
@@ -961,7 +960,8 @@ TEST(XrdMonCollect, FilterDoesNotAffectMetrics)
   XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
   EXPECT_NE(out.find("xrootd_collector_io_total{site=\"unknown\",server=\"10.0.0.1\",operation=\"close\"} 1"),
             std::string::npos);
-  EXPECT_NE(out.find("xrootd_collector_read_bytes_total{site=\"unknown\",server=\"10.0.0.1\"} 10485760"),
+  EXPECT_NE(out.find("xrootd_collector_io_bytes_total{site=\"unknown\","
+                     "server=\"10.0.0.1\",operation=\"read\"} 10485760"),
             std::string::npos);
 }
 
@@ -1606,16 +1606,36 @@ TEST_F(Transfer, OperationsAggregateIntoIoTotal)
 
   std::string out;
   XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  const std::string pfx = "xrootd_collector_io_total{site=\"unknown\",server=\"10.0.0.1\"";
+  const std::string id  = "{site=\"unknown\",server=\"10.0.0.1\"";
+  const std::string pfx = "xrootd_collector_io_total" + id;
   EXPECT_NE(out.find(pfx + ",operation=\"open\"} 1"),  std::string::npos) << out;
   EXPECT_NE(out.find(pfx + ",operation=\"close\"} 1"), std::string::npos) << out;
   EXPECT_NE(out.find(pfx + ",operation=\"read\"} 3"),  std::string::npos) << out;
   EXPECT_NE(out.find(pfx + ",operation=\"readv\"} 2"), std::string::npos) << out;
   // A write count of zero is not a series: nothing was written.
-  EXPECT_EQ(out.find(",operation=\"write\""), std::string::npos) << out;
-  // The two counters the classification used to feed are gone for good.
-  EXPECT_EQ(out.find("xrootd_collector_transfers_total"), std::string::npos) << out;
-  EXPECT_EQ(out.find("xrootd_collector_accesses_total"),  std::string::npos) << out;
+  EXPECT_EQ(out.find("xrootd_collector_io_total" + id + ",operation=\"write\""),
+            std::string::npos) << out;
+
+  // Volumes split the same three ways, and come from the xfr block rather than
+  // the ops one -- so readv bytes are their own series, not folded into read.
+  const std::string bpx = "xrootd_collector_io_bytes_total" + id;
+  EXPECT_NE(out.find(bpx + ",operation=\"read\"} 4096"),  std::string::npos) << out;
+  EXPECT_NE(out.find(bpx + ",operation=\"readv\"} 8192"), std::string::npos) << out;
+  EXPECT_EQ(out.find(bpx + ",operation=\"write\""), std::string::npos) << out;
+
+  // Metrics retired with the whole-file classification and with the per-close
+  // aggregates, none of which described a whole-file transfer.
+  for (const char* gone : {"xrootd_collector_transfers_total",
+                           "xrootd_collector_accesses_total",
+                           "xrootd_collector_read_bytes_total",
+                           "xrootd_collector_write_bytes_total",
+                           "xrootd_collector_vo_transfers_total",
+                           "xrootd_collector_locality_transfers_total",
+                           "xrootd_collector_transfer_size_bytes",
+                           "xrootd_collector_transfer_duration_seconds",
+                           "xrootd_collector_active_transfers",
+                           "xrootd_collector_failed_operations_total"})
+      EXPECT_EQ(out.find(gone), std::string::npos) << gone << "\n" << out;
 }
 
 // Feed a '=' server-ident record so srv.ident.host is populated for the
@@ -2111,7 +2131,7 @@ TEST(XrdMonCollect, FrmStageAndPurge)
             std::string::npos) << out;
 }
 
-TEST(XrdMonCollect, SessionDiscAndActiveGauge)
+TEST(XrdMonCollect, SessionDiscAndFilesOpenGauge)
 {
   XrdMetrics::Collector collector("xrootd");
   std::vector<std::string> docs;
@@ -2156,7 +2176,7 @@ TEST(XrdMonCollect, SessionDiscAndActiveGauge)
   // The file was opened but its close was never seen; the server reports a
   // session's closes before its disconnect, so the disconnect sweeps the
   // leaked open out of the table instead of inflating the gauge forever.
-  EXPECT_NE(out.find("xrootd_collector_active_transfers{site=\"unknown\",server=\"h\"} 0"),
+  EXPECT_NE(out.find("xrootd_collector_files_open{site=\"unknown\",server=\"h\"} 0"),
             std::string::npos) << out;
   EXPECT_NE(out.find("xrootd_collector_stale_opens_total{site=\"unknown\",server=\"h\"} 1"),
             std::string::npos) << out;
@@ -2644,7 +2664,7 @@ TEST(XrdMonCollect, FileTTLExpiresLeakedOpens)
   EXPECT_EQ(dec.GetStats().staleOpens, 1u);
 
   std::string out; XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
-  EXPECT_NE(out.find("xrootd_collector_active_transfers{site=\"unknown\",server=\"h\"} 0"),
+  EXPECT_NE(out.find("xrootd_collector_files_open{site=\"unknown\",server=\"h\"} 0"),
             std::string::npos) << out;
   EXPECT_NE(out.find("xrootd_collector_stale_opens_total{site=\"unknown\",server=\"h\"} 1"),
             std::string::npos) << out;
@@ -2669,10 +2689,10 @@ TEST(XrdMonCollect, FileTTLSkipsServersWithoutXfr)
   EXPECT_EQ(dec.GetStats().staleOpens, 0u);
 }
 
-// Reaping the last incarnation of a sender parks its active_transfers gauge
+// Reaping the last incarnation of a sender parks its files_open gauge
 // at zero, so a restarted (or retired) server does not strand a nonzero
 // series in the metrics output forever.
-TEST(XrdMonCollect, ReapZeroesActiveTransfersGauge)
+TEST(XrdMonCollect, ReapZeroesFilesOpenGauge)
 {
   XrdMetrics::Collector collector("xrootd");
   XrdMonDecode dec([](const std::string&){}, nullptr,
@@ -2689,7 +2709,7 @@ TEST(XrdMonCollect, ReapZeroesActiveTransfersGauge)
 
   {std::string out; XrdMetrics::PrometheusTextSerializer ser(out);
    collector.serialize(ser);
-   EXPECT_NE(out.find("xrootd_collector_active_transfers{site=\"unknown\",server=\"h\"} 1"),
+   EXPECT_NE(out.find("xrootd_collector_files_open{site=\"unknown\",server=\"h\"} 1"),
              std::string::npos) << out;
   }
 
@@ -2698,7 +2718,7 @@ TEST(XrdMonCollect, ReapZeroesActiveTransfersGauge)
 
   {std::string out; XrdMetrics::PrometheusTextSerializer ser(out);
    collector.serialize(ser);
-   EXPECT_NE(out.find("xrootd_collector_active_transfers{site=\"unknown\",server=\"h\"} 0"),
+   EXPECT_NE(out.find("xrootd_collector_files_open{site=\"unknown\",server=\"h\"} 0"),
              std::string::npos) << out;
   }
 }

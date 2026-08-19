@@ -194,11 +194,15 @@ bool authConveysVO(const std::string& m)
        || m == "https" || m == "http";
 }
 
-// Help text of the io_total family, shared by its call sites: XrdMetrics freezes
+// Help text of the io families, shared by their call sites: XrdMetrics freezes
 // a family's help and label schema at first use, so they must not drift.
 constexpr const char* kIoTotalHelp =
    "file operations reported by the servers (the read/readv/write counts come "
    "from the fstat \"ops\" block, so they only move when it is configured)";
+
+constexpr const char* kIoBytesHelp =
+   "bytes moved by the servers, by direction (from the fstat \"xfr\" block, so "
+   "unlike the read/readv/write counts of io_total these need no \"ops\")";
 
 // Cap on the per-session recent-file list (UserInfo::sRecent). The running
 // session totals always cover every closed file; only this most-recent detail
@@ -1525,8 +1529,8 @@ void XrdMonDecode::ReapServers(time_t now)
                              "(close record lost)",
                              {{"site", s.mtrSite}, {"server", s.mtrServer}})
                        += n;
-               metrics->gaugeSeries("active_transfers",
-                             "files currently open (transfers in progress)",
+               metrics->gaugeSeries("files_open",
+                             "files currently open on the server",
                              {{"site", s.mtrSite}, {"server", s.mtrServer}})
                        = (double)s.files.size();
               }
@@ -1564,8 +1568,8 @@ void XrdMonDecode::ReapServers(time_t now)
            // Read the labels off `s` while it is still alive — it is erased
            // just below.
            if (metrics)
-              metrics->gaugeSeries("active_transfers",
-                            "files currently open (transfers in progress)",
+              metrics->gaugeSeries("files_open",
+                            "files currently open on the server",
                             {{"site", s.mtrSite}, {"server", s.mtrServer}})
                       = 0.0;
           }
@@ -1994,8 +1998,8 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
 // and closes processed in this packet.
 //
    if (metrics)
-      metrics->gaugeSeries("active_transfers",
-                     "files currently open (transfers in progress)",
+      metrics->gaugeSeries("files_open",
+                     "files currently open on the server",
                      {{"site", srv.mtrSite}, {"server", srv.mtrServer}}) = (double)srv.files.size();
 }
 
@@ -2163,16 +2167,14 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
 
    double durSecs = -1;
    int32_t rdOps = 0, rvOps = 0, wrOps = 0;   // set from the optional ops block
-   std::string vo;
-   bool     haveOpen = false;  // matched the open record (so fsz is known)
-   int64_t  openFsz  = 0;      // file size captured at open
+   bool     haveOpen = false;  // matched the open record
    uint32_t openUser = 0;      // user dictid from the open (for session rollup)
    std::string openLfn;        // lfn from the open (for the session rollup)
    double   openTBeg = 0;      // open time (for the file-operation span start)
 
-// Terminal status is needed up front: it drives the log severity and the
-// whole-file-vs-access decision. "forced" (disconnect-driven) is not a failure
-// on its own; only a trailing XrdXrootdMonStatERR (hasERR) is.
+// Terminal status is needed up front: it drives the log severity. "forced"
+// (disconnect-driven) is not a failure on its own; only a trailing
+// XrdXrootdMonStatERR (hasERR) is.
 //
    const bool forced = (recFlag & XrdXrootdMonFileHdr::forced) != 0;
    const bool hasErr = (recFlag & XrdXrootdMonFileHdr::hasERR) != 0;
@@ -2206,7 +2208,6 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
       {const OpenFile& of = fit->second;
        a["xrootd.open_seen"] = true;
        haveOpen = true;
-       openFsz  = of.fsz;
        openUser = of.user;
        openLfn  = of.lfn;
        openTBeg = of.tOpen;
@@ -2222,7 +2223,9 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
            durSecs = std::round(durSecs * 1000.0) / 1000.0;
            a["xrootd.operation.duration"] = durSecs;}
 
-       vo = otelIdentity(a, srv, of.user);
+       // Fills the identity attributes; its VO return value has no metric
+       // consumer any more (see the commit that dropped vo_transfers_total).
+       otelIdentity(a, srv, of.user);
 
        // LAN/WAN heuristic: tag the transfer local when the client and the
        // reporting server share a registered domain. Only decidable when both
@@ -2334,57 +2337,39 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
       {std::string cat = otelError(a, rec + errOff, recSize - errOff);
        stats.failed++;
        if (metrics)
-          metrics->counterSeries("failed_operations_total",
-                       "operations that concluded unsuccessfully",
+          metrics->counterSeries("errors_total",
+                       "file operations that concluded unsuccessfully",
                        {{"site", srv.mtrSite}, {"server", srv.mtrServer},
                         {"category", cat.empty() ? "unknown" : cat}})
                   += 1;
       }
    else a["xrootd.operation.state"] = "Successful";
 
-// Aggregate into bounded-cardinality Prometheus series (label only by the
-// reporting server). Per-transfer detail stays in the document sink; here we
-// keep just totals and distributions suitable for time-series storage.
+// Aggregate into bounded-cardinality Prometheus series. Per-file detail stays
+// in the document sink; here we keep the counts and volumes a time-series
+// store can hold, split the same three ways the document reports them.
 //
    if (metrics)
-      {std::vector<XrdMetrics::ConstLabel> sl = {{"site", srv.mtrSite}, {"server", srv.mtrServer}};
-       // One series counts the operations this close reports, by kind. The
-       // close itself always ticks; the request counts arrive only with the
-       // optional ops block. Negative would mean a corrupt record, and the
-       // counter is unsigned, so guard rather than wrap.
-       auto ioOps = [&](const char* op, int64_t n)
-                      {if (n > 0)
-                          metrics->counterSeries("io_total", kIoTotalHelp,
-                                   {{"site", srv.mtrSite}, {"server", srv.mtrServer}, {"operation", op}})
-                                  += (uint64_t)n;
+      {const std::vector<XrdMetrics::ConstLabel> id =
+          {{"site", srv.mtrSite}, {"server", srv.mtrServer}};
+       auto perOp = [&](const char* name, const char* help, const char* op,
+                        int64_t n)
+                      {if (n <= 0) return;      // negative means a corrupt
+                       auto l = id;             // record, and these are unsigned
+                       l.push_back({"operation", op});
+                       metrics->counterSeries(name, help, l) += (uint64_t)n;
                       };
-       ioOps("close", 1);
-       ioOps("read",  rdOps);
-       ioOps("readv", rvOps);
-       ioOps("write", wrOps);
-       metrics->counterSeries("read_bytes_total",
-                        "bytes read (read+readv)", sl) += rdBytes + rvBytes;
-       metrics->counterSeries("write_bytes_total",
-                        "bytes written", sl) += wrBytes;
-       if (!vo.empty())
-          metrics->counterSeries("vo_transfers_total",
-                        "completed transfers per VO",
-                        {{"site", srv.mtrSite}, {"server", srv.mtrServer}, {"vo", vo}}) += 1;
-       if (a.contains("xrootd.is_local"))
-          metrics->counterSeries("locality_transfers_total",
-                        "completed transfers by client/server locality",
-                        {{"site", srv.mtrSite}, {"server", srv.mtrServer}, {"locality",
-                         a["xrootd.is_local"].get<bool>() ? "local"
-                                                          : "remote"}})
-                  += 1;
-       metrics->histogramSeries("transfer_size_bytes",
-                        "bytes moved per transfer",
-                        {1e3,1e4,1e5,1e6,1e7,1e8,1e9,1e10,1e11})
-               .observe((double)(rdBytes + rvBytes + wrBytes));
-       if (durSecs >= 0)
-          metrics->histogramSeries("transfer_duration_seconds",
-                        "transfer wall-clock duration",
-                        {1,5,15,60,300,1800,7200}).observe(durSecs);
+       // Counts and volumes are not equally available. The bytes come from the
+       // fstat XFR block and are always there; the request counts come from
+       // the optional OPS block and only move when the server config includes
+       // "ops". open and close always tick.
+       perOp("io_total", kIoTotalHelp, "close", 1);
+       perOp("io_total", kIoTotalHelp, "read",  rdOps);
+       perOp("io_total", kIoTotalHelp, "readv", rvOps);
+       perOp("io_total", kIoTotalHelp, "write", wrOps);
+       perOp("io_bytes_total", kIoBytesHelp, "read",  rdBytes);
+       perOp("io_bytes_total", kIoBytesHelp, "readv", rvBytes);
+       perOp("io_bytes_total", kIoBytesHelp, "write", wrBytes);
       }
 
    stats.docs++;
@@ -2409,7 +2394,7 @@ std::string XrdMonDecode::otelError(json& a, const unsigned char* err,
 // The category byte names the operation that failed (open/read/write/close/
 // auth): it becomes xrootd.operation.name unless the record already carries
 // one (a failed close keeps its read/write direction; the category still
-// reaches the failed_operations_total{category} metric via the return value).
+// reaches the errors_total{category} metric via the return value).
 // The server's verbatim reason travels as error.type.
 //
    if (errLen < 8) return "";
@@ -2479,8 +2464,8 @@ void XrdMonDecode::EmitError(const std::string& src, int32_t stod, Server& srv,
    a["session.id"] = j["traceId"];   // semconv: queryable session correlator
 
    if (metrics)
-      metrics->counterSeries("failed_operations_total",
-                   "operations that concluded unsuccessfully",
+      metrics->counterSeries("errors_total",
+                   "file operations that concluded unsuccessfully",
                    {{"site", srv.mtrSite}, {"server", srv.mtrServer},
                     {"category", cat.empty() ? "unknown" : cat}}) += 1;
 

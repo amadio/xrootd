@@ -148,7 +148,6 @@ XrdMonFilter::Shortcuts()
       {"event",      "attributes.event.name"},
       {"op",         "attributes.xrootd.operation.name"},
       {"state",      "attributes.xrootd.operation.state"},
-      {"kind",       "attributes.xrootd.transfer.kind"},
       {"error",      "attributes.error.type"},
       {"provider",   "attributes.xrootd.gstream.provider"},
       {"target",     "attributes.xrootd.redirect.target.address"},

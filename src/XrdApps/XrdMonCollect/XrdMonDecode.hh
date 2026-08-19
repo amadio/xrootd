@@ -304,13 +304,13 @@ struct UserInfo
       std::string lfn;
       int64_t     bytes = 0;     // total bytes moved (read+readv+write)
       bool        write = false; // a write (vs a read)
-      bool        whole = false; // a whole-file transfer (vs partial access)
    };
    uint32_t sFiles      = 0;  // closed files folded into this session
-   uint32_t sTransfers  = 0;  // of which whole-file transfers
-   uint32_t sAccesses   = 0;  // of which partial accesses
+   uint32_t sReads      = 0;  // of which read-only
+   uint32_t sWrites     = 0;  // of which carrying write bytes
    uint32_t sErrors     = 0;  // closes that ended in error
-   int64_t  sReadBytes  = 0;  // read + readv bytes across the session
+   int64_t  sReadBytes  = 0;  // read() bytes across the session
+   int64_t  sReadvBytes = 0;  // readv() bytes across the session
    int64_t  sWriteBytes = 0;  // write bytes across the session
    int32_t  sLogin      = 0;  // exact login time in the server's own clock,
                               // from the trace stream's disconnect record
@@ -342,10 +342,11 @@ struct UserInfo
         {if (p.connT > 0 && (connT <= 0 || p.connT < connT)) connT = p.connT;
          sLogin      = p.sLogin;
          sFiles      = p.sFiles;
-         sTransfers  = p.sTransfers;
-         sAccesses   = p.sAccesses;
+         sReads      = p.sReads;
+         sWrites     = p.sWrites;
          sErrors     = p.sErrors;
          sReadBytes  = p.sReadBytes;
+         sReadvBytes = p.sReadvBytes;
          sWriteBytes = p.sWriteBytes;
          sFirst      = p.sFirst;
          sLast       = p.sLast;
@@ -593,8 +594,8 @@ std::string otelIdentity(nlohmann::json& attrs, const Server& srv,
 //! capped recent-file list), keeping the entry's LRU weight in step. No-op when
 //! the user dictid is unknown (e.g. user monitoring off or the 'u' record lost).
 void     foldSession(Server& srv, uint32_t userID, const std::string& lfn,
-                     int64_t bytes, bool write, bool whole, bool error,
-                     int32_t tWin);
+                     int64_t rdBytes, int64_t rvBytes, int64_t wrBytes,
+                     bool error, int32_t tWin);
 //! Record the earliest server-reported activity seen for a session, from any
 //! record that names its user dictid. No-op when the dictid is unknown.
 void     NoteActive(Server& srv, uint32_t userID, double tRec);

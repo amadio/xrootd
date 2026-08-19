@@ -37,8 +37,8 @@ TEST(XrdMonOtlp, LogRecordEncoding)
    doc["spanId"]                 = "3ab4c1d2e3f40516";
    doc["attributes"]["event.name"]                 = "xrootd.read";
    doc["attributes"]["file.path"]                  = "/store/data/file.root";
-   doc["attributes"]["xrootd.transfer.read_bytes"] = 10485760;
-   doc["attributes"]["xrootd.transfer.is_local"]   = true;
+   doc["attributes"]["xrootd.read_bytes"] = 10485760;
+   doc["attributes"]["xrootd.is_local"]   = true;
 
    XrdMonOtlpBatch b;
    b.add(doc);
@@ -74,10 +74,10 @@ TEST(XrdMonOtlp, LogRecordEncoding)
    const json* fp = kv(la, "file.path");
    ASSERT_NE(fp, nullptr);
    EXPECT_EQ((*fp)["value"]["stringValue"], "/store/data/file.root");
-   const json* rb = kv(la, "xrootd.transfer.read_bytes");
+   const json* rb = kv(la, "xrootd.read_bytes");
    ASSERT_NE(rb, nullptr);
    EXPECT_EQ((*rb)["value"]["intValue"], "10485760");
-   const json* il = kv(la, "xrootd.transfer.is_local");
+   const json* il = kv(la, "xrootd.is_local");
    ASSERT_NE(il, nullptr);
    EXPECT_EQ((*il)["value"]["boolValue"], true);
 }

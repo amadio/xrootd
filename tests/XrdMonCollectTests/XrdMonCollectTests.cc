@@ -3151,15 +3151,45 @@ TEST(XrdMonCollect, ServerIdentDecoded)
   ASSERT_EQ(docs.size(), 1u);
   json j = json::parse(docs[0]);
   EXPECT_EQ(j["attributes"]["event.name"], "xrootd.server_ident");
-  EXPECT_EQ(j["resource"]["xrootd.server.site"], "T1_DE_KIT");
+  // all.sitename is the storage cluster, and the namespace the other two
+  // service attributes are unique within.
+  EXPECT_EQ(j["resource"]["service.namespace"], "T1_DE_KIT");
+  EXPECT_EQ(j["resource"]["service.name"], "manager");
+  // Unique per running daemon, unlike &inst= which is one value for a whole
+  // fleet of storage nodes.
+  EXPECT_EQ(j["resource"]["service.instance.id"], "srv.example.org:1094");
   EXPECT_EQ(j["resource"]["server.address"], "srv.example.org");
-  EXPECT_EQ(j["resource"]["service.instance.id"], "manager");
   EXPECT_FALSE(j["resource"].contains("host.name"));
   EXPECT_FALSE(j["resource"].contains("xrootd.server.instance"));
-  EXPECT_EQ(j["resource"]["xrootd.server.program"], "xrootd");
+  EXPECT_FALSE(j["resource"].contains("xrootd.server.site"));
+  EXPECT_FALSE(j["resource"].contains("xrootd.server.program"));
+  EXPECT_EQ(j["resource"]["process.executable.name"], "xrootd");
   EXPECT_EQ(j["resource"]["service.version"], "v6.1.0");
   EXPECT_EQ(j["resource"]["server.port"], 1094);
   EXPECT_EQ(dec.GetStats().mapIdnt, 2u);
+}
+
+// An unnamed daemon -- no -n, so the ident carries xrootd's "anon" filler --
+// must not report "anon" as its service name: every unnamed daemon in the
+// world would share one. semconv's fallback is the program name, which also
+// keeps such a server reporting service.name=xrootd exactly as before.
+TEST(XrdMonCollect, AnonInstanceFallsBackToProgram)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+
+  std::string info = "=/xrootd.4321:99@srv.example.org"
+                     "\n&site=T1_DE_KIT&port=1094&inst=anon&pgm=xrootd&ver=v6";
+  W body; body.u32(0);
+  std::vector<unsigned char> pl = body.b;
+  pl.insert(pl.end(), info.begin(), info.end());
+  auto pkt = packet('=', kStod, pl);
+  dec.Process("srv:9930", (const char*)pkt.data(), pkt.size());
+
+  ASSERT_EQ(docs.size(), 1u);
+  json j = json::parse(docs[0]);
+  EXPECT_EQ(j["resource"]["service.name"], "xrootd");
+  EXPECT_EQ(j["resource"]["service.instance.id"], "srv.example.org:1094");
 }
 
 TEST(XrdMonCollect, GStreamForwarded)

@@ -182,6 +182,17 @@ bool clusterKnown(const std::string& s)
 //
 constexpr const char* kClusterUnknown = "unknown";
 
+// Whether a '=' ident's &inst= names the daemon. "anon" is not a name: xrootd
+// treats it and "unset" as the same value in both directions -- `-n anon`
+// clears the instance name (XrdConfig.cc), and an unset one is filled back in
+// as "anon" (XrdOucUtils::InstName). Reporting it as a service name would make
+// every unnamed daemon in the world share one.
+//
+bool instKnown(const std::string& s)
+{
+   return !s.empty() && s != "anon";
+}
+
 // Whether an authentication method can put a genuine VO into the auth CGI's
 // &o= (XrdSecEntity.vorg): gsi fills it from a VOMS attribute certificate,
 // sss unpacks it from the trusted key-holder's registered entity, and the
@@ -625,22 +636,44 @@ void XrdMonDecode::otelResource(json& j, const std::string& src, int32_t stod,
    json& r = j["resource"];
 
    // server.address is the single canonical server-name field (a separate
-   // host.name would always duplicate it), and service.instance.id the single
-   // instance field. ServerName() is shared with the Prometheus `server` label
-   // so both name a server the same way.
+   // host.name would always duplicate it). ServerName() is shared with the
+   // Prometheus `server` label so both name a server the same way.
    //
    std::string name = ServerName(srv, src);
 
-   r["service.name"]        = "xrootd";
-   r["service.instance.id"] = srv.ident.inst.empty() ? name : srv.ident.inst;
+   // The three service.* attributes carry the whole of the server's identity,
+   // as the OTel service conventions define them:
+   //
+   //   service.namespace  all.sitename -- the storage cluster, the group the
+   //                      other two are unique within (also the `cluster`
+   //                      metric label, byte for byte).
+   //   service.name       the daemon's -n name ("fst", "mgm"), falling back to
+   //                      the program name, which is what semconv prescribes
+   //                      when a service has not been named.
+   //   service.instance.id  <address>:<port>. It MUST be unique per instance
+   //                      of a (namespace, name) pair, so it cannot be &inst=:
+   //                      that is "fst" on all hundred FSTs of an instance.
+   //                      Address and port are unique among daemons running at
+   //                      once and stable across restarts, which semconv
+   //                      prefers. The f-stream sID is unique too, but stays 0
+   //                      until an f-stream record arrives, so it cannot
+   //                      identify an ident-only document; it keeps its own
+   //                      vendor key below.
+   //
+   r["service.name"]        = instKnown(srv.ident.inst) ? srv.ident.inst
+                            : srv.ident.pgm.empty()     ? "xrootd"
+                                                        : srv.ident.pgm;
+   r["service.instance.id"] = srv.ident.port > 0
+                            ? name + ":" + std::to_string(srv.ident.port)
+                            : name;
    r["server.address"]      = name;
    if (srv.ident.port > 0)       r["server.port"]            = srv.ident.port;
    if (!srv.ident.ver.empty())   r["service.version"]        = srv.ident.ver;
-   // Documents omit an unknown site rather than writing kClusterUnknown: absence
-   // is the natural "not set" in a document, while a metric label has no such
-   // spelling and uses the literal.
-   if (clusterKnown(srv.ident.site)) r["xrootd.server.site"]    = srv.ident.site;
-   if (!srv.ident.pgm.empty())   r["xrootd.server.program"]  = srv.ident.pgm;
+   // Documents omit an unknown cluster rather than writing kClusterUnknown:
+   // absence is the natural "not set" in a document, while a metric label has
+   // no such spelling and uses the literal.
+   if (clusterKnown(srv.ident.site)) r["service.namespace"]  = srv.ident.site;
+   if (!srv.ident.pgm.empty())   r["process.executable.name"] = srv.ident.pgm;
    if (srv.sID)                  r["xrootd.server.id"]       = srv.sID;
    r["xrootd.server.incarnation"] = stod;             // incarnation key
 }

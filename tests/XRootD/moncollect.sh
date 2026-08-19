@@ -31,6 +31,7 @@ APP_DROPPED=e2e-dropped
 # exports OTLP logs/traces here, and the test asserts they arrive. Optional so
 # the e2e still runs on hosts without python3.
 OTLP_PORT=8097
+METRICS_PORT=8098
 OTLP_OUT="${PWD}/${NAME}/otlp.captured"
 OTLP_PID="${PWD}/${NAME}/otlp.pid"
 OTLP_CACHE="${PWD}/${NAME}/otlp-cache"
@@ -173,6 +174,7 @@ function setup_moncollect() {
 	# session start/end/duration are reported.
 	xrdmoncollect -c "${COLLECTOR_CFG}" -p "${COLLECTOR_PORT}" -o "${COLLECTOR_OUT}" \
 	              --flush-secs 1 --flush-count 1 --traces --spans --sessions \
+	              --metrics-port "${METRICS_PORT}" \
 	              ${OTLP_ARGS} \
 	              --dataset '/(test-[A-Za-z0-9]+)/' \
 	              > "${COLLECTOR_LOG}" 2>&1 < /dev/null &
@@ -452,6 +454,48 @@ function test_moncollect() {
 		"post-drop marker document" \
 		"XRD_APPNAME=${APP_TAGGED} xrdcp -f '${HOST}/${TMPDIR}/marker.ref' '${TMPDIR}/marker.dat'"
 	assert_failure grep -q "\"user_agent.name\":\"${APP_DROPPED}\"" "${COLLECTOR_OUT}"
+
+	# The Prometheus exposition, which nothing else in the suite covers. The
+	# server config sets "all.sitename moncollect" and "ident 2s", so by now
+	# the identity has landed and the labels carry the real site and host
+	# rather than the "unknown"/numeric-address pair a server gets before it.
+	if command -v curl >/dev/null 2>&1; then
+		metrics="${PWD}/${NAME}/metrics.txt"
+		assert curl -sf "http://localhost:${METRICS_PORT}/metrics" -o "${metrics}"
+
+		echo "collector metrics:"
+		grep -E '^xrootd_collector_(io_|app_io_|errors_|files_open|sessions_open|servers|server_info|documents_)' \
+			"${metrics}" || true
+
+		assert grep -Eq '^xrootd_collector_io_total\{site="moncollect",server="[^"]+",operation="close"\} [1-9]' \
+			"${metrics}"
+		assert grep -Eq '^xrootd_collector_io_total\{site="moncollect",server="[^"]+",operation="open"\} [1-9]' \
+			"${metrics}"
+		# "ops" is in the server's monitor directive, so the per-request counts
+		# are populated too -- without it only open/close would move.
+		assert grep -Eq '^xrootd_collector_io_total\{site="moncollect",server="[^"]+",operation="read"\} [1-9]' \
+			"${metrics}"
+		assert grep -Eq '^xrootd_collector_io_bytes_total\{site="moncollect",server="[^"]+",operation="read"\} [1-9]' \
+			"${metrics}"
+		assert grep -Eq '^xrootd_collector_servers\{site="moncollect"\} 1' "${metrics}"
+		assert grep -Eq '^xrootd_collector_server_info\{site="moncollect",' "${metrics}"
+		assert grep -Eq '^xrootd_collector_documents_total\{site="moncollect"\} [1-9]' \
+			"${metrics}"
+		# The test drove a denied open, so an error is counted by category.
+		assert grep -Eq '^xrootd_collector_errors_total\{site="moncollect",server="[^"]+",category="[a-z]+"\} [1-9]' \
+			"${metrics}"
+
+		# No metric may be named for a transfer unless it is one. FRM staging
+		# and third-party copies are; per-file I/O is not.
+		assert_failure grep -E '^xrootd_collector_[a-z_]*transfer' "${metrics}"
+		# Prometheus stamps its own `instance` label at scrape time and renames
+		# a collision to exported_instance, so ours must not be called that.
+		assert_failure grep -E '[{,]instance="' "${metrics}"
+		# One family, one HELP block: a name registered through both the
+		# labelled and the observed path would emit two.
+		dupes=$(grep '^# HELP' "${metrics}" | awk '{print $3}' | sort | uniq -d)
+		test -z "${dupes}" || error "duplicate metric families: ${dupes}"
+	fi
 
 	echo "collector documents:"
 	cat "${COLLECTOR_OUT}"

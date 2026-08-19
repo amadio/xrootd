@@ -233,6 +233,13 @@ is unreachable are dropped.
 Serve aggregated metrics in Prometheus exposition format over HTTP on
 \fIport\fR. A shoveler serves its own metric set under the
 \fBxrootd_shoveler_\fR prefix.
+.P
+Every per-server series carries \fBsite\fR and \fBserver\fR labels, so
+\fBsum by (site)\fR gives a whole storage cluster. Both come from the
+\fB=\fR identity record and are provisional until it arrives: a server not
+yet identified reads \fBsite="unknown"\fR with its numeric address as
+\fBserver\fR. That record defaults to hourly, so set \fBident 300\fR in
+the server's \fBxrootd.monitor\fR directive to shorten the window.
 .RE
 \fB--tcp-port\fR \fIport\fR
 .RS 5
@@ -463,7 +470,7 @@ must fit the buffer or the server drops it.
 .P
 \fBflush\fR/\fBfstat\fR/\fBwindow\fR bound latency, not loss: smaller buffers
 just flush more often. In the collector's metrics,
-\fBpackets_lost_total{server,stream}\fR reports pseq gaps per stream class
+\fBpackets_lost_total{site,server,stream}\fR reports pseq gaps per stream class
 (\fBmain\fR, \fBf\fR, \fBg:<provider>\fR — the server runs independent
 sequence counters for the fstat stream and each g-stream provider); loss
 concentrated on \fBf\fR while \fBt\fR arrives fine is the fragmentation
@@ -539,10 +546,11 @@ Condition keys are \fBuser\fR, \fBuserid\fR, \fBrole\fR, \fBvo\fR, \fBgroups\fR,
 raw \fBattributes.\fIkey\fR / \fBresource.\fIkey\fR path for any other field.
 .P
 Filtering applies to the emitted documents only: a dropped document is still
-counted in the Prometheus series and still folded into its session rollup, so
-the aggregate view of the cluster remains complete. The number suppressed is
-exported as \fBfiltered_documents_total\fR and reported as \fBfiltered=\fR in
-the \fB-v\fR exit summary.
+counted in the I/O, session and error series and still folded into its session
+rollup, so the aggregate view of the cluster remains complete. The exception is
+\fBdocuments_total\fR, which counts what was actually emitted. The number
+suppressed is exported as \fBfiltered_documents_total\fR and reported as
+\fBfiltered=\fR in the \fB-v\fR exit summary.
 .P
 Note that a filter key must start in column 1: an indented line is appended to
 the preceding key's value by the INI parser's multi-line continuation, which

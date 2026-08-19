@@ -1159,9 +1159,9 @@ TEST_F(Transfer, TokenAndActivityEnrichTransfer)
   ASSERT_FALSE(lastDoc.empty());
   json j = json::parse(lastDoc);
   EXPECT_EQ(j["attributes"]["user.id"], "https://issuer/sub42");
-  EXPECT_EQ(j["attributes"]["wlcg.vo"], "atlas");
+  EXPECT_EQ(j["attributes"]["xrootd.vo"], "atlas");
   EXPECT_EQ(j["attributes"]["user.roles"], json::array({"production"}));
-  EXPECT_EQ(j["attributes"]["wlcg.groups"], "/atlas/prod");
+  EXPECT_EQ(j["attributes"]["xrootd.groups"], "/atlas/prod");
   EXPECT_EQ(j["attributes"]["scitags.experiment_id"], 42);
   EXPECT_EQ(j["attributes"]["scitags.activity_id"], 7);
 
@@ -1195,7 +1195,7 @@ std::string writeScitags(const std::string& name, const std::string& body)
 
 // With a SciTags registry loaded, the numeric experiment/activity ids are
 // additionally mapped to names. The experiment name stands on its own — it is
-// deliberately not folded into wlcg.vo, which carries only genuine VO
+// deliberately not folded into xrootd.vo, which carries only genuine VO
 // information from the token or a VO-bearing auth method.
 TEST_F(Transfer, ScitagsRegistryMapsActivityNames)
 {
@@ -1216,7 +1216,7 @@ TEST_F(Transfer, ScitagsRegistryMapsActivityNames)
   EXPECT_EQ(j["attributes"]["scitags.activity_id"], 7);
   EXPECT_EQ(j["attributes"]["scitags.experiment"], "atlas");
   EXPECT_EQ(j["attributes"]["scitags.activity"], "production");
-  EXPECT_FALSE(j["attributes"].contains("wlcg.vo"));  // no experiment fallback
+  EXPECT_FALSE(j["attributes"].contains("xrootd.vo"));  // no experiment fallback
 }
 
 // A token VO and the SciTags experiment name are independent fields.
@@ -1238,7 +1238,7 @@ TEST_F(Transfer, ScitagsVoYieldsToToken)
   feedClose();
 
   json j = json::parse(lastDoc);
-  EXPECT_EQ(j["attributes"]["wlcg.vo"], "cms");    // token VO; experiment separate
+  EXPECT_EQ(j["attributes"]["xrootd.vo"], "cms");    // token VO; experiment separate
   EXPECT_EQ(j["attributes"]["scitags.experiment"], "atlas");
 }
 
@@ -1255,7 +1255,7 @@ TEST_F(Transfer, ScitagsNumericWithoutRegistry)
   EXPECT_EQ(j["attributes"]["scitags.activity_id"], 7);
   EXPECT_FALSE(j["attributes"].contains("scitags.experiment"));
   EXPECT_FALSE(j["attributes"].contains("scitags.activity"));
-  EXPECT_FALSE(j["attributes"].contains("wlcg.vo"));
+  EXPECT_FALSE(j["attributes"].contains("xrootd.vo"));
 }
 
 // A missing registry file is reported, leaving numeric ids untouched.
@@ -1284,7 +1284,7 @@ TEST_F(Transfer, ScitagsJsonReloadReflectsUpdate)
   json j = json::parse(lastDoc);
   EXPECT_EQ(j["attributes"]["scitags.experiment"], "cms");
   EXPECT_EQ(j["attributes"]["scitags.activity"], "analysis");
-  EXPECT_FALSE(j["attributes"].contains("wlcg.vo"));
+  EXPECT_FALSE(j["attributes"].contains("xrootd.vo"));
 }
 
 // A failed re-fetch (unparseable, or no "experiments" array) returns false and
@@ -1304,7 +1304,7 @@ TEST_F(Transfer, ScitagsJsonBadInputKeepsRegistry)
 
   json j = json::parse(lastDoc);
   EXPECT_EQ(j["attributes"]["scitags.experiment"], "atlas");   // unchanged
-  EXPECT_FALSE(j["attributes"].contains("wlcg.vo"));
+  EXPECT_FALSE(j["attributes"].contains("xrootd.vo"));
 }
 
 // Feed a 'u' map for dictid 7 with a custom CGI tail after the descriptor.
@@ -1329,7 +1329,7 @@ TEST_F(Transfer, AuthTailEnrichesTransfer)
   ASSERT_FALSE(lastDoc.empty());
   json j = json::parse(lastDoc);
   EXPECT_EQ(j["attributes"]["xrootd.auth.method"], "gsi");
-  EXPECT_EQ(j["attributes"]["wlcg.vo"], "atlas");   // auth-derived VO (no token here)
+  EXPECT_EQ(j["attributes"]["xrootd.vo"], "atlas");   // auth-derived VO (no token here)
   EXPECT_EQ(j["attributes"]["user.roles"], json::array({"production"}));
   EXPECT_EQ(j["attributes"]["user_agent.version"], "v5.6.1");
   EXPECT_EQ(j["attributes"]["network.type"], "ipv4");
@@ -1389,8 +1389,8 @@ TEST_F(Transfer, AuthVoIgnoredForNonVoMethod)
   ASSERT_FALSE(lastDoc.empty());
   json j = json::parse(lastDoc);
   EXPECT_EQ(j["attributes"]["xrootd.auth.method"], "unix");
-  EXPECT_FALSE(j["attributes"].contains("wlcg.vo"));    // &o= gated out
-  EXPECT_EQ(j["attributes"]["wlcg.groups"], "zp users"); // groups stay
+  EXPECT_FALSE(j["attributes"].contains("xrootd.vo"));    // &o= gated out
+  EXPECT_EQ(j["attributes"]["xrootd.groups"], "zp users"); // groups stay
 }
 
 // sss registers the entity through a trusted key holder, so its &o= is a VO.
@@ -1402,7 +1402,7 @@ TEST_F(Transfer, AuthVoKeptForSss)
 
   ASSERT_FALSE(lastDoc.empty());
   json j = json::parse(lastDoc);
-  EXPECT_EQ(j["attributes"]["wlcg.vo"], "eos");
+  EXPECT_EQ(j["attributes"]["xrootd.vo"], "eos");
 }
 
 TEST_F(Transfer, NoAuthLoginAppinfoStillEnriches)
@@ -1417,7 +1417,7 @@ TEST_F(Transfer, NoAuthLoginAppinfoStillEnriches)
   EXPECT_EQ(j["attributes"]["user_agent.version"], "v5.6.1");
   EXPECT_EQ(j["attributes"]["network.type"], "ipv6");
   EXPECT_FALSE(j["attributes"].contains("xrootd.auth.method"));  // no &p= without auth
-  EXPECT_FALSE(j["attributes"].contains("wlcg.vo"));             // no &o= and no token
+  EXPECT_FALSE(j["attributes"].contains("xrootd.vo"));             // no &o= and no token
   EXPECT_FALSE(j["attributes"].contains("xrootd.client.site")); // no &S= -> no client.site
 }
 

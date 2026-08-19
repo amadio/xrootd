@@ -491,7 +491,7 @@
       "id": 6,
       "type": "timeseries",
       "title": "Read volume by VO",
-      "description": "Bytes read stacked by wlcg.vo (token or VO-bearing auth).",
+      "description": "Bytes read stacked by xrootd.vo (token or VO-bearing auth).",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"
@@ -540,8 +540,8 @@
             "uid": "${DS_LOKI}"
           },
           "editorMode": "code",
-          "expr": "sum by (wlcg_vo)(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__auto]))",
-          "legendFormat": "{{wlcg_vo}}",
+          "expr": "sum by (xrootd_vo)(sum_over_time({service_namespace=~\"$cluster\", service_name=~\"$service\", service_instance_id=~\"$server\"} | xrootd_operation_state=~\".+\" | unwrap xrootd_read_bytes [$__auto]))",
+          "legendFormat": "{{xrootd_vo}}",
           "refId": "A",
           "queryType": "range"
         }

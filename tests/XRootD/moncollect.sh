@@ -350,7 +350,7 @@ function test_moncollect() {
 	# Re-drive uploads until a transfer document carries the VO (tolerates the
 	# u-record racing the close under UDP), then check the role too.
 	if [ "${MONCOLLECT_VOMS}" = 1 ]; then
-		drive_until '"wlcg.vo":"dteam"' "VO surfaced on transfer document" \
+		drive_until '"xrootd.vo":"dteam"' "VO surfaced on transfer document" \
 			"xrdcp -f '${TMPDIR}/ok.ref' '${HOST}/${TMPDIR}/ok.ref'"
 		assert grep -Eq '"user.roles":\["production"\]' "${COLLECTOR_OUT}"
 	fi

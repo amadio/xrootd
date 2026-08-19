@@ -857,10 +857,12 @@ std::string XrdMonDecode::otelIdentity(json& a, const Server& srv,
           }
        // VO/role/groups: prefer the token ('T'); fall back to the auth CGI.
        // The role lives in the semconv user.roles (a string array); VO and
-       // groups have no semconv home and stay under wlcg.*.
-       if (!u.vo.empty())     {vo = u.vo;         a["wlcg.vo"]     = u.vo;}
-       if (!u.role.empty())   a["user.roles"]  = json::array({u.role});
-       if (!u.groups.empty()) a["wlcg.groups"] = u.groups;
+       // groups have no semconv home and stay under the xrootd.* vendor
+       // namespace -- not wlcg.*, since XRootD serves communities that are not
+       // WLCG (SKA, OSG) and the fields mean the same thing to all of them.
+       if (!u.vo.empty())     {vo = u.vo;         a["xrootd.vo"]     = u.vo;}
+       if (!u.role.empty())   a["user.roles"]    = json::array({u.role});
+       if (!u.groups.empty()) a["xrootd.groups"] = u.groups;
       }
 
    // Token identity ('T' stream) and experiment/activity ('U' stream) are
@@ -873,9 +875,9 @@ std::string XrdMonDecode::otelIdentity(json& a, const Server& srv,
        // The token's (possibly mapped) username is authoritative over the
        // descriptor's unverified unix name; prefer it for semconv user.name.
        if (!t.username.empty()) a["user.name"]  = t.username;
-       if (!t.vo.empty())     {vo = t.vo;        a["wlcg.vo"]     = t.vo;}
-       if (!t.role.empty())    a["user.roles"]  = json::array({t.role});
-       if (!t.groups.empty())  a["wlcg.groups"] = t.groups;
+       if (!t.vo.empty())     {vo = t.vo;        a["xrootd.vo"]     = t.vo;}
+       if (!t.role.empty())    a["user.roles"]    = json::array({t.role});
+       if (!t.groups.empty())  a["xrootd.groups"] = t.groups;
       }
    auto ait = srv.activity.find(userID);
    if (ait != srv.activity.end())
@@ -887,7 +889,7 @@ std::string XrdMonDecode::otelIdentity(json& a, const Server& srv,
 
        // Map the numeric SciTags ids to human names via the loaded registry.
        // The names stand on their own (dashboards group by them); they are
-       // deliberately not folded into wlcg.vo, which carries only genuine VO
+       // deliberately not folded into xrootd.vo, which carries only genuine VO
        // information from the token or a VO-bearing auth method. The lock
        // covers a background refresh thread swapping the registry; lookups
        // copy out the names.

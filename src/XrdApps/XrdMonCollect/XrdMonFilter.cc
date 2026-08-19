@@ -122,8 +122,8 @@ XrdMonFilter::Shortcuts()
       {"user",       "attributes.user.name"},
       {"userid",     "attributes.user.id"},
       {"role",       "attributes.user.roles"},          // string array
-      {"vo",         "attributes.wlcg.vo"},
-      {"groups",     "attributes.wlcg.groups"},
+      {"vo",         "attributes.xrootd.vo"},
+      {"groups",     "attributes.xrootd.groups"},
       {"authprot",   "attributes.xrootd.auth.method"},
       {"proto",      "attributes.network.protocol.name"},
       {"scheme",     "attributes.url.scheme"},

@@ -112,12 +112,6 @@
                 "type": { "type": "keyword", "ignore_above": 2048 }
               }
             },
-            "wlcg": {
-              "properties": {
-                "vo":     { "type": "keyword" },
-                "groups": { "type": "keyword" }
-              }
-            },
             "scitags": {
               "properties": {
                 "experiment":    { "type": "keyword" },
@@ -128,6 +122,8 @@
             },
             "xrootd": {
               "properties": {
+                "vo":     { "type": "keyword" },
+                "groups": { "type": "keyword" },
                 "operation": {
                   "properties": {
                     "name":       { "type": "keyword" },

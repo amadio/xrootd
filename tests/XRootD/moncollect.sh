@@ -239,9 +239,17 @@ function test_moncollect() {
 	assert_failure grep -Eq '"client.address":"(localhost[^"]*|127\.[0-9.]+|::1|::ffff:127\.[0-9.]+)"' "${COLLECTOR_OUT}"
 	assert_failure grep -q '"xrootd.client.host"' "${COLLECTOR_OUT}"
 
-	# all.sitename (common.cfg sets it to the instance name) must surface
-	# verbatim as the server resource's site.
-	assert grep -Eq '"xrootd.server.site":"moncollect"' "${COLLECTOR_OUT}"
+	# The '=' ident's three identity fields land on the OTel service
+	# attributes: all.sitename (common.cfg sets it to the instance name) is
+	# the storage cluster, -n is the service, and the instance id is the
+	# address and port of this one daemon rather than a name a whole fleet
+	# would share. The cluster must be byte-identical to the metric label.
+	assert grep -Eq '"service.namespace":"moncollect"' "${COLLECTOR_OUT}"
+	assert grep -Eq '"service.name":"moncollect"' "${COLLECTOR_OUT}"
+	assert grep -Eq "\"service.instance.id\":\"[^\"]+:${XRD_PORT}\"" "${COLLECTOR_OUT}"
+	assert grep -Eq '"process.executable.name":"xrootd"' "${COLLECTOR_OUT}"
+	assert_failure grep -q '"xrootd.server.site"' "${COLLECTOR_OUT}"
+	assert_failure grep -q '"xrootd.server.program"' "${COLLECTOR_OUT}"
 
 	# file.path is decomposed into the semconv file.directory and
 	# file.extension, and the --dataset capture group surfaces as
@@ -457,7 +465,7 @@ function test_moncollect() {
 
 	# The Prometheus exposition, which nothing else in the suite covers. The
 	# server config sets "all.sitename moncollect" and "ident 2s", so by now
-	# the identity has landed and the labels carry the real site and host
+	# the identity has landed and the labels carry the real cluster and host
 	# rather than the "unknown"/numeric-address pair a server gets before it.
 	if command -v curl >/dev/null 2>&1; then
 		metrics="${PWD}/${NAME}/metrics.txt"
@@ -467,22 +475,22 @@ function test_moncollect() {
 		grep -E '^xrootd_collector_(io_|app_io_|errors_|files_open|sessions_open|servers|server_info|documents_)' \
 			"${metrics}" || true
 
-		assert grep -Eq '^xrootd_collector_io_total\{site="moncollect",server="[^"]+",operation="close"\} [1-9]' \
+		assert grep -Eq '^xrootd_collector_io_total\{cluster="moncollect",server="[^"]+",operation="close"\} [1-9]' \
 			"${metrics}"
-		assert grep -Eq '^xrootd_collector_io_total\{site="moncollect",server="[^"]+",operation="open"\} [1-9]' \
+		assert grep -Eq '^xrootd_collector_io_total\{cluster="moncollect",server="[^"]+",operation="open"\} [1-9]' \
 			"${metrics}"
 		# "ops" is in the server's monitor directive, so the per-request counts
 		# are populated too -- without it only open/close would move.
-		assert grep -Eq '^xrootd_collector_io_total\{site="moncollect",server="[^"]+",operation="read"\} [1-9]' \
+		assert grep -Eq '^xrootd_collector_io_total\{cluster="moncollect",server="[^"]+",operation="read"\} [1-9]' \
 			"${metrics}"
-		assert grep -Eq '^xrootd_collector_io_bytes_total\{site="moncollect",server="[^"]+",operation="read"\} [1-9]' \
+		assert grep -Eq '^xrootd_collector_io_bytes_total\{cluster="moncollect",server="[^"]+",operation="read"\} [1-9]' \
 			"${metrics}"
-		assert grep -Eq '^xrootd_collector_servers\{site="moncollect"\} 1' "${metrics}"
-		assert grep -Eq '^xrootd_collector_server_info\{site="moncollect",' "${metrics}"
-		assert grep -Eq '^xrootd_collector_documents_total\{site="moncollect"\} [1-9]' \
+		assert grep -Eq '^xrootd_collector_servers\{cluster="moncollect"\} 1' "${metrics}"
+		assert grep -Eq '^xrootd_collector_server_info\{cluster="moncollect",' "${metrics}"
+		assert grep -Eq '^xrootd_collector_documents_total\{cluster="moncollect"\} [1-9]' \
 			"${metrics}"
 		# The test drove a denied open, so an error is counted by category.
-		assert grep -Eq '^xrootd_collector_errors_total\{site="moncollect",server="[^"]+",category="[a-z]+"\} [1-9]' \
+		assert grep -Eq '^xrootd_collector_errors_total\{cluster="moncollect",server="[^"]+",category="[a-z]+"\} [1-9]' \
 			"${metrics}"
 
 		# No metric may be named for a transfer unless it is one. FRM staging
@@ -491,6 +499,15 @@ function test_moncollect() {
 		# Prometheus stamps its own `instance` label at scrape time and renames
 		# a collision to exported_instance, so ours must not be called that.
 		assert_failure grep -E '[{,]instance="' "${metrics}"
+		# The WLCG site is not on the wire -- all.sitename names the cluster and
+		# the site is added downstream -- so the collector must not invent one.
+		assert_failure grep -E '[{,]site="' "${metrics}"
+		# Every labelled decoder family must lead with the cluster. This is what
+		# catches a schema frozen in the wrong order: XrdMetrics matches labels
+		# positionally and would silently render cluster="<hostname>".
+		stray=$(grep -E '^xrootd_collector_[a-z_]+\{' "${metrics}" \
+			| grep -vE '^xrootd_collector_[a-z_]+\{cluster="' || true)
+		test -z "${stray}" || error "series not led by cluster: ${stray}"
 		# One family, one HELP block: a name registered through both the
 		# labelled and the observed path would emit two.
 		dupes=$(grep '^# HELP' "${metrics}" | awk '{print $3}' | sort | uniq -d)

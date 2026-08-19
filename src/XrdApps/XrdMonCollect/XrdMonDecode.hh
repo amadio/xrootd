@@ -437,11 +437,12 @@ struct Server
    std::string identRaw;     // last emitted identity (to de-duplicate docs)
    std::string resolvedHost; // reverse-resolved sender hostname (cached)
    bool    resolved = false; // resolvedHost computed yet (once per incarnation)
-   // The Prometheus {site, server} label pair, cached so the metric path is two
-   // member reads rather than the name-precedence walk. Both derive from the
-   // '=' ident, so both are provisional ("unknown" and the numeric source IP)
-   // until it arrives; LabelServer refreshes them when it does.
-   std::string mtrSite;
+   // The Prometheus {cluster, server} label pair, cached so the metric path is
+   // two member reads rather than the name-precedence walk. Both derive from
+   // the '=' ident, so both are provisional ("unknown" and the numeric source
+   // IP) until it arrives; LabelServer refreshes them when it does. mtrCluster
+   // is all.sitename, which this collector reads as the storage cluster.
+   std::string mtrCluster;
    std::string mtrServer;
    int64_t sID = 0;
    // Last packet sequence (header pseq) per stream class, for loss detection.
@@ -469,7 +470,7 @@ Server&  ServerFor(const std::string& src, int32_t stod);
 //! numeric source IP. otelResource() and the Prometheus `server` label share
 //! it, so a Grafana panel and an OpenSearch query name a server identically.
 std::string ServerName(const Server& srv, const std::string& src) const;
-//! Recompute a server's cached {site, server} metric labels. Called when an
+//! Recompute a server's cached {cluster, server} metric labels. Called when an
 //! incarnation appears and whenever a '=' ident changes what we know of it.
 void     LabelServer(Server& srv, const std::string& src);
 //! Publish the per-server live-state gauges (files_open, sessions_open) from
@@ -477,8 +478,8 @@ void     LabelServer(Server& srv, const std::string& src);
 //! sessions_open counts live client sessions, so it stays at zero when the
 //! server's monitor config omits the `user` destination.
 void     LiveGauges(const Server& srv);
-//! Recount servers per site into the servers{site} gauge. Call when an
-//! incarnation appears, when a '=' ident moves one between sites, and after
+//! Recount servers per cluster into the servers{cluster} gauge. Call when an
+//! incarnation appears, when a '=' ident moves one between clusters, and after
 //! reaping. Walks the (small) incarnation table.
 void     ServerGauges();
 //! Publish (or, with `live` false, retire) one server's identity as
@@ -493,10 +494,11 @@ void     NoteClock(Server& srv, int32_t tEnd);
 double   toServerClock(const Server& srv, double t) const
             {return t + (double)srv.clkOff;}
 //! Count one structural problem in a packet from `src`: bumps the aggregate
-//! stats.malformed and the labeled malformed_total{site,server,stream,reason}
-//! metric series (stream is derived from the header code byte). Pass the
-//! incarnation when it is known; a header too short to carry a stod has none,
-//! and falls back to an unknown site and the bare source IP.
+//! stats.malformed and the labeled
+//! malformed_total{cluster,server,stream,reason} metric series (stream is
+//! derived from the header code byte). Pass the incarnation when it is known; a
+//! header too short to carry a stod has none, and falls back to an unknown
+//! cluster and the bare source IP.
 void     Malformed(const std::string& src, unsigned char code,
                    const char* reason, const Server* srv = nullptr);
 void     DecodeMap(unsigned char code, Server& srv,
@@ -618,10 +620,13 @@ void     emitSpan(const nlohmann::json& src, const char* name, double tBeg,
 //! Serialize one finished document and hand it to the sink, applying the
 //! filter first: a matching rule may tag `j` in place or suppress it. The
 //! single emission funnel for every document the decoder produces.
+//! `srv` is the incarnation that produced the document; it feeds the
+//! documents_total{cluster} counter kept here, so every document is counted
+//! exactly once whatever produced it.
 //! @return true when the document reached the sink. Callers guard the
 //!         companion emitSpan() on this, so a suppressed log never leaves a
 //!         parentless span behind.
-bool     emitDoc(nlohmann::json& j);
+bool     emitDoc(nlohmann::json& j, const Server& srv);
 //! Fill the identity attributes (user.*, client.*, wlcg.*, xrootd.*) into the
 //! event `attributes` object from the user dictionary entry (and the token and
 //! activity streams keyed by the same dictid). Returns the resolved VO (token
@@ -712,10 +717,10 @@ bool     emitSpans    = false;   // companion OTLP span documents (--spans)
 void        resolveLocalHost();   // resolve localHost once, at construction
 std::string publicFor(const std::string& ip) const;
 std::string localHost;
-// Sites currently published in the servers{} gauge, so one whose last server
-// went away can be parked at zero. The registry cannot remove a series, and a
-// frozen nonzero value would read as a cluster that is still reporting.
-std::unordered_set<std::string> mtrSites;
+// Clusters currently published in the servers{} gauge, so one whose last
+// server went away can be parked at zero. The registry cannot remove a series,
+// and a frozen nonzero value would read as a cluster that is still reporting.
+std::unordered_set<std::string> mtrClusters;
 std::string localIP4;
 std::string localIP6;
 

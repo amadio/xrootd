@@ -450,6 +450,40 @@ Several opt-in streams add finer-grained events:
   create traces**: without `--spans` nothing is written to `/v1/traces`, so a
   logs-only export — however many `traceId`s the logs carry — shows no traces in
   Tempo/Grafana (logs correlate *to* traces, they do not create them).
+
+  <a id="span-nesting"></a>
+  **Span nesting.** The waterfall is **session → file → I/O**, and a child span
+  is always inside its parent in time. That has to be arranged, because no
+  record carries an exact time: each is interpolated across the window of the
+  packet carrying it, and the three streams window independently. The `t`
+  stream is by far the coarsest — records between two window marks are spread
+  across the window, and those after the last mark all land on its start, there
+  being nothing yet to bound them above. Measured against a real server, a raw
+  I/O record misses its file's span by tens of seconds in either direction,
+  against file spans a fraction of a second long. So:
+
+  * an I/O record is clamped into the interval its file is known to have been
+    open — it cannot precede the open, and it cannot follow the moment the
+    collector received the packet reporting it. Both bounds are physical;
+    neither invents precision the stream did not have;
+  * whatever survives that and still outruns the close widens the file's span,
+    which is the only direction left once the record has been emitted. It does
+    **not** widen `xrootd.operation.duration`, which stays the open → close
+    estimate rather than absorbing another stream's windowing error;
+  * the session's window in turn encloses every record it accounts for (see
+    [Session times](#session-times)).
+
+  **Known gap.** The `f` and `t` streams flush on their own schedules, so an
+  I/O record routinely arrives *before* the `f`-stream `open` of the file it is
+  on. It cannot be correlated at that point, so its `traceId` falls back to the
+  session-less key while its `parentSpanId` still names the file's span — a
+  span in one trace claiming a parent in another, which a tracing backend draws
+  as a broken root rather than as I/O detail. Those records are also the ones
+  the clamp above cannot bound below. Withholding them is not an option — on a
+  busy server they are the majority, so a collector that dropped them would
+  emit almost no I/O spans at all. Closing this properly means correlating the
+  file earlier than the `f`-stream open, which is a change to the correlation
+  model rather than to the span arithmetic.
 - `--traces` turns each `t` (I/O trace) record into a document
   (`attributes["event.name"]` = `xrootd.io.read`/`xrootd.io.write` with
   `xrootd.io.offset`, `xrootd.io.length` and the resolved `file.path`, plus
@@ -467,7 +501,9 @@ Several opt-in streams add finer-grained events:
   exception is `appid`, which carries no dictionary id and so cannot be
   correlated. The opening user is resolved from the file id, so the file's
   `open` (`f` stream) must have been seen — otherwise the record falls back to
-  the session-less trace, exactly as a close without a joined open does.
+  the session-less trace, exactly as a close without a joined open does (this
+  is common, and its consequences for the waterfall are covered under
+  [Span nesting](#span-nesting)).
 - `--gstream` forwards each `g` (plugin) record — from the `oss`, `pfc`,
   `throttle`, `tpc`, `http` g-streams — as a document tagged with its provider,
   embedding the plugin's JSON payload. Requires `xrootd.mongstream` on the

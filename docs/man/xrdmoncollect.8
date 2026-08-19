@@ -99,6 +99,17 @@ finished before the client disconnected can arrive stamped after it. The
 earliest and latest time of any record naming a session are tracked and the
 resolved window widened to cover both.
 .P
+The same holds one level down, for the \fB--spans\fR waterfall
+session \(-> file \(-> I/O. A trace-stream I/O record is the coarsest thing the
+collector handles \(em records after the last window mark all land on that
+window's start \(em so it is clamped into the interval its file is known to have
+been open (it cannot precede the open, nor follow the moment the packet
+reporting it arrived here), and whatever still outruns the close widens the
+file's span rather than the record being left hanging outside it. The clamp does
+not touch \fBxrootd.operation.duration\fR, which stays the open \(-> close
+estimate. An I/O record that arrives before the open of its file cannot be
+correlated at all; see \fBSpan nesting\fR in README.md for what that costs.
+.P
 The start has a further problem: no dictionary record carries a time on the wire
 at all, so the login can only be timed by the collector, whose clock is not the
 reporting server's; the offset between the two is estimated per server

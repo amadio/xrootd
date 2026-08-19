@@ -95,7 +95,7 @@ function test_shovel() {
 	# or the "unknown" placeholder, and the configured sitename verbatim.
 	assert grep -Eq '"server.address":"[^"]+"' "${CENTRAL_OUT}"
 	assert_failure grep -Eq '"server\.address":"(unknown|localhost[^"]*|127\.[0-9.]+|::1|::ffff:127\.[0-9.]+)"' "${CENTRAL_OUT}"
-	assert grep -Eq '"xrootd.server.site":"shovel"' "${CENTRAL_OUT}"
+	assert grep -Eq '"service.namespace":"shovel"' "${CENTRAL_OUT}"
 
 	# 2. Collector outage: kill the central collector and keep transferring a
 	#    uniquely named file. The first buffer sent after the peer dies can

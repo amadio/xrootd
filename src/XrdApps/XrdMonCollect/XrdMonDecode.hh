@@ -427,6 +427,12 @@ struct Server
    std::string identRaw;     // last emitted identity (to de-duplicate docs)
    std::string resolvedHost; // reverse-resolved sender hostname (cached)
    bool    resolved = false; // resolvedHost computed yet (once per incarnation)
+   // The Prometheus {site, server} label pair, cached so the metric path is two
+   // member reads rather than the name-precedence walk. Both derive from the
+   // '=' ident, so both are provisional ("unknown" and the numeric source IP)
+   // until it arrives; LabelServer refreshes them when it does.
+   std::string mtrSite;
+   std::string mtrServer;
    int64_t sID = 0;
    // Last packet sequence (header pseq) per stream class, for loss detection.
    // The server does NOT stamp one sequence per destination: the f-stream and
@@ -448,6 +454,14 @@ struct Server
 };
 
 Server&  ServerFor(const std::string& src, int32_t stod);
+//! The canonical name of a reporting server: the '=' ident's advertised host
+//! when it is a real name, else the local FQDN for a loopback sender, else the
+//! numeric source IP. otelResource() and the Prometheus `server` label share
+//! it, so a Grafana panel and an OpenSearch query name a server identically.
+std::string ServerName(const Server& srv, const std::string& src) const;
+//! Recompute a server's cached {site, server} metric labels. Called when an
+//! incarnation appears and whenever a '=' ident changes what we know of it.
+void     LabelServer(Server& srv, const std::string& src);
 //! The decoder's view of the wall clock (see SetClock).
 time_t   Now() const {return nowFn ? nowFn() : time(nullptr);}
 //! Fold one f-stream window end into the incarnation's clock-offset estimate.
@@ -457,10 +471,12 @@ void     NoteClock(Server& srv, int32_t tEnd);
 double   toServerClock(const Server& srv, double t) const
             {return t + (double)srv.clkOff;}
 //! Count one structural problem in a packet from `src`: bumps the aggregate
-//! stats.malformed and the labeled malformed_total{server,stream,reason}
-//! metric series (stream is derived from the header code byte).
+//! stats.malformed and the labeled malformed_total{site,server,stream,reason}
+//! metric series (stream is derived from the header code byte). Pass the
+//! incarnation when it is known; a header too short to carry a stod has none,
+//! and falls back to an unknown site and the bare source IP.
 void     Malformed(const std::string& src, unsigned char code,
-                   const char* reason);
+                   const char* reason, const Server* srv = nullptr);
 void     DecodeMap(unsigned char code, Server& srv,
                    uint32_t dictid, const char* info, int ilen);
 void     DecodeIdent(const std::string& src, int32_t stod, Server& srv,

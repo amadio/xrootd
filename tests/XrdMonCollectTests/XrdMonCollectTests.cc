@@ -2181,6 +2181,64 @@ TEST(XrdMonCollect, SessionDiscAndFilesOpenGauge)
   EXPECT_NE(out.find("xrootd_collector_stale_opens_total{site=\"unknown\",server=\"h\"} 1"),
             std::string::npos) << out;
   EXPECT_EQ(dec.GetStats().staleOpens, 1u);
+  // The session opened and closed within this test, so nothing is live.
+  EXPECT_NE(out.find("xrootd_collector_sessions_open{site=\"unknown\",server=\"h\"} 0"),
+            std::string::npos) << out;
+  // One observation, whatever its bucket.
+  EXPECT_NE(out.find("xrootd_collector_session_duration_seconds_count"
+                     "{site=\"unknown\"} 1"),
+            std::string::npos) << out;
+}
+
+// sessions_open must count sessions, not user-dictionary entries. The entry
+// outlives the disconnect (a straggling close still resolves its identity
+// against it), so users.size() would never come back down.
+TEST(XrdMonCollect, SessionsOpenTracksLiveSessionsOnly)
+{
+  XrdMetrics::Collector collector("xrootd");
+  XrdMonDecode dec([](const std::string&){}, nullptr, false, false, false,
+                   false, &collector.subsystem("collector"));
+  dec.SetEmitSessions(true);
+
+  auto userMap = [&](uint32_t dictid, const char* who)
+     {W body; body.u32(dictid);
+      std::string info = std::string("xroot/") + who + ".1:2@cli.example.org\n";
+      std::vector<unsigned char> pl = body.b;
+      pl.insert(pl.end(), info.begin(), info.end());
+      auto pkt = packet('u', kStod, pl);
+      dec.Process("h:1", (const char*)pkt.data(), pkt.size()); };
+  auto disconnect = [&](uint32_t dictid)
+     {auto payload = todRec(kOpenT, 42);
+      W d; d.u32(dictid);
+      auto dr = rec(4 /*isDisc*/, 0, d.b);
+      payload.insert(payload.end(), dr.begin(), dr.end());
+      auto pkt = packet('f', kStod, payload);
+      dec.Process("h:1", (const char*)pkt.data(), pkt.size()); };
+  auto gauge = [&]{
+      std::string out;
+      XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
+      auto at = out.find("xrootd_collector_sessions_open"
+                         "{site=\"unknown\",server=\"h\"} ");
+      EXPECT_NE(at, std::string::npos) << out;
+      return out.substr(at, out.find('\n', at) - at); };
+
+  userMap(7, "bob");
+  userMap(8, "eve");
+  EXPECT_EQ(gauge().back(), '2');
+  // A re-sent 'u' map for a live session is a retransmit, not a new session.
+  userMap(7, "bob");
+  EXPECT_EQ(gauge().back(), '2');
+  disconnect(7);
+  EXPECT_EQ(gauge().back(), '1');
+  // A duplicated disconnect datagram must not decrement twice.
+  disconnect(7);
+  EXPECT_EQ(gauge().back(), '1');
+  // The same dictid reappearing after its disconnect is a new session.
+  userMap(7, "carol");
+  EXPECT_EQ(gauge().back(), '2');
+  disconnect(7);
+  disconnect(8);
+  EXPECT_EQ(gauge().back(), '0');
 }
 
 // The session document and its root span begin at the login (the 'u' map

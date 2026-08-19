@@ -204,6 +204,16 @@ constexpr const char* kIoBytesHelp =
    "bytes moved by the servers, by direction (from the fstat \"xfr\" block, so "
    "unlike the read/readv/write counts of io_total these need no \"ops\")";
 
+// Likewise for the live-state gauges, which LiveGauges publishes and the reap
+// path parks at zero. Whichever runs first freezes the family's help.
+constexpr const char* kFilesOpenHelp =
+   "files currently open on the server";
+
+constexpr const char* kSessionsOpenHelp =
+   "client sessions currently open on the server (counted from the user "
+   "dictionary, so zero unless the server's monitor config includes a "
+   "\"user\" destination)";
+
 // Cap on the per-session recent-file list (UserInfo::sRecent). The running
 // session totals always cover every closed file; only this most-recent detail
 // list is bounded, keeping a long-lived session's memory in check.
@@ -496,6 +506,23 @@ void XrdMonDecode::LabelServer(Server& srv, const std::string& src)
 {
    srv.mtrSite   = siteKnown(srv.ident.site) ? srv.ident.site : kSiteUnknown;
    srv.mtrServer = ServerName(srv, src);
+}
+
+/******************************************************************************/
+/*                            L i v e G a u g e s                             */
+/******************************************************************************/
+
+void XrdMonDecode::LiveGauges(const Server& srv)
+{
+   if (!metrics) return;
+
+   const std::vector<XrdMetrics::ConstLabel> id =
+      {{"site", srv.mtrSite}, {"server", srv.mtrServer}};
+
+   metrics->gaugeSeries("files_open",    kFilesOpenHelp,    id)
+           = (double)srv.files.size();
+   metrics->gaugeSeries("sessions_open", kSessionsOpenHelp, id)
+           = (double)srv.sessions;
 }
 
 /******************************************************************************/
@@ -970,7 +997,8 @@ bool XrdMonDecode::SaveState(const std::string& path) const
                      {"groups", u.groups},  {"cver",   u.clientVer},
                      {"app",  u.appName},   {"info",   u.appInfo},
                      {"site", u.site},      {"ipv",    u.ipVersion},
-                     {"conn", (int64_t)u.connT}};
+                     {"conn", (int64_t)u.connT},
+                     {"disc", u.disc}};
            // A session that has opened but not yet closed anything still knows
            // when it began, and that is exactly the session whose start used to
            // go missing, so the times alone are enough to write the block.
@@ -1125,6 +1153,10 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
                   u.site       = e.value("site",   std::string());
                   u.ipVersion  = e.value("ipv",    0);
                   u.connT      = (time_t)e.value("conn", (int64_t)0);
+                  // A snapshot predating this key restores every session as
+                  // live, which the next disconnect or eviction corrects.
+                  u.disc       = e.value("disc",  false);
+                  if (!u.disc) srv.sessions++;
                   if (auto sn = e.find("session"); sn != e.end())
                      {u.sFiles      = sn->value("files", 0u);
                       u.sReads      = sn->value("rds",   0u);
@@ -1470,7 +1502,14 @@ void XrdMonDecode::EvictFront()
    LruNode n = lru.front();
    lruBytes -= n.bytes;
    switch(n.dict)
-         {case Dict::Users:    n.srv->users.erase(n.ikey);    break;
+         {case Dict::Users:
+               {auto it = n.srv->users.find(n.ikey);
+                if (it != n.srv->users.end())
+                   {if (!it->second.disc && n.srv->sessions) n.srv->sessions--;
+                    n.srv->users.erase(it);
+                   }
+               }
+               break;
           case Dict::Files:    n.srv->files.erase(n.ikey);    break;
           case Dict::Paths:    n.srv->paths.erase(n.ikey);    break;
           case Dict::Infos:    n.srv->infos.erase(n.skey);    break;
@@ -1524,16 +1563,12 @@ void XrdMonDecode::ReapServers(time_t now)
            // the raw "<ip>:<port>|<stod>" and would name the same server
            // differently from every other call site.
            if (metrics)
-              {metrics->counterSeries("stale_opens_total",
-                             "open-file entries dropped without a close "
-                             "(close record lost)",
-                             {{"site", s.mtrSite}, {"server", s.mtrServer}})
-                       += n;
-               metrics->gaugeSeries("files_open",
-                             "files currently open on the server",
-                             {{"site", s.mtrSite}, {"server", s.mtrServer}})
-                       = (double)s.files.size();
-              }
+              metrics->counterSeries("stale_opens_total",
+                            "open-file entries dropped without a close "
+                            "(close record lost)",
+                            {{"site", s.mtrSite}, {"server", s.mtrServer}})
+                      += n;
+           LiveGauges(s);
           }
 
    if (!serverTTL) return;
@@ -1563,15 +1598,17 @@ void XrdMonDecode::ReapServers(time_t now)
                {if (g->first.compare(0, pre.size(), pre) == 0) g = gsPrev.erase(g);
                    else ++g;
                }
-           // No live incarnation shares this sender: park its gauge at zero so
-           // a restarted (or gone) server does not strand a nonzero series.
+           // No live incarnation shares this sender: park its gauges at zero
+           // so a restarted (or gone) server does not strand nonzero series.
            // Read the labels off `s` while it is still alive — it is erased
-           // just below.
+           // just below — and set the zeros explicitly rather than through
+           // LiveGauges, whose tables have not been cleared.
            if (metrics)
-              metrics->gaugeSeries("files_open",
-                            "files currently open on the server",
-                            {{"site", s.mtrSite}, {"server", s.mtrServer}})
-                      = 0.0;
+              {const std::vector<XrdMetrics::ConstLabel> id =
+                  {{"site", s.mtrSite}, {"server", s.mtrServer}};
+               metrics->gaugeSeries("files_open",    kFilesOpenHelp,    id) = 0.0;
+               metrics->gaugeSeries("sessions_open", kSessionsOpenHelp, id) = 0.0;
+              }
           }
 
        it = servers.erase(it);
@@ -1635,11 +1672,18 @@ void XrdMonDecode::DecodeMap(unsigned char code, Server& srv,
        // way (the server retransmits on a late "set monitor on", and any
        // destination can see a duplicated datagram). lruPut replaces the entry
        // wholesale, so carry the session forward explicitly.
+       bool fresh = true;
        if (auto old = srv.users.find(dictid); old != srv.users.end())
-          u.adopt(std::move(old->second));
+          {// A re-send mid-session is the same session; one for a dictid whose
+           // disconnect was already reported is a new session reusing it.
+           fresh = old->second.disc;
+           u.adopt(std::move(old->second));
+          }
+       if (fresh) srv.sessions++;
        std::size_t w = bytesOf(u);
        lruPut(&srv, Dict::Users, srv.users, dictid, dictid, std::string(),
               std::move(u), w);
+       LiveGauges(srv);
       }
       else if (code == XROOTD_MON_MAPPATH)
               {stats.mapPath++;
@@ -1993,14 +2037,11 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
          off += recSize;
         }
 
-// Reflect the current number of open files (transfers in progress) for this
-// server as a gauge. Computed from the open-file table, so it tracks the opens
-// and closes processed in this packet.
+// Reflect this server's live state as gauges. Computed from the correlation
+// tables, so they track the opens, closes and disconnects processed in this
+// packet.
 //
-   if (metrics)
-      metrics->gaugeSeries("files_open",
-                     "files currently open on the server",
-                     {{"site", srv.mtrSite}, {"server", srv.mtrServer}}) = (double)srv.files.size();
+   LiveGauges(srv);
 }
 
 /******************************************************************************/
@@ -2083,6 +2124,15 @@ void XrdMonDecode::EmitDisc(const std::string& src, int32_t stod, Server& srv,
    const UserInfo*   u  = uit != srv.users.end() ? &uit->second : nullptr;
    const SessionSpan sp = sessionSpanOf(stod, srv, u, tRec);
 
+// The session is over. The entry stays -- a straggling close still resolves
+// its identity against it -- so mark it rather than erase it, and guard: a
+// duplicated disconnect datagram must not decrement twice.
+//
+   if (uit != srv.users.end() && !uit->second.disc)
+      {uit->second.disc = true;
+       if (srv.sessions) srv.sessions--;
+      }
+
    json j;
    otelResource(j, src, stod, srv);
    otelBegin(j, "xrootd.session", sp.end, false);
@@ -2105,14 +2155,28 @@ void XrdMonDecode::EmitDisc(const std::string& src, int32_t stod, Server& srv,
    a["session.id"] = j["traceId"];   // semconv: queryable session correlator
 
    if (metrics)
-      {metrics->counterSeries("sessions_total",
-                        "client sessions ended", {{"site", srv.mtrSite}, {"server", srv.mtrServer}}) += 1;
+      {const std::vector<XrdMetrics::ConstLabel> id =
+          {{"site", srv.mtrSite}, {"server", srv.mtrServer}};
+       metrics->counterSeries("sessions_total", "client sessions ended", id)
+               += 1;
        // A separate series rather than a label on sessions_total, which
        // existing dashboards already aggregate. Watching this is how an
        // operator sees a site degrade to guessed session starts.
+       auto sl = id; sl.push_back({"source", sp.src});
        metrics->counterSeries("session_starts_total",
                         "client sessions by how the session start was resolved",
-                        {{"site", srv.mtrSite}, {"server", srv.mtrServer}, {"source", sp.src}}) += 1;
+                        sl) += 1;
+       // How long clients stay connected, per site. sessionSpanOf always
+       // returns beg <= end, and the guessed-start cases (see the source label
+       // above) are in here too -- a "disconnect" start makes this zero, which
+       // is why the two series are worth reading together. Labeled by site
+       // alone: a bucket set per server would be an order of magnitude more
+       // series for a distribution that is read per cluster anyway.
+       metrics->histogramSeries("session_duration_seconds",
+                        "client session wall-clock duration",
+                        {1,10,60,300,1800,3600,7200,21600,86400},
+                        {{"site", srv.mtrSite}})
+               .observe(std::max(0.0, sp.end - sp.beg));
       }
 
 // The session span is the trace root (no parent), covering the whole session as

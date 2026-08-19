@@ -41,9 +41,10 @@
           "properties": {
             "service": {
               "properties": {
-                "name":     { "type": "keyword" },
-                "version":  { "type": "keyword" },
-                "instance": { "properties": { "id": { "type": "keyword" } } }
+                "namespace": { "type": "keyword" },
+                "name":      { "type": "keyword" },
+                "version":   { "type": "keyword" },
+                "instance":  { "properties": { "id": { "type": "keyword" } } }
               }
             },
             "server": {
@@ -52,12 +53,15 @@
                 "port":    { "type": "integer" }
               }
             },
+            "process": {
+              "properties": {
+                "executable": { "properties": { "name": { "type": "keyword" } } }
+              }
+            },
             "xrootd": {
               "properties": {
                 "server": {
                   "properties": {
-                    "site":        { "type": "keyword" },
-                    "program":     { "type": "keyword" },
                     "id":          { "type": "long" },
                     "incarnation": { "type": "long" }
                   }

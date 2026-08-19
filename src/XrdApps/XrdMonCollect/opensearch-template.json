@@ -146,6 +146,8 @@
                 "read_max":     { "type": "long" },
                 "readv_min":    { "type": "long" },
                 "readv_max":    { "type": "long" },
+                "readv_segs_min": { "type": "long" },
+                "readv_segs_max": { "type": "long" },
                 "write_min":    { "type": "long" },
                 "write_max":    { "type": "long" },
                 "read_sumsq":   { "type": "double" },

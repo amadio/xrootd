@@ -917,8 +917,7 @@ std::string XrdMonDecode::otelIdentity(json& a, const Server& srv,
 
 void XrdMonDecode::foldSession(Server& srv, uint32_t userID,
                                const std::string& lfn, int64_t rdBytes,
-                               int64_t rvBytes, int64_t wrBytes, bool error,
-                               int32_t tWin)
+                               int64_t rvBytes, int64_t wrBytes, bool error)
 {
    if (!emitSessions) return;              // session correlation disabled
    auto uit = srv.users.find(userID);
@@ -937,7 +936,6 @@ void XrdMonDecode::foldSession(Server& srv, uint32_t userID,
    u.sReadBytes  += rdBytes;
    u.sReadvBytes += rvBytes;
    u.sWriteBytes += wrBytes;
-   if (tWin > u.sLast) u.sLast = tWin;
 
    const int64_t bytes = write ? wrBytes : rdBytes + rvBytes;
    u.sRecent.push_back(UserInfo::FileSummary{lfn, bytes, write});
@@ -954,20 +952,30 @@ void XrdMonDecode::foldSession(Server& srv, uint32_t userID,
 /*                           N o t e A c t i v e                              */
 /******************************************************************************/
 
-void XrdMonDecode::NoteActive(Server& srv, uint32_t userID, double tRec)
+void XrdMonDecode::NoteActive(Server& srv, uint32_t userID, double tBeg,
+                              double tEnd)
 {
-   if (!emitSessions || !userID || tRec <= 0) return;
+   if (!emitSessions || !userID || tBeg <= 0) return;
    auto uit = srv.users.find(userID);
    if (uit == srv.users.end()) return;
+   UserInfo& u = uit->second;
 
-// The session was demonstrably alive at this record, so it bounds the login
-// from above. An open is the earliest thing the f stream reports for a file
-// and precedes its close by the whole transfer, which is why this is tracked
-// over every record naming the session rather than over closes alone.
+// An instant leaves tEnd unset; a close passes the whole open -> close extent,
+// since the span it emits covers both ends and only the close record is in a
+// position to report them together. A producer with the pair inverted must not
+// be able to narrow either bound.
 //
-   const int32_t t = (int32_t)tRec;
-   if (uit->second.sFirst == 0 || t < uit->second.sFirst)
-      uit->second.sFirst = t;
+   if (tEnd < tBeg) tEnd = tBeg;
+
+// The session was demonstrably alive across this record, so it bounds the login
+// from above and the disconnect from below. Tracked over every record naming
+// the session rather than over closes alone: an open is the earliest thing the
+// f stream reports for a file and precedes its close by the whole transfer,
+// while an I/O trace or a redirect can be the only thing a session ever
+// produces.
+//
+   if (u.sFirst <= 0 || tBeg < u.sFirst) u.sFirst = tBeg;
+   if (tEnd > u.sLast)                   u.sLast  = tEnd;
 }
 
 /******************************************************************************/
@@ -1306,8 +1314,11 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
                       u.sReadvBytes = sn->value("rvb", (int64_t)0);
                       u.sWriteBytes = sn->value("wb",  (int64_t)0);
                       u.sLogin      = sn->value("login", 0);
-                      u.sFirst      = sn->value("first", 0);
-                      u.sLast       = sn->value("last",  0);
+                      // Fractional since the bounds became record times rather
+                      // than whole seconds; a snapshot written before that has
+                      // integers here, which read back as the same value.
+                      u.sFirst      = sn->value("first", 0.0);
+                      u.sLast       = sn->value("last",  0.0);
                       if (auto fr = sn->find("recent"); fr != sn->end())
                          for (const auto& f : *fr)
                              u.sRecent.push_back(
@@ -2224,6 +2235,18 @@ XrdMonDecode::sessionSpanOf(int32_t stod, const Server& srv, const UserInfo* u,
 //
    if (s.end <= 0) s.end = (double)Now();
 
+// Every record naming this session produced a document, and with --spans a span
+// parented by this one, so the window has to reach the last of them however the
+// disconnect was timed. It routinely is not: a record's time is interpolated
+// across its packet's window, and a close in one f-stream packet and the
+// disconnect in the next carry independent estimation error, so a transfer that
+// really did finish first can come out stamped later. Widened before the begin
+// candidates are admitted, since the end is their upper bound -- a late close
+// that pushes the end out also admits a login the old bound would have thrown
+// away.
+//
+   if (u && u->sLast > s.end) s.end = u->sLast;
+
 // A candidate is admissible only within [incarnation start, disconnect]. The
 // header's stod is the server's own process start time, so no session it
 // reports can predate it: that makes the floor exact in the server's clock
@@ -2235,26 +2258,33 @@ XrdMonDecode::sessionSpanOf(int32_t stod, const Server& srv, const UserInfo* u,
    const double floor = stod > 0 ? (double)stod : 0;
    auto ok = [&](double t) {return t > 0 && t >= floor && t <= s.end;};
 
-   const double login = u ? (double)u->sLogin : 0;
-   const double conn  = (u && u->connT > 0)
-                      ? toServerClock(srv, (double)u->connT) : 0;
-   const double first = u ? (double)u->sFirst : 0;
-
-// Best evidence first. The trace stream's disconnect carries the server's own
-// connect duration, so it needs no estimation at all; the login record's
-// arrival is a true login, but sampled from this collector's clock; the first
-// observed activity is exact but late, missing the login and the authentication
-// that precede it. When the middle two are both admissible the earlier wins:
-// the login precedes any activity by definition, and admission has already
-// bounded it.
+// Candidates in decreasing authority. The trace stream's disconnect carries the
+// server's own connect duration, so it needs no estimation at all; the login
+// record's arrival is a true login, but sampled from this collector's clock;
+// the first observed activity is exact but late, missing the login and the
+// authentication that precede it.
 //
-   if      (ok(login))            {s.beg = login; s.src = "login";}
-   else if (ok(conn) && ok(first)) {s.beg = std::min(conn, first);
-                                    s.src = conn <= first ? "connect"
-                                                          : "first_activity";}
-   else if (ok(conn))             {s.beg = conn;  s.src = "connect";}
-   else if (ok(first))            {s.beg = first; s.src = "first_activity";}
-   else                           {s.beg = s.end; s.src = "disconnect";}
+   const struct {double t; const char* src;} cand[] =
+      {{u ? (double)u->sLogin : 0,                                 "login"},
+       {(u && u->connT > 0) ? toServerClock(srv, (double)u->connT) : 0,
+                                                                   "connect"},
+       {u ? u->sFirst : 0,                                 "first_activity"}};
+
+// The earliest admissible candidate wins, ties going to the more authoritative
+// one. Taking the earliest rather than the most authoritative is what keeps the
+// window around its own activity: a login is exact only to the second the
+// server reported it in, while an open is interpolated in a different stream's
+// window, so an open that predates the login estimate is not a session that
+// started late -- it is a start that came out too late, and preferring it would
+// leave the file span hanging off the front of its parent.
+//
+   for (const auto& c : cand)
+       if (ok(c.t) && (s.beg <= 0 || c.t < s.beg)) {s.beg = c.t; s.src = c.src;}
+
+// Nothing survived admission (no login record, no activity, or all of it
+// outside the incarnation): the session is reported as an instant.
+//
+   if (s.beg <= 0) {s.beg = s.end; s.src = "disconnect";}
 
    return s;
 }
@@ -2483,12 +2513,12 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
 // disconnect). Only possible when the open was joined, which carries the user.
 //
    if (haveOpen)
-      {foldSession(srv, openUser, openLfn, rdBytes, rvBytes, wrBytes, hasErr,
-                   (int32_t)tRec);
-       // The open normally supplies the earlier bound, but a close whose open
-       // was never seen (packet lost, or the session predates this decoder)
-       // still dates the session.
-       NoteActive(srv, openUser, openTBeg > 0 ? openTBeg : tRec);
+      {foldSession(srv, openUser, openLfn, rdBytes, rvBytes, wrBytes, hasErr);
+       // The extent of the span emitted just below, so the session is bound to
+       // enclose it. The open normally supplies the earlier bound, but a close
+       // whose open was never seen (packet lost, or the session predates this
+       // decoder) still dates the session at its close.
+       NoteActive(srv, openUser, openTBeg > 0 ? openTBeg : tRec, tRec);
       }
 
 // Optional op-count detail (XrdXrootdMonStatOPS) when "ops" was configured.
@@ -2864,6 +2894,13 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
            {uint32_t openUser = 0;
             auto fit = srv.files.find(fileID);
             if (fit != srv.files.end()) openUser = fit->second.user;
+            // This record is about to become a document, and a span under the
+            // session's, at a time interpolated in the t stream while the file
+            // span's own bounds come from the f stream. The session has to
+            // cover it whichever way the two estimates fall out. Behind the
+            // emission gate above on purpose: with traces off there is no
+            // document here to enclose.
+            NoteActive(srv, openUser, tRec);
             std::string tid = traceIdOf(sessKey(src, stod, openUser));
             j["traceId"] = tid;
             j["spanId"]  = ioOp ? spanIdOf(src + "|" + std::to_string(stod)
@@ -3330,6 +3367,12 @@ void XrdMonDecode::DecodeRStream(const std::string& src, int32_t stod,
                 else if (!hp.empty()) a["xrootd.redirect.target.address"] = hp;
 
              otelIdentity(a, srv, did);
+
+             // A redirect concludes an operation the session asked for, and its
+             // span hangs off the session's, so it dates the session like any
+             // other record naming it -- a client that only ever gets
+             // redirected produces no other.
+             NoteActive(srv, did, (double)tWin);
 
              std::string sess = sessKey(src, stod, did);
              j["traceId"] = traceIdOf(sess);

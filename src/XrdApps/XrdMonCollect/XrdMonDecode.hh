@@ -322,11 +322,16 @@ struct UserInfo
    int32_t  sLogin      = 0;  // exact login time in the server's own clock,
                               // from the trace stream's disconnect record
                               // (its time less the connect duration it carries)
-   int32_t  sFirst      = 0;  // earliest server-reported time of any record
-                              // naming this session (open, transfer snapshot,
-                              // close or error): the session's first observed
-                              // activity, which bounds the login from above
-   int32_t  sLast       = 0;  // window time of the most recent folded close
+   // The session's observed activity, in the server's clock: the earliest and
+   // latest time of any record naming it (open, I/O trace, transfer snapshot,
+   // close, error or redirect). Every such record also produces a document, and
+   // with --spans a span parented by the session's, so these two are what the
+   // reported window has to enclose -- see sessionSpanOf. Fractional, because
+   // record times are interpolated within a packet window and the documents
+   // carry them at that precision; truncating to seconds would leave the bound
+   // up to a second short of the record it exists to cover.
+   double   sFirst      = 0;
+   double   sLast       = 0;
    std::deque<FileSummary> sRecent;  // capped most-recent file summaries
 
    // The session's disconnect has been reported. The entry outlives it -- a
@@ -643,12 +648,15 @@ std::string otelIdentity(nlohmann::json& attrs, const Server& srv,
 //! Fold one finished file close into the user's session rollup (counters and a
 //! capped recent-file list), keeping the entry's LRU weight in step. No-op when
 //! the user dictid is unknown (e.g. user monitoring off or the 'u' record lost).
+//! Times are not its business: NoteActive keeps those.
 void     foldSession(Server& srv, uint32_t userID, const std::string& lfn,
                      int64_t rdBytes, int64_t rvBytes, int64_t wrBytes,
-                     bool error, int32_t tWin);
-//! Record the earliest server-reported activity seen for a session, from any
-//! record that names its user dictid. No-op when the dictid is unknown.
-void     NoteActive(Server& srv, uint32_t userID, double tRec);
+                     bool error);
+//! Widen a session's observed activity bounds to cover one record naming its
+//! user dictid, in the server's clock. `tBeg`/`tEnd` are the record's own
+//! extent: a close passes its open and close times, everything else is an
+//! instant and leaves `tEnd` at 0. No-op when the dictid is unknown.
+void     NoteActive(Server& srv, uint32_t userID, double tBeg, double tEnd = 0);
 
 //! Record a session's exact login time from a trace-stream disconnect: `tRec`
 //! is the record's time and `csec` the connect duration it carries, both in the
@@ -673,8 +681,10 @@ struct SessionSpan
 //! Resolve a session's bounds at its disconnect. Always returns a usable pair
 //! with `beg <= end`: candidates are admitted only inside [stod, end], the
 //! incarnation's own start time being a floor no session can predate, and the
-//! disconnect itself is the last resort. `u` may be null when the login record
-//! was never seen (or has been evicted).
+//! disconnect itself is the last resort. The result also encloses the session's
+//! observed activity (UserInfo::sFirst/sLast), so no record the session parents
+//! falls outside the window reported for it. `u` may be null when the login
+//! record was never seen (or has been evicted).
 SessionSpan sessionSpanOf(int32_t stod, const Server& srv, const UserInfo* u,
                           double tRec) const;
 

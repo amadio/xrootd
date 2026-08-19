@@ -2247,13 +2247,15 @@ XrdMonDecode::sessionSpanOf(int32_t stod, const Server& srv, const UserInfo* u,
 //
    if (u && u->sLast > s.end) s.end = u->sLast;
 
-// A candidate is admissible only within [incarnation start, disconnect]. The
-// header's stod is the server's own process start time, so no session it
-// reports can predate it: that makes the floor exact in the server's clock
-// rather than a guess, and it rejects both a mistranslated collector stamp and
-// a rollup restored from an older run. Because admission is the only way into
-// the result, stod <= beg <= end holds by construction and the duration cannot
-// come out negative.
+// A candidate is admissible only within [incarnation start, end as widened
+// above]. The header's stod is the server's own process start time, so no
+// session it reports can predate it: that makes the floor exact in the server's
+// clock rather than a guess, and it rejects both a mistranslated collector
+// stamp and a rollup restored from an older run. It is not a bound the activity
+// widening has to escape -- an interpolated time cannot precede the
+// incarnation's first window start, which cannot precede stod. Because
+// admission is the only way into the result, stod <= beg <= end holds by
+// construction and the duration cannot come out negative.
 //
    const double floor = stod > 0 ? (double)stod : 0;
    auto ok = [&](double t) {return t > 0 && t >= floor && t <= s.end;};

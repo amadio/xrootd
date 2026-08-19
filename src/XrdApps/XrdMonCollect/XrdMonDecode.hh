@@ -474,9 +474,16 @@ std::string ServerName(const Server& srv, const std::string& src) const;
 void     LabelServer(Server& srv, const std::string& src);
 //! Publish the per-server live-state gauges (files_open, sessions_open) from
 //! the correlation tables. Call after anything that grows or shrinks them.
-//! sessions_open counts known user dictids, so it stays at zero when the
+//! sessions_open counts live client sessions, so it stays at zero when the
 //! server's monitor config omits the `user` destination.
 void     LiveGauges(const Server& srv);
+//! Recount servers per site into the servers{site} gauge. Call when an
+//! incarnation appears, when a '=' ident moves one between sites, and after
+//! reaping. Walks the (small) incarnation table.
+void     ServerGauges();
+//! Publish (or, with `live` false, retire) one server's identity as
+//! server_info{...} = 1. `ip` is the numeric source address.
+void     ServerInfo(const Server& srv, const std::string& ip, bool live);
 //! The decoder's view of the wall clock (see SetClock).
 time_t   Now() const {return nowFn ? nowFn() : time(nullptr);}
 //! Fold one f-stream window end into the incarnation's clock-offset estimate.
@@ -705,6 +712,10 @@ bool     emitSpans    = false;   // companion OTLP span documents (--spans)
 void        resolveLocalHost();   // resolve localHost once, at construction
 std::string publicFor(const std::string& ip) const;
 std::string localHost;
+// Sites currently published in the servers{} gauge, so one whose last server
+// went away can be parked at zero. The registry cannot remove a series, and a
+// frozen nonzero value would read as a cluster that is still reporting.
+std::unordered_set<std::string> mtrSites;
 std::string localIP4;
 std::string localIP6;
 

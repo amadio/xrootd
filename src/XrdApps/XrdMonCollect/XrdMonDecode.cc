@@ -209,6 +209,15 @@ constexpr const char* kIoBytesHelp =
 constexpr const char* kFilesOpenHelp =
    "files currently open on the server";
 
+constexpr const char* kServersHelp =
+   "servers currently reporting to this collector, by site";
+
+constexpr const char* kServerInfoHelp =
+   "identity of each reporting server (always 1; the information is in the "
+   "labels). Retired incarnations are parked at 0, so count by (site) over "
+   "this can outrun servers{site} after an upgrade -- servers{site} is the "
+   "live count";
+
 constexpr const char* kSessionsOpenHelp =
    "client sessions currently open on the server (counted from the user "
    "dictionary, so zero unless the server's monitor config includes a "
@@ -474,7 +483,7 @@ XrdMonDecode::Server& XrdMonDecode::ServerFor(const std::string& src,
 // never returns "" (the numeric source IP is its floor), so this runs once per
 // incarnation here and again from DecodeIdent when the identity lands.
 //
-   if (srv.mtrServer.empty()) LabelServer(srv, src);
+   if (srv.mtrServer.empty()) {LabelServer(srv, src); ServerGauges();}
    return srv;
 }
 
@@ -506,6 +515,52 @@ void XrdMonDecode::LabelServer(Server& srv, const std::string& src)
 {
    srv.mtrSite   = siteKnown(srv.ident.site) ? srv.ident.site : kSiteUnknown;
    srv.mtrServer = ServerName(srv, src);
+}
+
+/******************************************************************************/
+/*                          S e r v e r G a u g e s                           */
+/******************************************************************************/
+
+void XrdMonDecode::ServerGauges()
+{
+   if (!metrics) return;
+
+// Count distinct servers, not incarnations: a server that restarted has two
+// until the old one is reaped, and it is still one server.
+//
+   std::unordered_map<std::string, std::unordered_set<std::string>> bySite;
+   for (const auto& [key, s] : servers) bySite[s.mtrSite].insert(s.mtrServer);
+
+   for (const auto& [site, names] : bySite)
+       metrics->gaugeSeries("servers", kServersHelp, {{"site", site}})
+               = (double)names.size();
+
+   for (const auto& site : mtrSites)
+       if (!bySite.count(site))
+          metrics->gaugeSeries("servers", kServersHelp, {{"site", site}}) = 0.0;
+
+   mtrSites.clear();
+   for (const auto& [site, names] : bySite) mtrSites.insert(site);
+}
+
+/******************************************************************************/
+/*                            S e r v e r I n f o                             */
+/******************************************************************************/
+
+void XrdMonDecode::ServerInfo(const Server& srv, const std::string& ip,
+                              bool live)
+{
+   if (!metrics) return;
+
+// instance_name, not instance: Prometheus attaches its own `instance` label at
+// scrape time and renames any collision to exported_instance.
+//
+   metrics->gaugeSeries("server_info", kServerInfoHelp,
+                  {{"site", srv.mtrSite}, {"server", srv.mtrServer},
+                   {"ip", ip},
+                   {"instance_name", srv.ident.inst},
+                   {"program", srv.ident.pgm},
+                   {"version", srv.ident.ver}}) = live ? 1.0 : 0.0;
 }
 
 /******************************************************************************/
@@ -638,6 +693,22 @@ bool XrdMonDecode::emitDoc(json& j)
 {
    if (!doc) return false;
    if (filter && !filter->Apply(j)) {stats.filtered++; return false;}
+
+// Every document goes out through here, whatever produced it, so this is where
+// they are counted. The site comes off the document's own resource block
+// rather than from a Server reference the callers would all have to thread
+// through; documents omit an unknown site, hence the default.
+//
+   if (metrics)
+      {auto r = j.find("resource");   // find, not [] -- [] would insert an
+       std::string site = kSiteUnknown;   // empty block into the document
+       if (r != j.end())
+          site = r->value("xrootd.server.site", std::string(kSiteUnknown));
+       metrics->counterSeries("documents_total",
+                        "documents emitted to the sinks (after filtering)",
+                        {{"site", site}}) += 1;
+      }
+
    doc(j.dump());
    return true;
 }
@@ -1250,6 +1321,13 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
                  }
           }
 
+       // Publish the restored population now rather than waiting for the first
+       // packet: after a collector restart the snapshot is all we know, and it
+       // is what the site is reporting.
+       ServerGauges();
+       for (const auto& [key, s] : servers)
+           ServerInfo(s, key.substr(0, key.rfind(':')), true);
+
        note = "restored " + std::to_string(servers.size())
             + " server incarnation(s), " + std::to_string(nUsers)
             + " user(s), " + std::to_string(nFiles)
@@ -1573,6 +1651,7 @@ void XrdMonDecode::ReapServers(time_t now)
 
    if (!serverTTL) return;
 
+   bool reaped = false;
    for (auto it = servers.begin(); it != servers.end(); )
       {Server& s = it->second;
        if (!s.lastSeen || now - s.lastSeen <= serverTTL) {++it; continue;}
@@ -1608,12 +1687,16 @@ void XrdMonDecode::ReapServers(time_t now)
                   {{"site", s.mtrSite}, {"server", s.mtrServer}};
                metrics->gaugeSeries("files_open",    kFilesOpenHelp,    id) = 0.0;
                metrics->gaugeSeries("sessions_open", kSessionsOpenHelp, id) = 0.0;
+               ServerInfo(s, pre.substr(0, pre.rfind(':')), false);
               }
           }
 
        it = servers.erase(it);
        stats.reaped++;
+       reaped = true;
       }
+
+   if (reaped) ServerGauges();
 }
 
 /******************************************************************************/
@@ -1783,6 +1866,8 @@ void XrdMonDecode::DecodeIdent(const std::string& src, int32_t stod,
 // "xrootd.monitor ... ident" interval, an hour by default.
 //
    LabelServer(srv, src);
+   ServerGauges();
+   ServerInfo(srv, src.substr(0, src.rfind(':')), true);
 
    if (dumpRaw && raw)
       {json j = {{"code", "="}, {"info", first}};

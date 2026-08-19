@@ -1682,6 +1682,45 @@ TEST(XrdMonCollect, IdentRelabelsMetricSeries)
   EXPECT_EQ(out.find("10.0.0.1:9930"), std::string::npos) << out;
 }
 
+// servers{site} answers "how many are reporting", and moves a server between
+// sites when its ident lands. server_info carries the identity that would
+// otherwise need a label on every series.
+TEST(XrdMonCollect, ServersAndInfoPerSite)
+{
+  XrdMetrics::Collector collector("xrootd");
+  XrdMonDecode dec([](const std::string&){}, nullptr, false, false, false,
+                   false, &collector.subsystem("collector"));
+
+  auto ping = [&](const char* from)
+     {auto pkt = packet('Z', kStod, std::vector<unsigned char>(16, 0));
+      dec.Process(from, (const char*)pkt.data(), pkt.size()); };
+  auto scrape = [&]{ std::string out;
+                     XrdMetrics::PrometheusTextSerializer ser(out);
+                     collector.serialize(ser); return out; };
+
+  ping("10.0.0.1:9930");
+  ping("10.0.0.2:9930");
+  EXPECT_NE(scrape().find("xrootd_collector_servers{site=\"unknown\"} 2"),
+            std::string::npos) << scrape();
+
+  feedIdent(dec, "srv.example.org");   // relabels 10.0.0.1 into site S
+  std::string out = scrape();
+  EXPECT_NE(out.find("xrootd_collector_servers{site=\"S\"} 1"),
+            std::string::npos) << out;
+  EXPECT_NE(out.find("xrootd_collector_servers{site=\"unknown\"} 1"),
+            std::string::npos) << out;
+  // The identity moves into labels, with the numeric address kept alongside
+  // the resolved name so a dashboard can map either way.
+  EXPECT_NE(out.find("xrootd_collector_server_info{site=\"S\","
+                     "server=\"srv.example.org\",ip=\"10.0.0.1\","
+                     "instance_name=\"mgr\",program=\"xrootd\","
+                     "version=\"v6\"} 1"),
+            std::string::npos) << out;
+  // Prometheus stamps its own `instance` at scrape time and would rename a
+  // collision to exported_instance, so ours must not be called that.
+  EXPECT_EQ(out.find("instance=\""), std::string::npos) << out;
+}
+
 // A site of only dots is XrdOucSiteName's sanitization of an all-invalid name;
 // it carries no more information than an absent one, so it must not become a
 // label value of its own.

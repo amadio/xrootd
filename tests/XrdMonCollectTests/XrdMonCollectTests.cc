@@ -2794,6 +2794,155 @@ TEST(XrdMonCollect, SessionStartNeverAfterEnd)
      }
 }
 
+namespace {
+// Every span a decoder emitted, in the order produced.
+std::vector<json> allSpans(const std::vector<std::string>& docs)
+{
+   std::vector<json> v;
+   for (const auto& d : docs)
+      {json x = json::parse(d);
+       if (x.contains("kind")) v.push_back(std::move(x));
+      }
+   return v;
+}
+
+uint64_t spanBeg(const json& s)
+{  return std::stoull(s["startTimeUnixNano"].get<std::string>()); }
+uint64_t spanEnd(const json& s)
+{  return std::stoull(s["endTimeUnixNano"].get<std::string>()); }
+
+// One t-stream packet: a window mark at `win` followed by a read of `len` bytes
+// on file `fileID`, so the I/O record is stamped at the window.
+void feedTraceRead(XrdMonDecode& dec, const std::string& src, int32_t win,
+                   uint32_t fileID, int32_t len)
+{
+   W payload;
+   { std::vector<unsigned char> a0(8, 0); a0[0] = 0xe0;   // WINDOW
+     payload.raw(trace(a0, (uint32_t)win, (uint32_t)win)); }
+   { auto a0 = u64v(0);                                   // read at offset 0
+     payload.raw(trace(a0, (uint32_t)len, fileID)); }
+   auto pkt = packet('t', kStod, payload.b);
+   dec.Process(src, (const char*)pkt.data(), pkt.size());
+}
+}
+
+// The reported failure: a record's time is interpolated across its packet's
+// window, so a close and the disconnect that follows it carry independent
+// estimation error and the close can come out stamped later. The session used
+// to end at the disconnect regardless, which a trace viewer draws as the file's
+// span hanging off the end of its own parent.
+TEST(XrdMonCollect, SessionEnclosesACloseStampedPastTheDisconnect)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetEmitSessions(true);
+  dec.SetEmitSpans(true);
+
+  const int32_t W = kOpenT;
+  feedUserN(dec, "h:1", 7);
+  feedF(dec, "h:1", W,       openRec(100, 7, "/store/f.root"));
+  feedF(dec, "h:1", W + 100, closeRec(100));   // the transfer, W -> W+100
+  feedF(dec, "h:1", W +  50, discRec(7));      // ...disconnect stamped earlier
+
+  json j = sessionDoc(docs);
+  ASSERT_FALSE(j.is_null());
+  const json& a = j["attributes"];
+  EXPECT_EQ(a["xrootd.session.end_time"], isoOf(W + 100));   // not W+50
+  EXPECT_EQ(a["xrootd.session.start_time"], isoOf(W));
+  EXPECT_EQ(a["xrootd.session.duration"].get<double>(), 100.0);
+
+  // The point of the widening: the file's span is inside its parent's.
+  json sess = sessionSpan(docs);
+  ASSERT_FALSE(sess.is_null());
+  bool sawFile = false;
+  for (const json& s : allSpans(docs))
+     {if (s["name"] == "session") continue;
+      sawFile = true;
+      EXPECT_GE(spanBeg(s), spanBeg(sess)) << s.dump();
+      EXPECT_LE(spanEnd(s), spanEnd(sess)) << s.dump();
+     }
+  EXPECT_TRUE(sawFile);
+}
+
+// The t and f streams window independently, so a trace record can be stamped
+// past the f-stream disconnect however well each stream is behaving. Its span
+// is a descendant of the session's, so the session has to reach it.
+TEST(XrdMonCollect, SessionEnclosesTraceIoPastTheDisconnect)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); },
+                   nullptr, false, /*traces=*/true);
+  dec.SetEmitSessions(true);
+
+  const int32_t W = kOpenT;
+  feedUserN(dec, "h:1", 7);
+  feedF(dec, "h:1", W, openRec(100, 7, "/store/f.root"));
+  feedTraceRead(dec, "h:1", W + 100, 100, 4096);   // t stream runs ahead
+  feedF(dec, "h:1", W + 50, discRec(7));
+
+  json j = sessionDoc(docs);
+  ASSERT_FALSE(j.is_null());
+  EXPECT_EQ(j["attributes"]["xrootd.session.end_time"], isoOf(W + 100));
+}
+
+// The exact login (the t-stream disconnect's connect duration) used to win
+// outright whenever it was admissible. It is exact only to the second the
+// server reported it in, while an open is interpolated in another stream's
+// window, so an open ahead of it is not a session that started late -- it is a
+// start that came out too late, and taking it would put the file's span in
+// front of its parent's.
+TEST(XrdMonCollect, SessionStartsAtActivityPredatingTheLogin)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetEmitSessions(true);
+
+  const int32_t W = kOpenT;          // the open
+  const int32_t T = W + 500;         // the disconnect
+  feedUserN(dec, "h:1", 7);
+  feedF(dec, "h:1", W, openRec(100, 7, "/store/f.root"));
+  feedTraceDisc(dec, "h:1", T, 7, 480);   // login lands at W+20, after the open
+  feedF(dec, "h:1", T, discRec(7));
+
+  json j = sessionDoc(docs);
+  ASSERT_FALSE(j.is_null());
+  const json& a = j["attributes"];
+  EXPECT_EQ(a["xrootd.session.start_time"], isoOf(W));         // not W+20
+  EXPECT_EQ(a["xrootd.session.start_time_source"], "first_activity");
+  EXPECT_EQ(a["xrootd.session.duration"].get<double>(), 500.0);
+}
+
+// The invariant itself, over a session whose records arrive from both streams:
+// no span the session parents falls outside the window reported for it.
+TEST(XrdMonCollect, SessionSpanContainsEveryChildSpan)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); },
+                   nullptr, false, /*traces=*/true);
+  dec.SetEmitSessions(true);
+  dec.SetEmitSpans(true);
+
+  const int32_t W = kOpenT;
+  feedUserN(dec, "h:1", 7);
+  feedF(dec, "h:1", W, openRec(100, 7, "/store/f.root"));
+  feedTraceRead(dec, "h:1", W + 100, 100, 4096);   // past every f-stream window
+  feedF(dec, "h:1", W + 30, closeRec(100));
+  feedF(dec, "h:1", W + 40, discRec(7));
+
+  json sess = sessionSpan(docs);
+  ASSERT_FALSE(sess.is_null());
+
+  int children = 0;
+  for (const json& s : allSpans(docs))
+     {if (s["name"] == "session") continue;
+      children++;
+      EXPECT_EQ(s["traceId"], sess["traceId"]) << s.dump();
+      EXPECT_GE(spanBeg(s), spanBeg(sess)) << s["name"] << " starts before";
+      EXPECT_LE(spanEnd(s), spanEnd(sess)) << s["name"] << " ends after";
+     }
+  EXPECT_EQ(children, 2);            // the file's transfer span and the read's
+}
+
 // A leaked open with no disconnect (its user map was lost too) is expired by
 // the file TTL, but only for servers that report in-flight snapshots (isXfr):
 // there a live transfer refreshes its entry every interval, so an untouched

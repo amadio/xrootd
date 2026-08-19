@@ -319,6 +319,31 @@ function test_moncollect() {
 	assert grep -Eq '"startTimeUnixNano":"[0-9]+"' <<<"${sess_span}"
 	assert_failure grep -q '"parentSpanId"' <<<"${sess_span}"
 
+	# A session's window encloses every record it accounts for, so no span in
+	# its trace may fall outside the session span. Record times are interpolated
+	# per packet window and the f and t streams window independently, so this is
+	# the one assertion a real server exercises that a unit test cannot: the two
+	# streams here are genuinely unsynchronised. Gated on python3 like the OTLP
+	# receiver above -- the rest of the e2e runs without it.
+	if command -v python3 >/dev/null 2>&1; then
+		assert python3 -c '
+import json, sys
+sess, spans = {}, []
+for line in open(sys.argv[1]):
+    d = json.loads(line)
+    if "kind" not in d: continue
+    beg, end = int(d["startTimeUnixNano"]), int(d["endTimeUnixNano"])
+    if d.get("name") == "session": sess[d["traceId"]] = (beg, end)
+    else: spans.append((d["traceId"], d.get("name"), beg, end))
+bad = [s for s in spans if s[0] in sess
+       and (s[2] < sess[s[0]][0] or s[3] > sess[s[0]][1])]
+for t, n, b, e in bad:
+    print("span %s escapes session %s: [%d,%d] vs %s" % (n, t, b, e, sess[t]),
+          file=sys.stderr)
+sys.exit(1 if bad else 0)
+' "${COLLECTOR_OUT}"
+	fi
+
 	# OTLP export (when the mock receiver is running): the collector must POST an
 	# OTLP logs export to /v1/logs (resourceLogs envelope with typed KeyValue
 	# attributes) and, with --spans, a traces export to /v1/traces.

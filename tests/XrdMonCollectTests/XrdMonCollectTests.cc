@@ -736,6 +736,60 @@ TEST_F(Transfer, AppInfoEnrichesTransfer)
   EXPECT_FALSE(j["attributes"].contains("xrootd.user.raw"));
 }
 
+// The app label prefers the 'i'-stream appid over the login's client
+// executable, and falls back to "unknown" when the close matched no open (and
+// so resolved no identity at all).
+TEST(XrdMonCollect, AppLabelPrefersAppidOverExecutable)
+{
+  auto run = [](bool withAppid, const char* execName)
+     {XrdMetrics::Collector collector("xrootd");
+      XrdMonDecode d([](const std::string&){}, nullptr, false, false, false,
+                     false, &collector.subsystem("collector"));
+      { W body; body.u32(7);
+        std::string info = "xroot/alice.123:4@wn.example.org";
+        if (*execName) info += std::string("\n&x=") + execName;
+        std::vector<unsigned char> pl = body.b;
+        pl.insert(pl.end(), info.begin(), info.end());
+        auto pkt = packet('u', kStod, pl);
+        d.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size()); }
+      if (withAppid)
+         { W body; body.u32(9);
+           std::string info = "xroot/alice.123:4@wn.example.org\nreco-2026";
+           std::vector<unsigned char> pl = body.b;
+           pl.insert(pl.end(), info.begin(), info.end());
+           auto pkt = packet('i', kStod, pl);
+           d.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size()); }
+      { W body; body.u32(100); body.u64(123456); body.u32(7);
+        std::string lfn = "/store/f.root"; body.raw(lfn); body.u8(0);
+        auto payload = todRec(kOpenT, 42);
+        auto r = rec(1 /*isOpen*/, 0x03, body.b);
+        payload.insert(payload.end(), r.begin(), r.end());
+        auto pkt = packet('f', kStod, payload);
+        d.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size()); }
+      { W body; body.u32(100); body.u64(4096); body.u64(0); body.u64(0);
+        auto payload = todRec(kCloseT, 42);
+        auto r = rec(0 /*isClose*/, 0, body.b);
+        payload.insert(payload.end(), r.begin(), r.end());
+        auto pkt = packet('f', kStod, payload);
+        d.Process("10.0.0.1:9930", (const char*)pkt.data(), pkt.size()); }
+      std::string out;
+      XrdMetrics::PrometheusTextSerializer ser(out); collector.serialize(ser);
+      return out; };
+
+  EXPECT_NE(run(true, "xrdcp").find(
+              "xrootd_collector_app_io_bytes_total{site=\"unknown\","
+              "app=\"reco-2026\",operation=\"read\"} 4096"),
+            std::string::npos);
+  EXPECT_NE(run(false, "xrdcp").find(
+              "xrootd_collector_app_io_bytes_total{site=\"unknown\","
+              "app=\"xrdcp\",operation=\"read\"} 4096"),
+            std::string::npos);
+  EXPECT_NE(run(false, "").find(
+              "xrootd_collector_app_io_bytes_total{site=\"unknown\","
+              "app=\"unknown\",operation=\"read\"} 4096"),
+            std::string::npos);
+}
+
 // file.path is decomposed into file.name, the semconv file.directory, and
 // file.extension (last extension, no leading dot).
 TEST_F(Transfer, FileDirectoryDerived)
@@ -1622,6 +1676,14 @@ TEST_F(Transfer, OperationsAggregateIntoIoTotal)
   EXPECT_NE(out.find(bpx + ",operation=\"read\"} 4096"),  std::string::npos) << out;
   EXPECT_NE(out.find(bpx + ",operation=\"readv\"} 8192"), std::string::npos) << out;
   EXPECT_EQ(out.find(bpx + ",operation=\"write\""), std::string::npos) << out;
+
+  // The same volumes attributed to the client application. No server label:
+  // app x server is the one product with real cardinality risk, and the login
+  // here carries only '&x=', so user_agent.name supplies the name.
+  const std::string apx = "xrootd_collector_app_io_bytes_total"
+                          "{site=\"unknown\",app=\"unknown\"";
+  EXPECT_NE(out.find(apx + ",operation=\"read\"} 4096"),  std::string::npos) << out;
+  EXPECT_NE(out.find(apx + ",operation=\"readv\"} 8192"), std::string::npos) << out;
 
   // Metrics retired with the whole-file classification and with the per-close
   // aggregates, none of which described a whole-file transfer.

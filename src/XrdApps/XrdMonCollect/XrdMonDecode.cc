@@ -2421,6 +2421,8 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
    uint32_t openUser = 0;      // user dictid from the open (for session rollup)
    std::string openLfn;        // lfn from the open (for the session rollup)
    double   openTBeg = 0;      // open time (for the file-operation span start)
+   double   openTIo  = 0;      // latest I/O record already emitted as this
+                               // file's child (for the span end)
 
 // Terminal status is needed up front: it drives the log severity. "forced"
 // (disconnect-driven) is not a failure on its own; only a trailing
@@ -2461,6 +2463,7 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
        openUser = of.user;
        openLfn  = of.lfn;
        openTBeg = of.tOpen;
+       openTIo  = of.tIoLast;
        setFile(a, of.lfn);
        a["file.size"] = of.fsz;
        a["xrootd.file.read_write"] = of.rw;
@@ -2643,11 +2646,18 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
    stats.docs++;
 
 // Companion span for this file operation (open -> close), child of the session
-// span. Start at the open time when known, else the close time.
+// span. Start at the open time when known, else the close time. The end also
+// covers any I/O record already emitted as this file's child: those go out as
+// they arrive, long before this close, so clamping them to it was never an
+// option and the span has to reach them instead. It normally does not have to
+// move -- the clamp in DecodeTStream has already bounded them by the collector's
+// own clock -- and this is deliberately not folded into
+// xrootd.operation.duration, which stays the open -> close estimate rather than
+// absorbing another stream's windowing error.
 //
    if (emitDoc(j, srv))
       emitSpan(j, opName,
-               openTBeg > 0 ? openTBeg : tRec, tRec,
+               openTBeg > 0 ? openTBeg : tRec, std::max(tRec, openTIo),
                spanIdOf(sessKey(src, stod, openUser) + "|session"));
 }
 
@@ -2895,13 +2905,37 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
         if (fileID)
            {uint32_t openUser = 0;
             auto fit = srv.files.find(fileID);
-            if (fit != srv.files.end()) openUser = fit->second.user;
-            // This record is about to become a document, and a span under the
-            // session's, at a time interpolated in the t stream while the file
-            // span's own bounds come from the f stream. The session has to
-            // cover it whichever way the two estimates fall out. Behind the
-            // emission gate above on purpose: with traces off there is no
-            // document here to enclose.
+            // The time above is only as good as this stream's windowing, and
+            // that is much coarser than the bounds of the file the record is
+            // on: records between two window marks are spread across the
+            // window, and those after the last mark all land on its start,
+            // there being nothing yet to bound them above. Measured against a
+            // real server the gap runs to tens of seconds either way, against
+            // file spans a fraction of a second long -- so this record's own
+            // estimate is the weaker of the two and gets clamped, rather than
+            // the file span being stretched out to reach it.
+            //
+            // The bounds are physical, not heuristic. This one needs nothing
+            // correlated: whatever the stream says, the I/O cannot have
+            // happened after the packet reporting it arrived here.
+            //
+            const double tNow = toServerClock(srv, (double)Now());
+            if (tNow > 0 && tRec > tNow) tRec = tNow;
+
+            if (fit != srv.files.end())
+               {OpenFile& of = fit->second;
+                openUser = of.user;
+                // And it cannot precede the open of the file it is on. The
+                // close would be the tighter upper bound, but it has not
+                // arrived -- this record goes out long before it -- so
+                // EmitClose widens the file span over whatever is left.
+                if (of.tOpen > 0 && tRec < of.tOpen) tRec = of.tOpen;
+                if (tRec > of.tIoLast) of.tIoLast = tRec;
+               }
+            // The clamped record still becomes a document, and a span under the
+            // session's, so the session has to cover it however the streams'
+            // estimates fall out. Behind the emission gate above on purpose:
+            // with traces off there is no document here to enclose.
             NoteActive(srv, openUser, tRec);
             std::string tid = traceIdOf(sessKey(src, stod, openUser));
             j["traceId"] = tid;
@@ -2924,7 +2958,16 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
 // With --spans, an I/O op also appears as a child span under the file's transfer
 // span (emitSpan is a no-op otherwise); ev is "xrootd.io.<op>", so skipping the
 // prefix names the span with the bare operation. I/O entries are instants: the
-// span is zero-length at the record's (interpolated) time.
+// span is zero-length at the record's (clamped) time.
+//
+// A record whose open has not been seen is a span this decoder cannot place:
+// the trace id falls back to the session-less key while
+// the parent id is still the file's, so it lands in one trace claiming a parent
+// in another, and the clamp above had no open time to bound it by. It is still
+// emitted -- the two streams flush on their own schedules and the I/O record
+// routinely overtakes the open, so withholding those would leave a busy server
+// emitting almost no I/O spans at all. See README.md ("Span nesting") for what
+// this costs and why fixing it is a change to the correlation model.
 //
         constexpr std::size_t kIoEvPfx = sizeof("xrootd.io.") - 1;
         if (sent && ioOp && fileID)

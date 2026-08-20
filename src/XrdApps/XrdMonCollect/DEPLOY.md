@@ -381,7 +381,7 @@ state-ttl = 15m
 # flush-secs = 5           # max age of a partial batch
 # rcvbuf = 16M             # kernel UDP receive buffer
 # queue-depth = 64         # receiver -> serializer batches in flight
-# max-memory = 256M        # correlation-state budget (LRU eviction above)
+# max-memory = 1G          # total process memory cap (LRU eviction above)
 # server-ttl = 86400       # reap idle server incarnations after this many s
 
 # --- Enrichment (optional) ------------------------------------------------
@@ -997,7 +997,7 @@ spec:
             periodSeconds: 30
           resources:
             requests: { cpu: 500m, memory: 512Mi }
-            limits: { memory: 1Gi }     # keep above max-memory + headroom
+            limits: { memory: 1536Mi }  # ~1.5x max-memory: the cap is best-effort
           volumeMounts:
             - name: config
               mountPath: /etc/xrootd/xrdmoncollect.cfg
@@ -2189,7 +2189,7 @@ each backend, sized to the volume you provisioned:
 | Loki | `limits_config.retention_period` + `compactor.retention_enabled` | section 11 config (168 h shown — raise for production) |
 | Tempo | block retention (default 14 d) | Tempo 3.x storage settings — the 2.x `compactor:` block is gone; consult the 3.x docs for the current key |
 | OpenSearch | ISM policy (below) | applied once via the API |
-| collector | `spool-max` (shovel spool), `max-memory`/`server-ttl` (state) | section 3 configs |
+| collector | `spool-max` (shovel spool), `max-memory` (process memory), `server-ttl` (state) | section 3 configs |
 | Grafana | none (config database) | back it up instead (18.5) |
 
 OpenSearch ISM policy — roll the `xrootd-transfers` data stream daily and
@@ -2291,6 +2291,8 @@ All from the `moncollect` Prometheus job (section 9):
 | spool backlog | `xrootd_collector_cache_files` growing for >1 h | backend outage outlasting the buffer |
 | shovel spool dropping | `rate(xrootd_shoveler_spool_dropped_total[10m]) > 0` | outage exceeded `spool-max` — data loss |
 | state pressure | `xrootd_collector_evicted_total` climbing | raise `max-memory` or lower `server-ttl` |
+| cap unmeetable | `xrootd_collector_memory_floored_total` climbing | the memory is not in the correlation state: check the OTLP batch, the disk cache, and the container limit |
+| over cap | `xrootd_process_resident_memory_bytes > 1.25 * <max-memory>` | the loop is losing; raise the cap or find the real consumer |
 | servers gone quiet | `xrootd_collector_servers{cluster="..."} < N` | nodes stopped reporting — check their `xrootd.monitor dest` |
 | unattributed servers | `xrootd_collector_servers{cluster="unknown"} > 0` for >1 h | a server has no `all.sitename`, or its `ident` interval is longer than the alert window |
 

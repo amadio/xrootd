@@ -85,9 +85,13 @@ port = 9930
 # Serve aggregated Prometheus metrics over HTTP on this port (0 = disabled).
 # metrics-port = 9931
 
-# Bound correlation state to ~this many bytes (K/M/G/T suffix; 0 = unbounded),
-# with an optional hard entry cap and an idle-incarnation reap age in seconds.
-# max-memory = 256M
+# Cap TOTAL process memory at ~this many bytes (K/M/G/T suffix; 0 = unbounded),
+# met by evicting least-recently-used correlation state. Best-effort: only the
+# correlation state can be evicted, so use a cgroup MemoryMax= for a hard bound.
+# Note this used to bound an estimate of the correlation state alone, which ran
+# 4-8x below real usage -- review a value carried over from then.
+# Alongside it, an optional hard entry cap and an idle-incarnation reap age.
+# max-memory = 1G
 # max-entries = 0
 # server-ttl = 86400
 

@@ -13,7 +13,8 @@ xrdmoncollect - collect and correlate XRootD detailed monitoring streams
               [\fB--tcp-port\fR \fIport\fR [\fB--tcp-token\fR \fItoken\fR]]
               [\fB--shovel\fR \fIhost:port\fR [\fB--shovel-token\fR \fItoken\fR] [\fB--spool-max\fR \fIsz\fR]]
               [\fB--flush-count\fR \fIn\fR] [\fB--flush-secs\fR \fIn\fR]
-              [\fB--rcvbuf\fR \fIsz\fR] [\fB--queue-depth\fR \fIn\fR] [\fB--max-entries\fR \fIn\fR]
+              [\fB--rcvbuf\fR \fIsz\fR] [\fB--queue-depth\fR \fIn\fR]
+              [\fB--max-memory\fR \fIsz\fR] [\fB--max-entries\fR \fIn\fR]
               [\fB--sessions\fR] [\fB--spans\fR] [\fB--traces\fR] [\fB--gstream\fR] [\fB--redirects\fR] [\fB--debug\fR] [\fB-v\fR]
 
 .fi
@@ -354,21 +355,45 @@ waits for a free batch (backpressure) rather than dropping packets.
 .RE
 \fB--max-memory\fR \fIsz\fR
 .RS 5
-Bound the resident correlation state (the per-server user/path/token/activity
-dictionaries and the open-file table) to approximately \fIsz\fR bytes, accepting
-a \fBK\fR/\fBM\fR/\fBG\fR suffix (default \fB256M\fR; \fB0\fR = unbounded). When
-the budget is exceeded the \fIleast-recently-used\fR entries are evicted first,
-so a long-running transfer kept warm by its in-flight \fIf\fR-stream snapshots is
-retained while cold, stranded entries (for example an open whose close was lost
-to a dropped datagram or a crash) are dropped. This is the primary safeguard
-against unbounded growth when terminal records never arrive. The
-\fBxrootd_collector_state_bytes\fR gauge reports the current utilisation.
+Cap the \fItotal resident memory\fR of the collector process at approximately
+\fIsz\fR bytes, accepting a \fBK\fR/\fBM\fR/\fBG\fR suffix (default \fB1G\fR;
+\fB0\fR = unbounded).
+.P
+The collector meets the cap by evicting correlation state. Once per control tick
+it reads its own resident set size and, if that is over the cap, lowers the
+budget it allows the per-server dictionaries and the open-file table to occupy;
+the \fIleast-recently-used\fR entries go first, so a long-running transfer kept
+warm by its in-flight \fIf\fR-stream snapshots is retained while cold, stranded
+entries (for example an open whose close was lost to a dropped datagram) are
+dropped. When resident memory falls back below the cap the budget is restored
+gradually.
+.P
+This is \fIbest-effort, not a guarantee\fR. Only the correlation state is under
+the collector's control: the receive queue, the pending output bodies and memory
+the allocator has freed but not returned to the operating system are not. The
+budget therefore has a floor below which correlation would stop working, and a
+process that is over its cap with the budget already at that floor is reported
+through \fBxrootd_collector_memory_floored_total\fR and a log message rather than
+pursued until no state remains. The only hard cap is the one the kernel
+enforces; see \fBMemoryMax=\fR in \fBsystemd.resource-control\fR(5).
+.P
+\fBxrootd_process_resident_memory_bytes\fR reports what is being capped,
+\fBxrootd_collector_state_budget_bytes\fR the setpoint the loop is currently
+enforcing, and \fBxrootd_collector_state_entries\fR how much correlation state
+that is buying.
+.P
+\fBNote:\fR this option previously bounded an \fIestimate\fR of the correlation
+state alone, and that estimate ran four to eight times below the memory really
+used; its default was \fB256M\fR. A configuration carried over from that release
+caps far less than its author intended \(em review it on upgrade.
 .RE
 \fB--max-entries\fR \fIn\fR
 .RS 5
 Optional hard cap on the total number of correlation entries retained
-(\fB0\fR = off, the default). A secondary backstop to \fB--max-memory\fR;
-eviction is likewise least-recently-used.
+(\fB0\fR = off, the default). A deterministic backstop, independent of
+\fB--max-memory\fR: it bounds a count rather than a quantity of memory, and
+applies whether or not the memory cap is in use. Eviction is likewise
+least-recently-used.
 .RE
 \fB--server-ttl\fR \fIs\fR
 .RS 5
@@ -547,7 +572,7 @@ command-line options override values from the file. For example:
 port = 9930
 os-url = https://opensearch.example.org:9200
 forward = logstash.example.org:5044
-max-memory = 256M
+max-memory = 1G
 .fi
 .RE
 .SS Document filtering

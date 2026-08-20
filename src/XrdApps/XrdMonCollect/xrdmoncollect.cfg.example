@@ -140,6 +140,11 @@ port = 9930
 # disconnect (off by default; adds a bounded per-session rollup).
 # sessions = false
 
+# Also emit OpenTelemetry span documents (a file-operation span per close and
+# a session span per disconnect) alongside the log records. Only meaningful
+# together with sessions, which is where the span waterfall gets its root.
+# spans = false
+
 # Opt-in extra document streams (high volume; off by default).
 # traces = false
 # gstream = false

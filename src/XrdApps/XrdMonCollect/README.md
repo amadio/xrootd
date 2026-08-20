@@ -1506,6 +1506,11 @@ xrdmoncollect -p <port> [-b <bindaddr>] [-o <file>] [--bulk <index>]
                      Only applied to servers reporting in-flight snapshots
                      ("xfr" on xrootd.monitor fstat); set it to at least 3x
                      the server's xfr reporting period
+  --state-file <f>   save the correlation state on shutdown and reload it on
+                     startup (default: $STATE_DIRECTORY/xrdmoncollect-state.json
+                     under systemd, else off; an empty value disables)
+  --state-ttl <d>    discard a state snapshot older than this on reload
+                     (s/m/h/d suffix; default 15m)
   --scitags <src>  SciTags registry (file path or http(s):// URL) mapping
                    experiment/activity ids to names
   --scitags-refresh <s> re-fetch a URL registry every <s> seconds (default 3600)

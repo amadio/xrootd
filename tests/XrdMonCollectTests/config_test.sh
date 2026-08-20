@@ -81,6 +81,13 @@ if command -v curl >/dev/null 2>&1; then
 	  *'site="EXAMPLE-SITE"'*) ;;
 	  *) fail "site from the config file did not reach the metrics" ;;
 	esac
+	# The "process" subsystem is registered from a separate call placed after
+	# every other one (see registerProcessMetrics), so it is the piece most
+	# easily lost to a refactor. Its absence is silent otherwise.
+	case "${got}" in
+	  *'xrootd_process_resident_memory_bytes{site="EXAMPLE-SITE"}'*) ;;
+	  *) fail "process RSS metric missing from the exposition" ;;
+	esac
 fi
 
 # 6. A filter rule keyed on something that is not a known field is a hard error

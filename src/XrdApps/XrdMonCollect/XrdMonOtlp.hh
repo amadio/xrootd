@@ -64,8 +64,8 @@ public:
 //! joins the traces request); any other document is a log record.
 void add(const nlohmann::json& doc);
 
-bool haveLogs()   const {return !logGroups.empty();}
-bool haveTraces() const {return !spanGroups.empty();}
+bool haveLogs()   const {return logRecs  != 0;}
+bool haveTraces() const {return spanRecs != 0;}
 
 //! Assemble and clear the accumulated logs (resp. traces) as one OTLP/JSON
 //! ExportLogsServiceRequest (resp. ExportTraceServiceRequest) body.
@@ -73,7 +73,8 @@ std::string takeLogsBody();
 std::string takeTracesBody();
 
 void clear()
-     {logGroups.clear(); spanGroups.clear(); logSize = spanSize = 0;}
+     {logGroups.clear(); spanGroups.clear();
+      logSize = spanSize = logRecs = spanRecs = 0;}
 
 //! Bytes the accumulated logs (resp. traces) hold: the length of the body
 //! they will produce, rounded up by the fixed envelope. Measured rather than
@@ -99,8 +100,15 @@ struct Group
 // without the key having to be serialized once per document. There is one key
 // per server incarnation, so the trees kept here are bounded by the number of
 // servers reporting, not by the document rate.
+//
+// A group outlives the body it contributed to, keeping its serialized resource
+// and its record buffer's capacity; one that contributes nothing to the next
+// body is dropped. Hence the separate record counts: "has a group" no longer
+// means "has anything to send".
 std::map<nlohmann::json, Group> logGroups;
 std::map<nlohmann::json, Group> spanGroups;
+std::size_t logRecs  = 0;
+std::size_t spanRecs = 0;
 XrdMonPublished<std::size_t> logSize;
 XrdMonPublished<std::size_t> spanSize;
 

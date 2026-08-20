@@ -71,11 +71,12 @@ struct Group
    nlohmann::json records = nlohmann::json::array();     // logRecords or spans
 };
 
-// Keyed by the serialized resource object, so identical resources share a block.
-std::map<std::string, Group> logGroups;
-std::map<std::string, Group> spanGroups;
+// Keyed by the resource object itself, so identical resources share a block
+// without the key having to be serialized once per document.
+std::map<nlohmann::json, Group> logGroups;
+std::map<nlohmann::json, Group> spanGroups;
 
-std::string takeBody(std::map<std::string, Group>& groups,
+std::string takeBody(std::map<nlohmann::json, Group>& groups,
                      const char* resourceKey, const char* scopeKey,
                      const char* recordsKey);
 };

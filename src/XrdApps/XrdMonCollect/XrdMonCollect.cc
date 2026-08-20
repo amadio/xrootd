@@ -142,13 +142,14 @@ public:
    }
 };
 
-// Recognise a "[filter "<name>"]" section header and extract its name. inih
+// Recognise a "[<kind> "<name>"]" section header and extract its name. inih
 // hands back whatever stands between the brackets, verbatim and unquoted, so
-// both the git-config form and a bare "[filter <name>]" are accepted.
+// both the git-config form and a bare "[<kind> <name>]" are accepted. Used for
+// filter rules and for the two kinds of sink destination, which is why it takes
+// the prefix rather than hardcoding one.
 //
-bool filterSection(const std::string& sec, std::string& name)
+bool namedSection(const std::string& sec, const char* kPfx, std::string& name)
 {
-   static const char* kPfx = "filter";
    const std::size_t  pLen = strlen(kPfx);
 
    if (sec.size() < pLen || strncasecmp(sec.c_str(), kPfx, pLen)) return false;
@@ -172,8 +173,10 @@ void usage(const char* prog)
      "           [--os-pass <p>] [--os-insecure]]\n"
      "          [--flush-count <n>] [--flush-secs <n>] [--debug] [-v]\n\n"
      "  -c <file>        load options from an INI config file (a [xrdmoncollect]\n"
-     "                   section, plus optional [filter \"<name>\"] sections that\n"
-     "                   tag or drop emitted documents; default\n"
+     "                   section, optional [filter \"<name>\"] sections that tag\n"
+     "                   or drop emitted documents, and optional\n"
+     "                   [opensearch \"<name>\"] / [otlp \"<name>\"] sections, one\n"
+     "                   per extra destination; default\n"
      "                   /etc/xrootd/xrdmoncollect.cfg if present;\n"
      "                   command-line options override file values)\n"
      "  -p <port>        UDP port to listen on (long form: --udp-port; required\n"
@@ -757,6 +760,118 @@ int runShoveler(const char* prog, const ShovelerOpts& o)
 /*                     S i n k   d e s t i n a t i o n s                      */
 /******************************************************************************/
 
+// One configured OpenSearch destination. The flat --os-* options define the
+// one named "default"; [opensearch "<name>"] config sections add more.
+struct OsDest
+{
+   std::string name = "default";
+   std::string url, index = "xrootd-transfers", user, pass, token;
+   bool        insecure = false, dataStream = false;
+};
+
+// One configured OTLP destination, likewise.
+struct OtlpDest
+{
+   std::string name = "default";
+   std::string url, token;
+   bool        insecure = false;
+};
+
+// The disk cache directory for a destination. "default" keeps the legacy paths
+// so an upgrade does not orphan whatever is spooled there.
+std::string sinkCacheDir(const std::string& root, const char* kind,
+                         const std::string& name, const char* signal = "")
+{
+   if (name == "default")
+      return *signal ? root + "/" + kind + signal : root;
+   return root + "/" + kind + "-" + name + signal;
+}
+
+// A destination name reaches the filesystem (its disk-cache directory) and the
+// Prometheus label, so it is restricted rather than merely non-empty. No '/',
+// so it cannot escape --cache-dir; every named destination is also prefixed
+// with its kind, so "." and ".." can only ever name a literal directory.
+bool sinkName(const std::string& n, std::string& err)
+{
+   if (n.empty()) {err = "needs a name"; return false;}
+   if (!isalnum((unsigned char)n[0]))
+      {err = "name '" + n + "' must start with a letter or digit"; return false;}
+   for (char c : n)
+       if (!isalnum((unsigned char)c) && c != '_' && c != '-' && c != '.')
+          {err = "name '" + n + "' may only contain letters, digits, '_', '-' "
+                 "and '.'";
+           return false;
+          }
+   return true;
+}
+
+// Read one key, rejecting a value inih mangled. Repeated keys arrive
+// newline-joined and an indented line is appended to the previous key's value,
+// so a '\n' here always means the file is not saying what its author thinks.
+bool sinkValue(const MonCfg& cfg, const std::string& sec, const char* key,
+               const std::string& dflt, std::string& out, std::string& err)
+{
+   std::string v = cfg.Get(sec, key, dflt);
+   if (v.find('\n') != std::string::npos)
+      {err = std::string("'") + key + "' has more than one value: a repeated "
+             "key, or a continuation line that must start in column 1";
+       return false;
+      }
+   out = v;
+   return true;
+}
+
+bool knownKey(const std::string& k, const char* const* allowed)
+{
+   for (const char* const* p = allowed; *p; p++) if (k == *p) return true;
+   return false;
+}
+
+// Parse [opensearch "<name>"]. Nothing is inherited from the flat os-* keys --
+// not the index, and emphatically not the credentials. Inheriting would make
+// the result depend on whether a value came from the config file or the command
+// line (the two are read in that order), and would silently POST the site's own
+// OpenSearch credentials to a central endpoint.
+//
+bool parseOsSection(const MonCfg& cfg, const std::string& sec,
+                    const std::string& name, OsDest& d, std::string& err)
+{
+   static const char* const kKeys[] = {"url", "index", "user", "pass", "token",
+                                       "insecure", "datastream", nullptr};
+   for (const std::string& k : cfg.KeysIn(sec))
+       if (!knownKey(k, kKeys)) {err = "unknown key '" + k + "'"; return false;}
+
+   d = OsDest();
+   d.name = name;
+   if (!sinkValue(cfg, sec, "url",   "",      d.url,   err)) return false;
+   if (!sinkValue(cfg, sec, "index", d.index, d.index, err)) return false;
+   if (!sinkValue(cfg, sec, "user",  "",      d.user,  err)) return false;
+   if (!sinkValue(cfg, sec, "pass",  "",      d.pass,  err)) return false;
+   if (!sinkValue(cfg, sec, "token", "",      d.token, err)) return false;
+   d.insecure   = cfg.GetBoolean(sec, "insecure", false);
+   d.dataStream = cfg.GetBoolean(sec, "datastream", false);
+   if (d.url.empty()) {err = "needs a 'url'"; return false;}
+   return true;
+}
+
+// Parse [otlp "<name>"]; see parseOsSection on inheritance.
+//
+bool parseOtlpSection(const MonCfg& cfg, const std::string& sec,
+                      const std::string& name, OtlpDest& d, std::string& err)
+{
+   static const char* const kKeys[] = {"url", "token", "insecure", nullptr};
+   for (const std::string& k : cfg.KeysIn(sec))
+       if (!knownKey(k, kKeys)) {err = "unknown key '" + k + "'"; return false;}
+
+   d = OtlpDest();
+   d.name = name;
+   if (!sinkValue(cfg, sec, "url",   "", d.url,   err)) return false;
+   if (!sinkValue(cfg, sec, "token", "", d.token, err)) return false;
+   d.insecure = cfg.GetBoolean(sec, "insecure", false);
+   if (d.url.empty()) {err = "needs a 'url'"; return false;}
+   return true;
+}
+
 #ifdef XRDMON_HAVE_CURL
 
 // Retries a live POST makes when there is nowhere to spill to. With a disk
@@ -769,23 +884,6 @@ const int kSinkRetries = 4;
 // operative one; this just keeps a stream of tiny bodies from growing the deque
 // without limit.
 const std::size_t kSinkQueueBodies = 16;
-
-// One configured OpenSearch destination. The flat --os-* options define the
-// one named "default"; [opensearch "<name>"] config sections add more.
-struct OsDest
-{
-   std::string name = "default";
-   std::string url, index, user, pass, token;
-   bool        insecure = false, dataStream = false;
-};
-
-// One configured OTLP destination, likewise.
-struct OtlpDest
-{
-   std::string name = "default";
-   std::string url, token;
-   bool        insecure = false;
-};
 
 // A destination's live state: its client, its queue, its thread, its disk cache
 // and its own counters. Everything a failing destination touches is private to
@@ -844,16 +942,6 @@ struct OsGroup
    time_t               lastShip = 0;   // own coalescing deadline: a shared one
    std::vector<OsSink*> dests;          // lets a fast group starve a slow one
 };
-
-// The disk cache directory for a destination. "default" keeps the legacy paths
-// so an upgrade does not orphan whatever is spooled there.
-std::string sinkCacheDir(const std::string& root, const char* kind,
-                         const std::string& name, const char* signal = "")
-{
-   if (name == "default")
-      return *signal ? root + "/" + kind + signal : root;
-   return root + "/" + kind + "-" + name + signal;
-}
 #endif
 }
 
@@ -910,6 +998,8 @@ int main(int argc, char* argv[])
    bool        sessions = false;      // per-session rollup + session documents
    bool        spans    = false;      // companion OTLP span documents
    std::string bindStore, outStore;   // backing storage for config bind/output
+   std::vector<OsDest>   osNamed;     // [opensearch "<name>"] config sections
+   std::vector<OtlpDest> otlpNamed;   // [otlp "<name>"] config sections
    XrdMonFilter filter;               // [filter "<name>"] document rules
                                       // (declared here so it outlives decoder)
 
@@ -1028,11 +1118,53 @@ int main(int argc, char* argv[])
 // fatal rather than ignored, since a rule that silently matches nothing is
 // indistinguishable from one that works until documents go missing.
 //
-       std::set<std::string> ruleNames;
+       std::set<std::string> ruleNames, osNames, otlpNames;
        for (const std::string& fsec : cfg.Sections())
-           {std::string name;
+           {std::string name, serr;
             if (!strcasecmp(fsec.c_str(), sec)) continue;
-            if (!filterSection(fsec, name))
+
+// A sink destination: one [opensearch "<name>"] or [otlp "<name>"] section per
+// endpoint, alongside (or instead of) the flat os-*/otlp-* keys, which define
+// the one called "default". Malformed is fatal, never skipped: dropping a
+// destination silently can leave no network sink at all, and the file sink then
+// takes over and floods stdout with NDJSON at line rate.
+//
+            auto dupName = [&](std::set<std::string>& seen, const char* kind)
+               {std::string l = name;
+                std::transform(l.begin(), l.end(), l.begin(),
+                               [](unsigned char c){return (char)std::tolower(c);});
+                if (seen.insert(l).second) return false;
+                fprintf(stderr, "%s: duplicate %s destination '%s'\n",
+                        argv[0], kind, name.c_str());
+                return true;
+               };
+
+            if (namedSection(fsec, "opensearch", name))
+               {OsDest d;
+                if (!sinkName(name, serr)
+                ||  !parseOsSection(cfg, fsec, name, d, serr))
+                   {fprintf(stderr, "%s: [opensearch \"%s\"]: %s\n", argv[0],
+                            name.c_str(), serr.c_str());
+                    return 2;
+                   }
+                if (dupName(osNames, "OpenSearch")) return 2;
+                osNamed.push_back(std::move(d));
+                continue;
+               }
+            if (namedSection(fsec, "otlp", name))
+               {OtlpDest d;
+                if (!sinkName(name, serr)
+                ||  !parseOtlpSection(cfg, fsec, name, d, serr))
+                   {fprintf(stderr, "%s: [otlp \"%s\"]: %s\n", argv[0],
+                            name.c_str(), serr.c_str());
+                    return 2;
+                   }
+                if (dupName(otlpNames, "OTLP")) return 2;
+                otlpNamed.push_back(std::move(d));
+                continue;
+               }
+
+            if (!namedSection(fsec, "filter", name))
                {fprintf(stderr, "%s: warning: ignoring unrecognised config "
                         "section '[%s]'\n", argv[0], fsec.c_str());
                 continue;
@@ -1290,6 +1422,8 @@ int main(int argc, char* argv[])
        if (redirects)        ignored("--redirects");
        if (debug)            ignored("--debug");
        if (!filter.Empty())  ignored("a [filter] section");
+       if (!osNamed.empty())   ignored("an [opensearch] section");
+       if (!otlpNamed.empty()) ignored("an [otlp] section");
 
        ShovelerOpts so;
        so.udpPort     = port;
@@ -1315,17 +1449,24 @@ int main(int argc, char* argv[])
 // with it.
 //
 #ifndef XRDMON_HAVE_CURL
-   if (!osUrl.empty())
-      {fprintf(stderr, "%s: --os-url requires building with libcurl\n", argv[0]);
+   if (!osUrl.empty() || !osNamed.empty())
+      {fprintf(stderr, "%s: an OpenSearch destination requires building with "
+               "libcurl\n", argv[0]);
        return 2;}
-   if (!otlpUrl.empty())
-      {fprintf(stderr, "%s: --otlp-url requires building with libcurl\n", argv[0]);
+   if (!otlpUrl.empty() || !otlpNamed.empty())
+      {fprintf(stderr, "%s: an OTLP destination requires building with "
+               "libcurl\n", argv[0]);
        return 2;}
    const bool osEnabled = false, otlpEnabled = false;
 #else
    std::vector<OsDest>   osDests;
    std::vector<OtlpDest> otlpDests;
 
+// The flat options (and their command-line overrides) are the destination
+// called "default"; the named sections follow it. A section that also calls
+// itself "default" is a collision, not an override -- silently merging two
+// endpoint definitions is how a document ends up somewhere nobody expected.
+//
    if (!osUrl.empty())
       {OsDest d;
        d.url = osUrl; d.index = osIndex; d.user = osUser; d.pass = osPass;
@@ -1333,10 +1474,29 @@ int main(int argc, char* argv[])
        d.insecure = osInsecure; d.dataStream = osDataStream;
        osDests.push_back(std::move(d));
       }
+   for (OsDest& d : osNamed)
+      {if (d.name == "default" && !osDests.empty())
+          {fprintf(stderr, "%s: [opensearch \"default\"] collides with the "
+                   "os-url option; name it something else\n", argv[0]);
+           return 2;
+          }
+       d.token = loadSecret(d.token);
+       osDests.push_back(d);
+      }
+
    if (!otlpUrl.empty())
       {OtlpDest d;
        d.url = otlpUrl; d.token = loadSecret(otlpToken); d.insecure = otlpInsecure;
        otlpDests.push_back(std::move(d));
+      }
+   for (OtlpDest& d : otlpNamed)
+      {if (d.name == "default" && !otlpDests.empty())
+          {fprintf(stderr, "%s: [otlp \"default\"] collides with the otlp-url "
+                   "option; name it something else\n", argv[0]);
+           return 2;
+          }
+       d.token = loadSecret(d.token);
+       otlpDests.push_back(d);
       }
 
    const bool osEnabled   = !osDests.empty();

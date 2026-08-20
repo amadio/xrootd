@@ -65,10 +65,14 @@ bool XrdMonDiskCache::Init(std::string& err)
    closedir(d);
    std::sort(names.begin(), names.end());
 
+// Regular files only. Caches for different destinations are nested under one
+// --cache-dir, so a sibling cache's directory can sit inside this one's scan;
+// adopting it would have the replay read a directory, fail, and unlink it.
+//
    std::uint64_t b = 0;
    for (auto& n : names)
       {struct stat st;
-       if (stat(path(n).c_str(), &st) == 0)
+       if (stat(path(n).c_str(), &st) == 0 && S_ISREG(st.st_mode))
           {pending.push_back(n); b += (std::uint64_t)st.st_size;}
       }
    files = pending.size();

@@ -1760,20 +1760,33 @@ int main(int argc, char* argv[])
 // OpenSearch _bulk body), periodically reaps idle incarnations, and hands one
 // _bulk body per batch to the output thread.
 //
+// It waits with a timeout rather than blocking indefinitely so that
+// housekeeping runs on the wall clock instead of on packet arrival. Blocking
+// meant a collector whose servers had gone quiet never reaped them -- exactly
+// the state in which idle incarnations most need reclaiming -- and left a
+// residual _bulk body unsent until the next packet. takeFor + closedDrained()
+// is the same idiom the two output threads and the shoveler's sender use;
+// close() does notify_all(), so shutdown is not delayed by the timeout.
+//
    std::thread serializer([&]()
       {time_t     lastReap  = time(0);
        const long reapEvery = 60;   // sweep idle server incarnations once a minute
+       const int  idleWakeMs = 1000;
        Batch b;
-       while (recvPipe.take(b))
-          {for (auto& p : b)
-              decoder.Process(p.src, p.data.data(), (int)p.data.size());
-           if (fileSink) fflush(out);
+       for (;;)
+          {bool got = recvPipe.takeFor(b, idleWakeMs);
+           if (got)
+              {for (auto& p : b)
+                  decoder.Process(p.src, p.data.data(), (int)p.data.size());
+               if (fileSink) fflush(out);
+               b.clear();
+               recvPipe.recycle(std::move(b));
+              }
+              else if (recvPipe.closedDrained()) break;
            time_t now = time(0);
            if (now - lastReap >= reapEvery)
               {decoder.ReapServers(now); lastReap = now;}
            flush();                       // hand one _bulk body to the output thread
-           b.clear();
-           recvPipe.recycle(std::move(b));
           }
        flush();                           // hand off anything after the pipe closed
 #ifdef XRDMON_HAVE_CURL

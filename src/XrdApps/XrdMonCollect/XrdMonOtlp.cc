@@ -88,9 +88,15 @@ void XrdMonOtlpBatch::add(const json& doc)
    const bool isSpan = doc.contains("kind");
    auto& groups = isSpan ? spanGroups : logGroups;
 
+// The resource object is the group key. Keying on its serialization instead
+// would re-serialize it for every single document; as an object it is copied
+// only when a group is created, i.e. once per distinct resource. nlohmann
+// objects are ordered maps, so the comparison is a total order and two
+// resources built in a different key order still land in the same group.
+//
    const json  empty = json::object();
    const json& res   = doc.contains("resource") ? doc["resource"] : empty;
-   Group& g = groups[res.dump()];
+   Group& g = groups[res];
    if (g.records.empty()) g.resource = toKeyValues(res);   // once per resource
 
    json rec;
@@ -142,7 +148,7 @@ void XrdMonOtlpBatch::add(const json& doc)
    g.records.push_back(std::move(rec));
 }
 
-std::string XrdMonOtlpBatch::takeBody(std::map<std::string, Group>& groups,
+std::string XrdMonOtlpBatch::takeBody(std::map<nlohmann::json, Group>& groups,
                                       const char* resourceKey,
                                       const char* scopeKey,
                                       const char* recordsKey)

@@ -4,11 +4,15 @@
 // src/XrdXrootd/XrdXrootdMonData.hh.
 //------------------------------------------------------------------------------
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <functional>
+#include <limits>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <unistd.h>
@@ -2439,6 +2443,126 @@ TEST(XrdMonCollect, StateEntriesTracksLru)
   dec.SetServerTTL(1);
   dec.ReapServers(time(nullptr) + 10000);
   EXPECT_EQ(dec.StateEntries(), 0u);
+}
+
+//------------------------------------------------------------------------------
+// With --metrics-port the exporter thread reads the decoder while the
+// serializer thread mutates it. The two tests below reproduce that shape. They
+// pass either way in an ordinary build -- what they are for is
+// ThreadSanitizer, for which the unsynchronised read used to be the only
+// finding in the collector. Run them under
+// `ctest -V -S test.cmake -DSANITIZE=thread`.
+//------------------------------------------------------------------------------
+
+namespace
+{
+// The reads have to be made the way XrdMetrics::ObservedFamily makes them:
+// through a std::function, with the results consumed.
+//
+// The indirection is not decoration. Read the decoder directly from a loop
+// here and an optimizing compiler, entitled to assume no data race, hoists the
+// load out of the loop or drops it as dead -- there is then no second access
+// left for ThreadSanitizer to pair, and the test silently proves nothing. That
+// was measured, not guessed: a version doing plain `(void)dec.StateEntries()`
+// stayed clean under TSAN with the race deliberately restored.
+struct Scraper
+{
+   std::vector<std::function<std::uint64_t()>> readers;
+   std::atomic<bool>          stop{false};
+   std::atomic<std::uint64_t> scrapes{0};
+   std::atomic<std::uint64_t> sink{0};
+   std::thread                th;
+
+   void start()
+      {th = std::thread([this]
+          {while (!stop.load(std::memory_order_relaxed))
+              {std::uint64_t acc = 0;
+               for (auto& r : readers) acc += r();
+               sink.fetch_add(acc, std::memory_order_relaxed);
+               scrapes.fetch_add(1, std::memory_order_relaxed);
+              }
+          });}
+
+   void join() {stop = true; th.join();}
+};
+}
+
+TEST(XrdMonCollect, ExporterMayReadWhileTheDecoderRuns)
+{
+  constexpr uint32_t kFiles = 400;
+
+  std::size_t  fakeRss = 0;
+  XrdMonDecode dec([](const std::string&){});
+  // Hooked and capped, so the control loop rewrites maxBytes underneath the
+  // reader too -- MaxBytes() races the same way StateEntries() does.
+  dec.SetMemoryHooks({[&]{return fakeRss;}, []{}});
+  dec.SetMaxRss(1u << 30);
+
+  feedUser7(dec, "h:1");
+  const std::size_t base = dec.StateEntries();
+
+  Scraper sc;
+  sc.readers = {[&]{return (std::uint64_t)dec.StateEntries();},
+                [&]{return (std::uint64_t)dec.StateWeight();},
+                [&]{return (std::uint64_t)dec.MaxBytes();},
+                [&]{return (std::uint64_t)dec.GetStats().docs;},
+                [&]{return (std::uint64_t)dec.GetStats().packets;},
+                [&]{return (std::uint64_t)dec.GetStats().evicted;}};
+  sc.start();
+
+  time_t clock = 1700000000;
+  for (uint32_t id = 1; id <= kFiles; id++)
+     {feedOpenId(dec, "h:1", id, "/store/data/f.root");
+      feedCloseId(dec, "h:1", id);
+      // One overage knocks the budget to its floor; every tick after it is
+      // under cap and climbs back, so maxBytes is rewritten throughout.
+      fakeRss = id == 1 ? (2ull << 30) : (1u << 28);
+      dec.MemoryTick(clock += 20);
+     }
+
+  sc.join();
+
+  EXPECT_GT(sc.scrapes.load(), 0u) << "the reader never ran; nothing was proved";
+  EXPECT_EQ(dec.GetStats().closes, kFiles);
+  EXPECT_EQ(dec.GetStats().docs, kFiles);
+  EXPECT_EQ(dec.StateEntries(), base);        // every open was closed again
+}
+
+// Promotion to most-recently-used is a same-list splice, across which
+// libstdc++ still updates the list's size counter (stl_list.h:1682-1683, both
+// outside the `this != &x` guard) -- the hottest operation in the decoder
+// writing the very word the exporter reads, for a value that cannot change.
+// An optimizing build happens to fold that +1/-1 pair away, so this is the
+// invariant rather than the sanitizer talking: the count stays put under pure
+// promotion, which is what keeps the mirror out of Touch().
+TEST(XrdMonCollect, PromotingAnEntryDoesNotDisturbTheEntryCount)
+{
+  XrdMonDecode dec([](const std::string&){});
+  feedUser7(dec, "h:1");
+  for (uint32_t id = 1; id <= 8; id++)
+      feedOpenId(dec, "h:1", id, "/store/data/f.root");
+  const std::size_t held = dec.StateEntries();
+  ASSERT_GT(held, 0u);
+
+  std::atomic<std::size_t> lo{std::numeric_limits<std::size_t>::max()};
+  std::atomic<std::size_t> hi{0};
+
+  Scraper sc;
+  sc.readers = {[&]
+     {std::size_t n = dec.StateEntries();
+      if (n < lo.load(std::memory_order_relaxed)) lo = n;
+      if (n > hi.load(std::memory_order_relaxed)) hi = n;
+      return (std::uint64_t)n;}};
+  sc.start();
+
+  for (int i = 0; i < 50000; i++) feedUser7(dec, "h:1");   // nothing but Touch
+
+  sc.join();
+
+  ASSERT_GT(sc.scrapes.load(), 0u);
+  EXPECT_EQ(lo.load(), held) << "the entry count dipped while only promoting";
+  EXPECT_EQ(hi.load(), held) << "the entry count rose while only promoting";
+  EXPECT_EQ(dec.StateEntries(), held);
 }
 
 TEST(XrdMonCollect, FrmStageAndPurge)

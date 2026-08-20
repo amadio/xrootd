@@ -351,8 +351,15 @@ std::string unixNano(double secs)
 //
 void XrdMonDecode::resolveLocalHost()
 {
-   const char* me = XrdNetUtils::MyHostName();
+// MyHostName() hands back a strdup()ed copy the caller owns, and its default
+// placeholder ("*unknown*") is neither an IP literal nor a local name, so it
+// would sail through the filter below and be stamped into server.address on
+// every loopback document. Ask for a null on failure instead and fall through
+// to the gethostname() path.
+//
+   char* me = XrdNetUtils::MyHostName(nullptr);
    std::string h = me ? me : "";
+   free(me);
    if (!h.empty() && !isIPLiteral(h) && !isLocalName(h)) localHost = h;
 
 // When the advertised FQDN is itself a loopback name (a host whose

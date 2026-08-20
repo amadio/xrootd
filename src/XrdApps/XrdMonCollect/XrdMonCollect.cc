@@ -723,6 +723,13 @@ int runShoveler(const char* prog, const ShovelerOpts& o)
 
 int main(int argc, char* argv[])
 {
+// Before anything allocates and, crucially, before any thread starts: the
+// arena count is fixed at first use per thread, and the mmap threshold has to
+// be pinned before glibc starts ratcheting it upward. Covers the shoveler too,
+// which runs out of this same main().
+//
+   XrdMonTuneAllocator();
+
    int         port    = 0;
    int         tcpPort = 0;         // TCP listener for shoveled packets (off)
    std::string tcpToken;            // shared secret for shovel hellos (off)
@@ -1425,6 +1432,14 @@ int main(int argc, char* argv[])
        decoder.LoadState(stateFile, stateTtl, note);
        if (!note.empty())
           fprintf(stderr, "xrdmoncollect: %s\n", note.c_str());
+
+// LoadState holds the stream buffer, its string copy and the parsed json tree
+// all at once, so a large snapshot leaves a peak several times the state it
+// restored. Give it back now, while this is still single-threaded and free,
+// rather than letting it stand as the process's high-water mark for the rest
+// of the run -- and before the memory cap takes its first sample.
+//
+       XrdMonReleaseMemory();
       }
 #ifdef XRDMON_HAVE_CURL
    // The OpenSearch sink initializes libcurl globally; do it here too when a URL

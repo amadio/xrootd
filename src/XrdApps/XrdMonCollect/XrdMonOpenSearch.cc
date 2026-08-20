@@ -34,6 +34,14 @@ size_t writeCB(char* ptr, size_t sz, size_t nm, void* userp)
    ((std::string*)userp)->append(ptr, sz * nm);
    return sz * nm;
 }
+
+// A non-zero return aborts the transfer. curl calls this at least once a
+// second even while a connection is hanging, which is what lets Cancel()
+// interrupt a POST into a black hole rather than waiting out its timeout.
+int abortCB(void* flag, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
+{
+   return ((std::atomic<bool>*)flag)->load() ? 1 : 0;
+}
 }
 
 XrdMonOpenSearch::XrdMonOpenSearch(const std::string& url,
@@ -85,7 +93,8 @@ bool XrdMonOpenSearch::Bulk(const std::string& body, std::string& err)
    int backoff = 1;
    bool ok = false;
    for (int attempt = 0; attempt <= maxRetry; attempt++)
-       {std::string resp;
+       {if (cancelled) {err = "cancelled"; break;}
+        std::string resp;
         curl_easy_reset(c);
         curl_easy_setopt(c, CURLOPT_URL, bulkURL.c_str());
         curl_easy_setopt(c, CURLOPT_POST, 1L);
@@ -95,6 +104,9 @@ bool XrdMonOpenSearch::Bulk(const std::string& body, std::string& err)
         curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, writeCB);
         curl_easy_setopt(c, CURLOPT_WRITEDATA, &resp);
         curl_easy_setopt(c, CURLOPT_TIMEOUT, 30L);
+        curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, abortCB);
+        curl_easy_setopt(c, CURLOPT_XFERINFODATA, &cancelled);
         // A bearer token wins over basic auth: both set Authorization, so avoid
         // sending two conflicting credentials.
         if (!userpwd.empty() && authHdr.empty())
@@ -124,7 +136,8 @@ bool XrdMonOpenSearch::Bulk(const std::string& body, std::string& err)
 
         bool transient = (rc != CURLE_OK) || code == 429 || (code >= 500);
         if (!transient || attempt == maxRetry) break;
-        sleep(backoff);
+        // Sleep in slices so Cancel() is not held off for the whole backoff.
+        for (int i = 0; i < backoff && !cancelled; i++) sleep(1);
         if (backoff < 16) backoff *= 2;
        }
 

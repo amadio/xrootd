@@ -1939,8 +1939,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(xrootd_collector_post_failures_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
-          "legendFormat": "opensearch",
+          "expr": "sum by (destination) (rate(xrootd_collector_post_failures_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
+          "legendFormat": "opensearch {{destination}}",
           "refId": "A",
           "range": true
         },
@@ -1950,8 +1950,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(xrootd_collector_otlp_failures_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
-          "legendFormat": "otlp",
+          "expr": "sum by (destination) (rate(xrootd_collector_otlp_failures_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
+          "legendFormat": "otlp {{destination}}",
           "refId": "B",
           "range": true
         }
@@ -1961,7 +1961,7 @@
       "id": 27,
       "type": "timeseries",
       "title": "Dropped bodies/s",
-      "description": "Bodies discarded after a failed POST with no disk cache, or with a cache that could not be written. This is data loss.",
+      "description": "Bodies discarded after a failed POST with no disk cache, or with a cache that could not be written, and bodies dropped because a destination queue was full. Both are data loss, with different causes: the first says configure a disk cache, the second says the destination (or its cache) cannot keep up with the input.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -2010,8 +2010,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(xrootd_collector_dropped_bulk_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
-          "legendFormat": "opensearch _bulk",
+          "expr": "sum by (destination) (rate(xrootd_collector_dropped_bulk_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
+          "legendFormat": "opensearch _bulk {{destination}}",
           "refId": "A",
           "range": true
         },
@@ -2021,9 +2021,31 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(xrootd_collector_otlp_dropped_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
-          "legendFormat": "otlp",
+          "expr": "sum by (destination) (rate(xrootd_collector_otlp_dropped_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
+          "legendFormat": "otlp {{destination}}",
           "refId": "B",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (destination) (rate(xrootd_collector_post_overflow_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
+          "legendFormat": "opensearch queue full {{destination}}",
+          "refId": "C",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (destination) (rate(xrootd_collector_otlp_overflow_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
+          "legendFormat": "otlp queue full {{destination}}",
+          "refId": "D",
           "range": true
         }
       ]
@@ -2031,7 +2053,7 @@
     {
       "id": 28,
       "type": "timeseries",
-      "title": "Sink queue depth",
+      "title": "Sink queue depth (bodies)",
       "description": "Bodies queued to the output thread; a growing backlog means the sink is slower than the collector.",
       "datasource": {
         "type": "prometheus",
@@ -2081,8 +2103,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(xrootd_collector_post_queue_bodies{site=~\"$site\",instance=~\"$collector\"})",
-          "legendFormat": "opensearch",
+          "expr": "sum by (destination) (xrootd_collector_post_queue_bodies{site=~\"$site\",instance=~\"$collector\"})",
+          "legendFormat": "opensearch {{destination}}",
           "refId": "A",
           "range": true
         },
@@ -2092,8 +2114,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(xrootd_collector_otlp_queue_bodies{site=~\"$site\",instance=~\"$collector\"})",
-          "legendFormat": "otlp",
+          "expr": "sum by (destination) (xrootd_collector_otlp_queue_bodies{site=~\"$site\",instance=~\"$collector\"})",
+          "legendFormat": "otlp {{destination}}",
           "refId": "B",
           "range": true
         }
@@ -2152,8 +2174,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(xrootd_collector_cache_files{site=~\"$site\",instance=~\"$collector\"})",
-          "legendFormat": "opensearch",
+          "expr": "sum by (destination) (xrootd_collector_cache_files{site=~\"$site\",instance=~\"$collector\"})",
+          "legendFormat": "opensearch {{destination}}",
           "refId": "A",
           "range": true
         },
@@ -2163,8 +2185,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(xrootd_collector_otlp_cache_files{site=~\"$site\",instance=~\"$collector\"})",
-          "legendFormat": "otlp",
+          "expr": "sum by (destination) (xrootd_collector_otlp_cache_files{site=~\"$site\",instance=~\"$collector\"})",
+          "legendFormat": "otlp {{destination}}",
           "refId": "B",
           "range": true
         }
@@ -2173,7 +2195,7 @@
     {
       "id": 30,
       "type": "timeseries",
-      "title": "Disk cache backlog (bytes)",
+      "title": "Output waiting (bytes)",
       "description": "The same backlog by size, which is what fills the state directory.",
       "datasource": {
         "type": "prometheus",
@@ -2223,8 +2245,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(xrootd_collector_cache_bytes{site=~\"$site\",instance=~\"$collector\"})",
-          "legendFormat": "opensearch",
+          "expr": "sum by (destination) (xrootd_collector_cache_bytes{site=~\"$site\",instance=~\"$collector\"})",
+          "legendFormat": "opensearch {{destination}}",
           "refId": "A",
           "range": true
         },
@@ -2234,9 +2256,31 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(xrootd_collector_otlp_cache_bytes{site=~\"$site\",instance=~\"$collector\"})",
-          "legendFormat": "otlp",
+          "expr": "sum by (destination) (xrootd_collector_otlp_cache_bytes{site=~\"$site\",instance=~\"$collector\"})",
+          "legendFormat": "otlp {{destination}}",
           "refId": "B",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (destination) (xrootd_collector_post_queue_bytes{site=~\"$site\",instance=~\"$collector\"})",
+          "legendFormat": "opensearch queued {{destination}}",
+          "refId": "C",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (destination) (xrootd_collector_otlp_queue_bytes{site=~\"$site\",instance=~\"$collector\"})",
+          "legendFormat": "otlp queued {{destination}}",
+          "refId": "D",
           "range": true
         }
       ]
@@ -2294,8 +2338,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(xrootd_collector_cache_stored_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
-          "legendFormat": "os stored",
+          "expr": "sum by (destination) (rate(xrootd_collector_cache_stored_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
+          "legendFormat": "os stored {{destination}}",
           "refId": "A",
           "range": true
         },
@@ -2305,8 +2349,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(xrootd_collector_cache_replayed_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
-          "legendFormat": "os replayed",
+          "expr": "sum by (destination) (rate(xrootd_collector_cache_replayed_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
+          "legendFormat": "os replayed {{destination}}",
           "refId": "B",
           "range": true
         },
@@ -2316,8 +2360,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(xrootd_collector_otlp_cache_stored_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
-          "legendFormat": "otlp stored",
+          "expr": "sum by (destination) (rate(xrootd_collector_otlp_cache_stored_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
+          "legendFormat": "otlp stored {{destination}}",
           "refId": "C",
           "range": true
         },
@@ -2327,8 +2371,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(xrootd_collector_otlp_cache_replayed_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
-          "legendFormat": "otlp replayed",
+          "expr": "sum by (destination) (rate(xrootd_collector_otlp_cache_replayed_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
+          "legendFormat": "otlp replayed {{destination}}",
           "refId": "D",
           "range": true
         }

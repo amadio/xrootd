@@ -64,13 +64,21 @@ json toAnyValue(const json& v)
 
 // Re-encode a flat dotted-key object (the collector's resource/attributes) as an
 // OTLP KeyValue array: [{"key":"file.path","value":{"stringValue":"..."}}, ...].
+// `bytes` accumulates a rough serialized size of what was encoded. It is a
+// by-product of a walk that has to happen anyway, which is the point: the
+// batch has to bound its own growth, and dumping it to measure it would undo
+// the whole reason the tree is carried instead of text.
 //
-json toKeyValues(const json& obj)
+json toKeyValues(const json& obj, std::size_t& bytes)
 {
    json arr = json::array();
    if (obj.is_object())
       for (auto it = obj.begin(); it != obj.end(); ++it)
-          arr.push_back({{"key", it.key()}, {"value", toAnyValue(it.value())}});
+          {const json& v = it.value();
+           bytes += it.key().size() + 32          // key, quotes, OTLP wrapper
+                  + (v.is_string() ? v.get_ref<const std::string&>().size() : 16);
+           arr.push_back({{"key", it.key()}, {"value", toAnyValue(v)}});
+          }
    return arr;
 }
 
@@ -97,11 +105,13 @@ void XrdMonOtlpBatch::add(const json& doc)
    const json  empty = json::object();
    const json& res   = doc.contains("resource") ? doc["resource"] : empty;
    Group& g = groups[res];
-   if (g.records.empty()) g.resource = toKeyValues(res);   // once per resource
+   std::size_t& acct = isSpan ? spanBytes : logBytes;
+   if (g.records.empty()) g.resource = toKeyValues(res, acct); // once per resource
 
    json rec;
-   json attrs = doc.contains("attributes") ? toKeyValues(doc["attributes"])
-                                           : json::array();
+   std::size_t recBytes = 128;                    // envelope fields
+   json attrs = doc.contains("attributes")
+              ? toKeyValues(doc["attributes"], recBytes) : json::array();
    if (isSpan)
       {// The span document already carries OTLP-compatible name/kind/status and
        // the *UnixNano times; pass them through and attach the id linkage.
@@ -146,6 +156,7 @@ void XrdMonOtlpBatch::add(const json& doc)
       }
 
    g.records.push_back(std::move(rec));
+   acct += recBytes;
 }
 
 std::string XrdMonOtlpBatch::takeBody(std::map<nlohmann::json, Group>& groups,
@@ -166,6 +177,7 @@ std::string XrdMonOtlpBatch::takeBody(std::map<nlohmann::json, Group>& groups,
         blocks.push_back(std::move(block));
        }
    groups.clear();
+   (&groups == &logGroups ? logBytes : spanBytes) = 0;
 
    json body;
    body[resourceKey] = std::move(blocks);
@@ -199,6 +211,14 @@ size_t otlpDiscardCB(char* ptr, size_t sz, size_t nm, void* userp)
 {
    ((std::string*)userp)->append(ptr, sz * nm);
    return sz * nm;
+}
+
+// A non-zero return aborts the transfer. curl calls this at least once a
+// second even while a connection is hanging, which is what lets Cancel()
+// interrupt a POST into a black hole rather than waiting out its timeout.
+int otlpAbortCB(void* flag, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
+{
+   return ((std::atomic<bool>*)flag)->load() ? 1 : 0;
 }
 }
 
@@ -242,7 +262,8 @@ bool XrdMonOtlp::post(const std::string& url, const std::string& body,
    int  backoff = 1;
    bool ok = false;
    for (int attempt = 0; attempt <= maxRetry; attempt++)
-       {std::string resp;
+       {if (cancelled) {err = "cancelled"; break;}
+        std::string resp;
         curl_easy_reset(c);
         curl_easy_setopt(c, CURLOPT_URL, url.c_str());
         curl_easy_setopt(c, CURLOPT_POST, 1L);
@@ -252,6 +273,9 @@ bool XrdMonOtlp::post(const std::string& url, const std::string& body,
         curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, otlpDiscardCB);
         curl_easy_setopt(c, CURLOPT_WRITEDATA, &resp);
         curl_easy_setopt(c, CURLOPT_TIMEOUT, 30L);
+        curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, otlpAbortCB);
+        curl_easy_setopt(c, CURLOPT_XFERINFODATA, &cancelled);
         if (insecure)
            {curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
             curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
@@ -268,7 +292,8 @@ bool XrdMonOtlp::post(const std::string& url, const std::string& body,
 
         bool transient = (rc != CURLE_OK) || code == 429 || (code >= 500);
         if (!transient || attempt == maxRetry) break;
-        sleep(backoff);
+        // Sleep in slices so Cancel() is not held off for the whole backoff.
+        for (int i = 0; i < backoff && !cancelled; i++) sleep(1);
         if (backoff < 16) backoff *= 2;
        }
 

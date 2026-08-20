@@ -19,6 +19,13 @@ EnvironmentFile=-/etc/sysconfig/xrdmoncollect
 ExecStart=/usr/bin/xrdmoncollect -c /etc/xrootd/xrdmoncollect.cfg
 Restart=on-failure
 RestartSec=10
+# On stop, each configured sink destination is given 20s to deliver what it
+# still holds, after which any POST in flight is abandoned. Every destination
+# drains in parallel, so this is the slowest one, not their sum. Set
+# explicitly rather than relying on the 90s default: the value the collector
+# needs is knowable, and a SIGKILL here would also cost the correlation-state
+# snapshot.
+TimeoutStopSec=45
 ConfigurationDirectory=xrootd
 ConfigurationDirectoryMode=0755
 LogsDirectory=xrootd

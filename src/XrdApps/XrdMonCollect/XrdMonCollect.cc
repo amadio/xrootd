@@ -43,6 +43,7 @@
 #include <algorithm>
 #include <atomic>
 #include <deque>
+#include <memory>
 #include <set>
 #include <string>
 #include <thread>
@@ -65,6 +66,7 @@
 #include "XrdApps/XrdMonCollect/XrdMonPipe.hh"
 #include "XrdApps/XrdMonCollect/XrdMonShovel.hh"
 #include "XrdApps/XrdMonCollect/XrdMonShovelFrame.hh"
+#include "XrdApps/XrdMonCollect/XrdMonSinkQueue.hh"
 #include "XrdApps/XrdMonCollect/XrdMonTcpServer.hh"
 #include "XrdMetrics/XrdMetricsRegistry.hh"
 #include "XrdMetrics/XrdMetricsSerializer.hh"
@@ -750,6 +752,109 @@ int runShoveler(const char* prog, const ShovelerOpts& o)
    delete spool;
    return 0;
 }
+
+/******************************************************************************/
+/*                     S i n k   d e s t i n a t i o n s                      */
+/******************************************************************************/
+
+#ifdef XRDMON_HAVE_CURL
+
+// Retries a live POST makes when there is nowhere to spill to. With a disk
+// cache the live attempt uses 0 and the replay path uses this, so a failing
+// destination degrades to "cache it, retry on the replay schedule" instead of
+// holding the body (and the queue behind it) for the whole ladder.
+const int kSinkRetries = 4;
+
+// Bodies one destination may have queued for it. The byte bound below is the
+// operative one; this just keeps a stream of tiny bodies from growing the deque
+// without limit.
+const std::size_t kSinkQueueBodies = 16;
+
+// One configured OpenSearch destination. The flat --os-* options define the
+// one named "default"; [opensearch "<name>"] config sections add more.
+struct OsDest
+{
+   std::string name = "default";
+   std::string url, index, user, pass, token;
+   bool        insecure = false, dataStream = false;
+};
+
+// One configured OTLP destination, likewise.
+struct OtlpDest
+{
+   std::string name = "default";
+   std::string url, token;
+   bool        insecure = false;
+};
+
+// A destination's live state: its client, its queue, its thread, its disk cache
+// and its own counters. Everything a failing destination touches is private to
+// it, which is the point -- a central collector going down must not stall the
+// site's own. Non-copyable and non-movable (the thread, the queue and the
+// metric readers all pin the address), hence vector<unique_ptr<>>.
+struct OsSink
+{
+   OsSink(const OsDest& d, std::size_t qBytes)
+         : cfg(d), q(kSinkQueueBodies, qBytes) {}
+  ~OsSink() {delete cli; delete cache;}
+
+   OsDest            cfg;
+   XrdMonOpenSearch* cli   = nullptr;
+   XrdMonSinkQueue   q;
+   std::thread       th;
+   XrdMonDiskCache*  cache = nullptr;
+   XrdMetrics::Counter<std::uint64_t>* failures = nullptr;
+   XrdMetrics::Counter<std::uint64_t>* dropped  = nullptr;
+   // Set while the thread is posting or spilling. An empty queue is not an
+   // idle destination: the body it is working on has already been taken.
+   std::atomic<bool> busy{false};
+   std::atomic<bool> done{false};   // thread has left its loop
+   time_t            warnAt = 0;    // per-sink, so one dead endpoint cannot
+};                                  // silence another's diagnostics
+
+struct OtlpSink
+{
+   OtlpSink(const OtlpDest& d, std::size_t qBytes)
+           : cfg(d), logs(kSinkQueueBodies, qBytes),
+                     traces(kSinkQueueBodies, qBytes) {}
+  ~OtlpSink() {delete cli; delete logCache; delete traceCache;}
+
+   OtlpDest          cfg;
+   XrdMonOtlp*       cli = nullptr;
+   XrdMonSinkQueue   logs, traces;
+   std::thread       th;
+   XrdMonDiskCache*  logCache   = nullptr;
+   XrdMonDiskCache*  traceCache = nullptr;
+   XrdMetrics::Counter<std::uint64_t>* failures = nullptr;
+   XrdMetrics::Counter<std::uint64_t>* dropped  = nullptr;
+   std::atomic<bool> busy{false};   // see OsSink::busy
+   std::atomic<bool> done{false};
+   time_t            warnAt = 0;
+};
+
+// Documents are accumulated once per distinct (index, action) pair rather than
+// once per destination, so two clusters written with the same index share one
+// body and one serialization. The common case is a single group.
+struct OsGroup
+{
+   std::string          index;
+   bool                 create = false;
+   std::string          body;
+   std::size_t          count  = 0;
+   time_t               lastShip = 0;   // own coalescing deadline: a shared one
+   std::vector<OsSink*> dests;          // lets a fast group starve a slow one
+};
+
+// The disk cache directory for a destination. "default" keeps the legacy paths
+// so an upgrade does not orphan whatever is spooled there.
+std::string sinkCacheDir(const std::string& root, const char* kind,
+                         const std::string& name, const char* signal = "")
+{
+   if (name == "default")
+      return *signal ? root + "/" + kind + signal : root;
+   return root + "/" + kind + "-" + name + signal;
+}
+#endif
 }
 
 int main(int argc, char* argv[])
@@ -1204,47 +1309,97 @@ int main(int argc, char* argv[])
        return runShoveler(argv[0], so);
       }
 
-// Set up the OpenSearch sink if requested.
+// Set up the HTTP sinks. Each destination is independent -- its own client,
+// queue, thread, retry state and disk cache -- so one that is slow or
+// unreachable can neither stall the decoder nor take another destination down
+// with it.
 //
-   bool osEnabled = false;
-#ifdef XRDMON_HAVE_CURL
-   XrdMonOpenSearch* os = nullptr;
-#endif
+#ifndef XRDMON_HAVE_CURL
    if (!osUrl.empty())
-      {
-#ifdef XRDMON_HAVE_CURL
-       os = new XrdMonOpenSearch(osUrl, osIndex, osUser, osPass,
-                                 loadSecret(osToken), osInsecure, osDataStream);
-       std::string e;
-       if (!os->Init(e))
-          {fprintf(stderr, "%s: %s\n", argv[0], e.c_str()); return 4;}
-       osEnabled = true;
+      {fprintf(stderr, "%s: --os-url requires building with libcurl\n", argv[0]);
+       return 2;}
+   if (!otlpUrl.empty())
+      {fprintf(stderr, "%s: --otlp-url requires building with libcurl\n", argv[0]);
+       return 2;}
+   const bool osEnabled = false, otlpEnabled = false;
 #else
-       fprintf(stderr, "%s: --os-url requires building with libcurl\n", argv[0]);
-       return 2;
-#endif
+   std::vector<OsDest>   osDests;
+   std::vector<OtlpDest> otlpDests;
+
+   if (!osUrl.empty())
+      {OsDest d;
+       d.url = osUrl; d.index = osIndex; d.user = osUser; d.pass = osPass;
+       d.token = loadSecret(osToken);
+       d.insecure = osInsecure; d.dataStream = osDataStream;
+       osDests.push_back(std::move(d));
+      }
+   if (!otlpUrl.empty())
+      {OtlpDest d;
+       d.url = otlpUrl; d.token = loadSecret(otlpToken); d.insecure = otlpInsecure;
+       otlpDests.push_back(std::move(d));
       }
 
-// Set up the OTLP/HTTP export sink if requested (logs -> /v1/logs, spans ->
-// /v1/traces on an OpenTelemetry Collector, Grafana Alloy, or any OTLP receiver).
+   const bool osEnabled   = !osDests.empty();
+   const bool otlpEnabled = !otlpDests.empty();
+
+// Queue budget. Bodies waiting on their destinations are part of the process
+// --max-memory caps, and until now nothing bounded them in bytes at all: the
+// old pipe held a fixed count of bodies of any size. Split one budget evenly
+// across every queue (an OTLP destination has two, logs and traces) so adding
+// a destination cannot silently double the footprint.
 //
-   bool otlpEnabled = false;
-#ifdef XRDMON_HAVE_CURL
-   XrdMonOtlp* otlp = nullptr;
-#endif
-   if (!otlpUrl.empty())
-      {
-#ifdef XRDMON_HAVE_CURL
-       otlp = new XrdMonOtlp(otlpUrl, loadSecret(otlpToken), otlpInsecure);
+   const std::size_t nQueues = osDests.size() + 2 * otlpDests.size();
+   const std::size_t qBudget = maxMemory ? maxMemory / 32 : (32u << 20);
+   const std::size_t qBytes  = nQueues
+                             ? std::max<std::size_t>(4u << 20, qBudget / nQueues)
+                             : 0;
+
+   std::vector<std::unique_ptr<OsSink>>   osSinks;
+   std::vector<std::unique_ptr<OtlpSink>> otlpSinks;
+
+   if (!cacheDir.empty() && (osEnabled || otlpEnabled))
+      mkdir(cacheDir.c_str(), 0750);   // parent (Init's mkdir is single-level)
+
+   for (const OsDest& d : osDests)
+      {auto s = std::unique_ptr<OsSink>(new OsSink(d, qBytes));
+       s->cli = new XrdMonOpenSearch(d.url, d.index, d.user, d.pass, d.token,
+                                     d.insecure, d.dataStream);
        std::string e;
-       if (!otlp->Init(e))
-          {fprintf(stderr, "%s: %s\n", argv[0], e.c_str()); return 4;}
-       otlpEnabled = true;
-#else
-       fprintf(stderr, "%s: --otlp-url requires building with libcurl\n", argv[0]);
-       return 2;
-#endif
+       if (!s->cli->Init(e))                  // curl_global_init: main thread
+          {fprintf(stderr, "%s: OpenSearch[%s]: %s\n", argv[0],
+                   d.name.c_str(), e.c_str()); return 4;}
+       if (!cacheDir.empty())
+          {s->cache = new XrdMonDiskCache(sinkCacheDir(cacheDir, "os", d.name));
+           if (!s->cache->Init(e))
+              {fprintf(stderr, "%s: OpenSearch[%s]: %s\n", argv[0],
+                       d.name.c_str(), e.c_str()); return 4;}
+          }
+       osSinks.push_back(std::move(s));
       }
+
+// OTLP/HTTP export (logs -> /v1/logs, spans -> /v1/traces on an OpenTelemetry
+// Collector, Grafana Alloy, or any OTLP receiver). Logs and traces get separate
+// caches: they replay to different endpoints.
+//
+   for (const OtlpDest& d : otlpDests)
+      {auto s = std::unique_ptr<OtlpSink>(new OtlpSink(d, qBytes));
+       s->cli = new XrdMonOtlp(d.url, d.token, d.insecure);
+       std::string e;
+       if (!s->cli->Init(e))
+          {fprintf(stderr, "%s: OTLP[%s]: %s\n", argv[0],
+                   d.name.c_str(), e.c_str()); return 4;}
+       if (!cacheDir.empty())
+          {s->logCache   = new XrdMonDiskCache(
+                              sinkCacheDir(cacheDir, "otlp", d.name, "-logs"));
+           s->traceCache = new XrdMonDiskCache(
+                              sinkCacheDir(cacheDir, "otlp", d.name, "-traces"));
+           if (!s->logCache->Init(e) || !s->traceCache->Init(e))
+              {fprintf(stderr, "%s: OTLP[%s]: %s\n", argv[0],
+                       d.name.c_str(), e.c_str()); return 4;}
+          }
+       otlpSinks.push_back(std::move(s));
+      }
+#endif
 
 // Traces are spans, and spans are only produced with --spans. Exporting OTLP
 // without it sends logs (which carry a traceId but do not, by themselves, create
@@ -1307,77 +1462,104 @@ int main(int argc, char* argv[])
 // Batch state for the OpenSearch sink and a flush helper.
 //
 #ifdef XRDMON_HAVE_CURL
-   std::string batch;
-   size_t      batchCount = 0;
-   // Completed _bulk bodies are handed to a dedicated output thread through this
-   // bounded recycling pipe, so the (blocking) POST never holds up the serializer
-   // and hence the receiver. A small depth bounds the in-flight POST backlog; the
-   // body strings are reused round the loop.
-   const size_t            kPostQueueDepth = 16;
-   XrdMonPipe<std::string> postPipe(kPostQueueDepth);
-   // Native counters owned by the metrics registry (the source of truth, bumped
-   // on the failure path); null when no metrics port is configured.
-   XrdMetrics::Counter<std::uint64_t>* postFailures = nullptr;
-   XrdMetrics::Counter<std::uint64_t>* droppedBulk  = nullptr;
-
-   // Optional on-failure disk cache (opt-in via --cache-dir). When set, a POST
-   // that fails after retries is written here and retried oldest-first (and on
-   // startup); when unset, a terminal failure drops the body.
-   XrdMonDiskCache* cache = nullptr;
-   if (osEnabled && !cacheDir.empty())
-      {cache = new XrdMonDiskCache(cacheDir);
-       std::string e;
-       if (!cache->Init(e))
-          {fprintf(stderr, "%s: %s\n", argv[0], e.c_str()); return 4;}
+   // One accumulator per distinct (index, action) pair, not one per
+   // destination: two clusters written with the same index share a body, so
+   // the documents are framed once however many destinations consume them.
+   std::vector<OsGroup> osGroups;
+   for (auto& up : osSinks)
+      {OsSink* s = up.get();
+       auto it = std::find_if(osGroups.begin(), osGroups.end(),
+                              [&](const OsGroup& g)
+                                 {return g.index  == s->cfg.index
+                                      && g.create == s->cfg.dataStream;});
+       if (it == osGroups.end())
+          {OsGroup g;
+           g.index = s->cfg.index; g.create = s->cfg.dataStream;
+           osGroups.push_back(std::move(g));
+           it = osGroups.end() - 1;
+          }
+       it->dests.push_back(s);
       }
 
-   // OTLP export state. Documents are accumulated into an OTLP batch (grouped by
-   // resource) and, at each flush, one logs body and one traces body are handed
-   // to a dedicated OTLP output thread through its own bounded pipe.
-   struct OtlpMsg {bool traces = false; std::string body;};
-   XrdMonOtlpBatch       otlpBatch;
-   XrdMonPipe<OtlpMsg>   otlpPipe(kPostQueueDepth);
-   // Native counters owned by the metrics registry (the source of truth, bumped
-   // on the failure path); null when no metrics port is configured.
-   XrdMetrics::Counter<std::uint64_t>* otlpFailures = nullptr;
-   XrdMetrics::Counter<std::uint64_t>* otlpDropped  = nullptr;
-
-   // Optional on-failure disk cache, sharing --cache-dir with the OpenSearch
-   // sink. Logs and traces get separate caches (they replay to different
-   // endpoints) under per-signal subdirectories; when unset a terminal failure
-   // drops the body.
-   XrdMonDiskCache* otlpLogCache   = nullptr;
-   XrdMonDiskCache* otlpTraceCache = nullptr;
-   if (otlpEnabled && !cacheDir.empty())
-      {mkdir(cacheDir.c_str(), 0750);   // parent (Init's mkdir is single-level)
-       otlpLogCache   = new XrdMonDiskCache(cacheDir + "/otlp-logs");
-       otlpTraceCache = new XrdMonDiskCache(cacheDir + "/otlp-traces");
-       std::string e;
-       if (!otlpLogCache->Init(e) || !otlpTraceCache->Init(e))
-          {fprintf(stderr, "%s: %s\n", argv[0], e.c_str()); return 4;}
-      }
+   // Documents are accumulated into an OTLP batch (grouped by resource) and, at
+   // each flush, one logs body and one traces body are produced -- once, and
+   // shared by every OTLP destination.
+   XrdMonOtlpBatch otlpBatch;
 #endif
-   // Hand the current batch to the output threads (one POST per batch, per sink).
-   auto flush = [&]()
+   // Hand the accumulated bodies to the sink threads (one POST per body, per
+   // destination). Never blocks: a queue that is full drops its oldest body
+   // rather than letting one destination throttle the decoder.
+   //
+   // Coalesce while every destination is behind. The bounded pipe used to
+   // throttle this loop by blocking the serializer, which had the side effect
+   // of batching: a consumer slower than the input received fewer, larger
+   // bodies. Without that, it would receive a stream of small ones of which its
+   // queue drops all but the last few -- more POSTs, less data delivered. So
+   // hold the accumulator until some destination has drained what it already
+   // has, and ship regardless after kCoalesceSecs so nothing is held
+   // indefinitely (which is also what bounds the accumulator's own size). A
+   // destination that is keeping up always has an empty queue, so nothing
+   // changes for a healthy collector.
+   //
+#ifdef XRDMON_HAVE_CURL
+   const long kCoalesceSecs = 2;
+   // ...and never hold more than a queue slot's worth, whatever the clock says.
+   // Time alone bounds nothing: a burst can build tens of megabytes inside two
+   // seconds, and for OTLP that is tens of megabytes of json trees, which
+   // nothing else in the process can reclaim.
+   const std::size_t kCoalesceBytes = qBytes ? qBytes : (4u << 20);
+   time_t     otlpLastShip  = time(0);
+   for (OsGroup& g : osGroups) g.lastShip = otlpLastShip;
+
+   auto anyIdle = [](const std::vector<OsSink*>& dests)
+      {for (OsSink* s : dests)
+           if (s->q.bodies() == 0 && !s->busy.load()) return true;
+       return dests.empty();
+      };
+   auto anyOtlpIdle = [&]()
+      {for (auto& s : otlpSinks)
+           if (s->logs.bodies() == 0 && s->traces.bodies() == 0
+           && !s->busy.load()) return true;
+       return otlpSinks.empty();
+      };
+#endif
+   auto flush = [&](bool force = false)
       {
 #ifdef XRDMON_HAVE_CURL
-       if (osEnabled && batchCount > 0)
-          {std::string body;
-           postPipe.acquire(body);     // a recycled (empty) body string
-           std::swap(body, batch);     // body <- accumulated bulk; batch <- empty
-           batchCount = 0;
-           postPipe.submit(std::move(body));
+       const time_t now = time(0);
+
+       for (OsGroup& g : osGroups)
+          {if (!g.count) continue;
+           if (!force && now - g.lastShip < kCoalesceSecs && !anyIdle(g.dests)
+           &&  g.body.size() < kCoalesceBytes)
+              continue;
+           g.lastShip = now;
+           const std::size_t was = g.body.size();
+           XrdMonBody body = std::make_shared<const std::string>(std::move(g.body));
+           // The move leaves an unspecified string; reset it and re-reserve
+           // roughly what it just held, which is what the pipe's buffer
+           // recycling used to do. Bodies above kBodyKeepBytes are mmap'd
+           // (XrdMonTuneAllocator pins the threshold there) and returned to the
+           // OS on free, so there is nothing to gain from keeping them warm.
+           g.body = std::string();
+           g.body.reserve(std::min(was, kBodyKeepBytes));
+           g.count = 0;
+           for (OsSink* s : g.dests) s->q.push(body);
           }
-       if (otlpEnabled && (otlpBatch.haveLogs() || otlpBatch.haveTraces()))
-          {if (otlpBatch.haveLogs())
-              {OtlpMsg m; otlpPipe.acquire(m);
-               m.traces = false; m.body = otlpBatch.takeLogsBody();
-               otlpPipe.submit(std::move(m));
+       if ((otlpBatch.haveLogs() || otlpBatch.haveTraces())
+       &&  (force || now - otlpLastShip >= kCoalesceSecs || anyOtlpIdle()
+            || otlpBatch.approxLogBytes()   >= kCoalesceBytes
+            || otlpBatch.approxTraceBytes() >= kCoalesceBytes))
+          {otlpLastShip = now;
+           if (otlpBatch.haveLogs())
+              {XrdMonBody b =
+                  std::make_shared<const std::string>(otlpBatch.takeLogsBody());
+               for (auto& s : otlpSinks) s->logs.push(b);
               }
            if (otlpBatch.haveTraces())
-              {OtlpMsg m; otlpPipe.acquire(m);
-               m.traces = true; m.body = otlpBatch.takeTracesBody();
-               otlpPipe.submit(std::move(m));
+              {XrdMonBody b =
+                  std::make_shared<const std::string>(otlpBatch.takeTracesBody());
+               for (auto& s : otlpSinks) s->traces.push(b);
               }
           }
 #endif
@@ -1409,7 +1591,8 @@ int main(int argc, char* argv[])
                  }
              }
 #ifdef XRDMON_HAVE_CURL
-          if (osEnabled) {os->Add(batch, d); batchCount++;}
+          for (OsGroup& g : osGroups)
+              {XrdMonBulkAdd(g.body, g.index, g.create, d); g.count++;}
 #endif
           if (fwd)
              {std::string e;
@@ -1534,10 +1717,11 @@ int main(int argc, char* argv[])
        XrdMonReleaseMemory();
       }
 #ifdef XRDMON_HAVE_CURL
-   // The OpenSearch sink initializes libcurl globally; do it here too when a URL
+   // Every sink's Init() calls curl_global_init; do it here too when a URL
    // registry is the only curl user, before the first (main-thread) fetch and
-   // the refresh thread that follows.
-   if (!scitags.empty() && isUrl(scitags) && !osEnabled)
+   // the refresh thread that follows. It has to happen on this thread either
+   // way: curl_global_init was not thread-safe before libcurl 7.84.
+   if (!scitags.empty() && isUrl(scitags) && !osEnabled && !otlpEnabled)
       curl_global_init(CURL_GLOBAL_DEFAULT);
 #endif
    if (!scitags.empty())
@@ -1623,36 +1807,77 @@ int main(int argc, char* argv[])
               .add({}, [&]{return tcpSrv->BytesIn();});
           }
 #ifdef XRDMON_HAVE_CURL
-       subsystem->observeGauge<std::int64_t>("post_queue_bodies", "serialized _bulk bodies queued for the OpenSearch POST")
-          .add({}, [&]{return (int64_t)postPipe.readyDepth();});
-       postFailures = &subsystem->counter<std::uint64_t>("post_failures_total", "OpenSearch _bulk POSTs that failed after retries");
-       droppedBulk  = &subsystem->counter<std::uint64_t>("dropped_bulk_total", "_bulk bodies dropped after a failed POST (no/failed disk cache)");
-       if (cache)
-          {subsystem->observeGauge<std::int64_t>("cache_files", "cached _bulk bodies awaiting replay")
-              .add({}, [&]{return (int64_t)cache->Files();});
-           subsystem->observeGauge<std::int64_t>("cache_bytes", "bytes of cached _bulk bodies on disk")
-              .add({}, [&]{return (int64_t)cache->Bytes();});
-           subsystem->observeCounter<std::uint64_t>("cache_stored_total", "_bulk bodies written to the disk cache")
-              .add({}, [&]{return (uint64_t)cache->Stored();});
-           subsystem->observeCounter<std::uint64_t>("cache_replayed_total", "cached _bulk bodies successfully replayed")
-              .add({}, [&]{return (uint64_t)cache->Replayed();});
-          }
-       if (otlpEnabled)
-          {subsystem->observeGauge<std::int64_t>("otlp_queue_bodies", "OTLP bodies queued for the export POST")
-              .add({}, [&]{return (int64_t)otlpPipe.readyDepth();});
-           otlpFailures = &subsystem->counter<std::uint64_t>("otlp_failures_total", "OTLP POSTs that failed after retries");
-           otlpDropped  = &subsystem->counter<std::uint64_t>("otlp_dropped_total", "OTLP bodies dropped after a failed POST (no/failed disk cache)");
-          }
-       if (otlpLogCache && otlpTraceCache)
-          {subsystem->observeGauge<std::int64_t>("otlp_cache_files", "cached OTLP bodies awaiting replay (logs + traces)")
-              .add({}, [&]{return (int64_t)(otlpLogCache->Files() + otlpTraceCache->Files());});
-           subsystem->observeGauge<std::int64_t>("otlp_cache_bytes", "bytes of cached OTLP bodies on disk")
-              .add({}, [&]{return (int64_t)(otlpLogCache->Bytes() + otlpTraceCache->Bytes());});
-           subsystem->observeCounter<std::uint64_t>("otlp_cache_stored_total", "OTLP bodies written to the disk cache")
-              .add({}, [&]{return (uint64_t)(otlpLogCache->Stored() + otlpTraceCache->Stored());});
-           subsystem->observeCounter<std::uint64_t>("otlp_cache_replayed_total", "cached OTLP bodies successfully replayed")
-              .add({}, [&]{return (uint64_t)(otlpLogCache->Replayed() + otlpTraceCache->Replayed());});
-          }
+    // Every sink series carries the destination it belongs to. Each family is
+    // created once and gains one series per destination -- an observed family
+    // bypasses the registry's name deduplication, so creating it inside the
+    // loop would emit as many families of one name as there are destinations.
+    // All of it stays here, after subsystem("collector"), because
+    // dashboards_test.py attributes a registration to the nearest preceding
+    // subsystem() literal.
+    //
+       {static const std::vector<std::string> kDest{"destination"};
+        auto& postQ = subsystem->observeGauge<std::int64_t>("post_queue_bodies", "serialized _bulk bodies queued for the OpenSearch POST", {}, kDest);
+        auto& postQB = subsystem->observeGauge<std::int64_t>("post_queue_bytes", "bytes of serialized _bulk bodies queued for the OpenSearch POST", {}, kDest);
+        auto& postOver = subsystem->observeCounter<std::uint64_t>("post_overflow_total", "_bulk bodies dropped because the destination queue was full", {}, kDest);
+        auto& postFail = subsystem->counterFamily<std::uint64_t>("post_failures_total", "OpenSearch _bulk POSTs that failed after retries", kDest);
+        auto& postDrop = subsystem->counterFamily<std::uint64_t>("dropped_bulk_total", "_bulk bodies dropped after a failed POST (no/failed disk cache)", kDest);
+        for (auto& up : osSinks)
+           {OsSink* s = up.get();
+            postQ.add({s->cfg.name},  [s]{return (int64_t)s->q.bodies();});
+            postQB.add({s->cfg.name}, [s]{return (int64_t)s->q.bytes();});
+            postOver.add({s->cfg.name}, [s]{return s->q.overflowed();});
+            s->failures = &postFail.labels({s->cfg.name});
+            s->dropped  = &postDrop.labels({s->cfg.name});
+           }
+
+        bool anyOsCache = false;
+        for (auto& up : osSinks) anyOsCache = anyOsCache || up->cache;
+        if (anyOsCache)
+           {auto& cf = subsystem->observeGauge<std::int64_t>("cache_files", "cached _bulk bodies awaiting replay", {}, kDest);
+            auto& cb = subsystem->observeGauge<std::int64_t>("cache_bytes", "bytes of cached _bulk bodies on disk", {}, kDest);
+            auto& cs = subsystem->observeCounter<std::uint64_t>("cache_stored_total", "_bulk bodies written to the disk cache", {}, kDest);
+            auto& cr = subsystem->observeCounter<std::uint64_t>("cache_replayed_total", "cached _bulk bodies successfully replayed", {}, kDest);
+            for (auto& up : osSinks)
+               {OsSink* s = up.get();
+                if (!s->cache) continue;
+                cf.add({s->cfg.name}, [s]{return (int64_t)s->cache->Files();});
+                cb.add({s->cfg.name}, [s]{return (int64_t)s->cache->Bytes();});
+                cs.add({s->cfg.name}, [s]{return (uint64_t)s->cache->Stored();});
+                cr.add({s->cfg.name}, [s]{return (uint64_t)s->cache->Replayed();});
+               }
+           }
+
+        auto& otQ = subsystem->observeGauge<std::int64_t>("otlp_queue_bodies", "OTLP bodies queued for the export POST (logs + traces)", {}, kDest);
+        auto& otQB = subsystem->observeGauge<std::int64_t>("otlp_queue_bytes", "bytes of OTLP bodies queued for the export POST", {}, kDest);
+        auto& otOver = subsystem->observeCounter<std::uint64_t>("otlp_overflow_total", "OTLP bodies dropped because the destination queue was full", {}, kDest);
+        auto& otFail = subsystem->counterFamily<std::uint64_t>("otlp_failures_total", "OTLP POSTs that failed after retries", kDest);
+        auto& otDrop = subsystem->counterFamily<std::uint64_t>("otlp_dropped_total", "OTLP bodies dropped after a failed POST (no/failed disk cache)", kDest);
+        for (auto& up : otlpSinks)
+           {OtlpSink* s = up.get();
+            otQ.add({s->cfg.name},  [s]{return (int64_t)(s->logs.bodies() + s->traces.bodies());});
+            otQB.add({s->cfg.name}, [s]{return (int64_t)(s->logs.bytes()  + s->traces.bytes());});
+            otOver.add({s->cfg.name}, [s]{return s->logs.overflowed() + s->traces.overflowed();});
+            s->failures = &otFail.labels({s->cfg.name});
+            s->dropped  = &otDrop.labels({s->cfg.name});
+           }
+
+        bool anyOtlpCache = false;
+        for (auto& up : otlpSinks) anyOtlpCache = anyOtlpCache || up->logCache;
+        if (anyOtlpCache)
+           {auto& cf = subsystem->observeGauge<std::int64_t>("otlp_cache_files", "cached OTLP bodies awaiting replay (logs + traces)", {}, kDest);
+            auto& cb = subsystem->observeGauge<std::int64_t>("otlp_cache_bytes", "bytes of cached OTLP bodies on disk", {}, kDest);
+            auto& cs = subsystem->observeCounter<std::uint64_t>("otlp_cache_stored_total", "OTLP bodies written to the disk cache", {}, kDest);
+            auto& cr = subsystem->observeCounter<std::uint64_t>("otlp_cache_replayed_total", "cached OTLP bodies successfully replayed", {}, kDest);
+            for (auto& up : otlpSinks)
+               {OtlpSink* s = up.get();
+                if (!s->logCache) continue;
+                cf.add({s->cfg.name}, [s]{return (int64_t)(s->logCache->Files() + s->traceCache->Files());});
+                cb.add({s->cfg.name}, [s]{return (int64_t)(s->logCache->Bytes() + s->traceCache->Bytes());});
+                cs.add({s->cfg.name}, [s]{return (uint64_t)(s->logCache->Stored() + s->traceCache->Stored());});
+                cr.add({s->cfg.name}, [s]{return (uint64_t)(s->logCache->Replayed() + s->traceCache->Replayed());});
+               }
+           }
+       }
 #endif
        registerProcessMetrics();  // must follow every subsystem-> call above
        exporter = std::thread(serveMetrics, metricsPort, std::ref(exporterStop));
@@ -1676,144 +1901,209 @@ int main(int argc, char* argv[])
        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
       }
 
-// Output thread: performs the (blocking) OpenSearch _bulk POST off the serializer
-// thread, so a slow or unreachable OpenSearch holds up neither decoding nor
-// reception. It consumes completed bodies from postPipe and recycles them.
+// One thread per destination: it performs the (blocking) POST off the
+// serializer thread, so a slow or unreachable endpoint holds up neither
+// decoding nor reception -- and, with several destinations, holds up none of
+// the others either. Each owns its client, its queue, its retry state and its
+// disk cache; nothing is shared but the bodies, which are const.
 //
 #ifdef XRDMON_HAVE_CURL
-   std::thread output;
-   if (osEnabled)
-      output = std::thread([&]()
-         {const int kDrainPerIter = 64;   // cap cache replays per wake-up
+   const int kDrainPerIter = 64;   // cap cache replays per wake-up
 
-          // POST one body; true on success. Drives both live bodies and cache
-          // replays, so a failure here counts once regardless of the source.
-          auto post = [&](const std::string& b)->bool
-             {std::string e;
-              bool ok = os->Bulk(b, e);
-              if (!ok) {if (postFailures) ++*postFailures;
-                        fprintf(stderr, "xrdmoncollect: bulk post failed: %s\n",
-                                e.c_str());}
-                 else if (!e.empty())
-                    fprintf(stderr, "xrdmoncollect: %s\n", e.c_str());
-              return ok;
-             };
-          // Replay up to kDrainPerIter cached bodies, oldest first, stopping as
-          // soon as the sink is down again (so the receiver is not starved).
-          auto drain = [&]()
-             {if (!cache) return;
-              std::string e;
-              for (int i = 0; i < kDrainPerIter; i++)
-                 {int r = cache->ReplayOldest(post, e);
-                  if (!e.empty())
-                     {fprintf(stderr, "xrdmoncollect: %s\n", e.c_str()); e.clear();}
-                  if (r != 1) break;       // 0 = empty, -1 = sink still down
-                 }
-             };
+   for (auto& up : osSinks)
+      {OsSink* s = up.get();
+       s->th = std::thread([s, kDrainPerIter]()
+          {
+           // POST one body; true on success. Drives both live bodies and cache
+           // replays, so a failure counts once regardless of the source.
+           auto post = [s](const std::string& b, int retries)->bool
+              {s->cli->SetMaxRetry(retries);
+               std::string e;
+               bool ok = s->cli->Bulk(b, e);
+               if (!ok)
+                  {if (s->failures) ++*s->failures;
+                   time_t now = time(0);
+                   if (now - s->warnAt >= 10)
+                      {s->warnAt = now;
+                       fprintf(stderr, "xrdmoncollect: OpenSearch[%s] bulk post "
+                               "failed: %s\n", s->cfg.name.c_str(), e.c_str());}
+                  }
+                  else if (!e.empty())
+                     fprintf(stderr, "xrdmoncollect: OpenSearch[%s]: %s\n",
+                             s->cfg.name.c_str(), e.c_str());
+               return ok;
+              };
+           // Replay up to kDrainPerIter cached bodies, oldest first, stopping
+           // as soon as the sink is down again. The replay keeps the full retry
+           // ladder, whose backoff is also what paces this loop.
+           auto drain = [&]()
+              {if (!s->cache) return;
+               std::string e;
+               for (int i = 0; i < kDrainPerIter; i++)
+                  {int r = s->cache->ReplayOldest(
+                              [&](const std::string& b)
+                                 {return post(b, kSinkRetries);}, e);
+                   if (!e.empty())
+                      {fprintf(stderr, "xrdmoncollect: OpenSearch[%s]: %s\n",
+                               s->cfg.name.c_str(), e.c_str()); e.clear();}
+                   if (r != 1) break;      // 0 = empty, -1 = sink still down
+                  }
+              };
 
-          std::string body;
-          for (;;)
-             {if (postPipe.takeFor(body, 1000))
-                 {std::string e;
-                  if (cache && !cache->Empty())
-                     {// Preserve order: queue behind the backlog, then drain.
-                      if (!cache->Store(body, e))
-                         {if (droppedBulk) ++*droppedBulk;
-                          fprintf(stderr, "xrdmoncollect: cache store failed: "
-                                  "%s\n", e.c_str());}
-                      drain();
-                     }
-                     else if (!post(body))
-                     {if (cache)
-                         {if (!cache->Store(body, e))
-                             {if (droppedBulk) ++*droppedBulk;
-                              fprintf(stderr, "xrdmoncollect: cache store failed:"
-                                      " %s\n", e.c_str());}
-                         }
-                         else if (droppedBulk) ++*droppedBulk;  // no cache: drops
-                     }
-                  XrdMonRecycleBody(body);
-                  postPipe.recycle(std::move(body));
-                 }
-                 else
-                 {if (postPipe.closedDrained()) break;
-                  drain();                    // idle: make progress on the backlog
-                 }
-             }
-         });
+           // Queue overflow is silent apart from its counter, and it is data
+           // loss, so say so at least once. Rate-limited, and reported by the
+           // sink thread rather than the producer so the serializer stays lean.
+           std::uint64_t seenOver = 0;
+           time_t        overWarn = 0;
+           auto noteOverflow = [&]()
+              {std::uint64_t n = s->q.overflowed();
+               if (n == seenOver) return;
+               time_t now = time(0);
+               if (now - overWarn >= 30)
+                  {overWarn = now;
+                   fprintf(stderr, "xrdmoncollect: OpenSearch[%s] dropped %llu "
+                           "_bulk bod%s: the destination queue is full\n",
+                           s->cfg.name.c_str(),
+                           (unsigned long long)(n - seenOver),
+                           n - seenOver == 1 ? "y" : "ies");
+                   seenOver = n;
+                  }
+              };
 
-// OTLP output thread: POSTs each accumulated logs/traces body to the OTLP
-// endpoint off the serializer thread. A body that fails after retries is dropped
-// (counted); there is no disk cache for the OTLP path.
+           XrdMonBody body;
+           for (;;)
+              {noteOverflow();
+               if (s->q.takeFor(body, 1000))
+                  {s->busy.store(true);
+                   std::string e;
+                   if (s->cache && !s->cache->Empty())
+                      {// Preserve order: queue behind the backlog, then drain.
+                       if (!s->cache->Store(*body, e))
+                          {if (s->dropped) ++*s->dropped;
+                           fprintf(stderr, "xrdmoncollect: OpenSearch[%s] cache "
+                                   "store failed: %s\n", s->cfg.name.c_str(),
+                                   e.c_str());}
+                       drain();
+                      }
+                      // With a cache to fall back on the live attempt does not
+                      // retry: holding this body for the whole ladder while the
+                      // queue behind it overflows loses more than it saves.
+                      else if (!post(*body, s->cache ? 0 : kSinkRetries))
+                      {if (s->cache)
+                          {if (!s->cache->Store(*body, e))
+                              {if (s->dropped) ++*s->dropped;
+                               fprintf(stderr, "xrdmoncollect: OpenSearch[%s] "
+                                       "cache store failed: %s\n",
+                                       s->cfg.name.c_str(), e.c_str());}
+                          }
+                          else if (s->dropped) ++*s->dropped;   // no cache: drops
+                      }
+                   body.reset();
+                   s->busy.store(false);
+                  }
+                  else
+                  {if (s->q.closedDrained()) break;
+                   drain();                 // idle: make progress on the backlog
+                  }
+              }
+           s->done.store(true);
+          });
+      }
+
+// OTLP destinations: one thread each, draining two queues (logs -> /v1/logs and
+// traces -> /v1/traces) that share the endpoint's one curl handle.
 //
-   std::thread otlpOutput;
-   time_t otlpWarn = 0;
-   if (otlpEnabled)
-      otlpOutput = std::thread([&]()
-         {const int kDrainPerIter = 64;   // cap cache replays per wake-up
+   for (auto& up : otlpSinks)
+      {OtlpSink* s = up.get();
+       s->th = std::thread([s, kDrainPerIter]()
+          {
+           auto post = [s](bool traces, const std::string& b, int retries)->bool
+              {s->cli->SetMaxRetry(retries);
+               std::string e;
+               bool ok = traces ? s->cli->PostTraces(b, e)
+                                : s->cli->PostLogs(b, e);
+               if (!ok)
+                  {if (s->failures) ++*s->failures;
+                   time_t now = time(0);
+                   if (now - s->warnAt >= 10)
+                      {s->warnAt = now;
+                       fprintf(stderr, "xrdmoncollect: OTLP[%s] %s post failed: "
+                               "%s\n", s->cfg.name.c_str(),
+                               traces ? "traces" : "logs", e.c_str());
+                      }
+                  }
+               return ok;
+              };
+           auto drain = [&](XrdMonDiskCache* c, bool traces)
+              {if (!c) return;
+               std::string e;
+               for (int i = 0; i < kDrainPerIter; i++)
+                  {int r = c->ReplayOldest([&](const std::string& b)
+                              {return post(traces, b, kSinkRetries);}, e);
+                   if (!e.empty())
+                      {fprintf(stderr, "xrdmoncollect: OTLP[%s]: %s\n",
+                               s->cfg.name.c_str(), e.c_str()); e.clear();}
+                   if (r != 1) break;      // 0 = empty, -1 = endpoint still down
+                  }
+              };
+           // One body from whichever queue has one; both are polled each wake-up
+           // so neither signal can starve the other.
+           auto serve = [&](XrdMonSinkQueue& q, XrdMonDiskCache* c, bool traces)
+              {XrdMonBody body;
+               if (!q.takeFor(body, 500)) return;
+               s->busy.store(true);
+               std::string e;
+               if (c && !c->Empty())
+                  {if (!c->Store(*body, e))
+                      {if (s->dropped) ++*s->dropped;
+                       fprintf(stderr, "xrdmoncollect: OTLP[%s] cache store "
+                               "failed: %s\n", s->cfg.name.c_str(), e.c_str());}
+                   drain(c, traces);
+                  }
+                  else if (!post(traces, *body, c ? 0 : kSinkRetries))
+                  {if (c)
+                      {if (!c->Store(*body, e))
+                          {if (s->dropped) ++*s->dropped;
+                           fprintf(stderr, "xrdmoncollect: OTLP[%s] cache store "
+                                   "failed: %s\n", s->cfg.name.c_str(), e.c_str());}
+                      }
+                      else if (s->dropped) ++*s->dropped;   // no cache: drops
+                  }
+               s->busy.store(false);
+              };
 
-          // POST one body to the logs (resp. traces) endpoint; true on success.
-          // Drives both live bodies and cache replays.
-          auto post = [&](bool traces, const std::string& b)->bool
-             {std::string e;
-              bool ok = traces ? otlp->PostTraces(b, e) : otlp->PostLogs(b, e);
-              if (!ok)
-                 {if (otlpFailures) ++*otlpFailures;
-                  time_t now = time(0);
-                  if (now - otlpWarn >= 10)
-                     {otlpWarn = now;
-                      fprintf(stderr, "xrdmoncollect: OTLP %s post failed: %s\n",
-                              traces ? "traces" : "logs", e.c_str());
-                     }
-                 }
-              return ok;
-             };
-          // Replay up to kDrainPerIter cached bodies from one cache, oldest first,
-          // stopping as soon as the endpoint is down again.
-          auto drain = [&](XrdMonDiskCache* c, bool traces)
-             {if (!c) return;
-              std::string e;
-              for (int i = 0; i < kDrainPerIter; i++)
-                 {int r = c->ReplayOldest([&](const std::string& b)
-                                          {return post(traces, b);}, e);
-                  if (!e.empty())
-                     {fprintf(stderr, "xrdmoncollect: %s\n", e.c_str()); e.clear();}
-                  if (r != 1) break;      // 0 = empty, -1 = endpoint still down
-                 }
-             };
+           // See the OpenSearch sink: overflow is data loss and deserves more
+           // than a counter nobody is watching yet.
+           std::uint64_t seenOver = 0;
+           time_t        overWarn = 0;
+           auto noteOverflow = [&]()
+              {std::uint64_t n = s->logs.overflowed() + s->traces.overflowed();
+               if (n == seenOver) return;
+               time_t now = time(0);
+               if (now - overWarn >= 30)
+                  {overWarn = now;
+                   fprintf(stderr, "xrdmoncollect: OTLP[%s] dropped %llu "
+                           "bod%s: the destination queue is full\n",
+                           s->cfg.name.c_str(),
+                           (unsigned long long)(n - seenOver),
+                           n - seenOver == 1 ? "y" : "ies");
+                   seenOver = n;
+                  }
+              };
 
-          OtlpMsg m;
-          for (;;)
-             {if (otlpPipe.takeFor(m, 1000))
-                 {XrdMonDiskCache* c = m.traces ? otlpTraceCache : otlpLogCache;
-                  std::string e;
-                  if (c && !c->Empty())
-                     {// Preserve order: queue behind the backlog, then drain.
-                      if (!c->Store(m.body, e))
-                         {if (otlpDropped) ++*otlpDropped;
-                          fprintf(stderr, "xrdmoncollect: OTLP cache store failed: "
-                                  "%s\n", e.c_str());}
-                      drain(c, m.traces);
-                     }
-                     else if (!post(m.traces, m.body))
-                     {if (c)
-                         {if (!c->Store(m.body, e))
-                             {if (otlpDropped) ++*otlpDropped;
-                              fprintf(stderr, "xrdmoncollect: OTLP cache store "
-                                      "failed: %s\n", e.c_str());}
-                         }
-                         else if (otlpDropped) ++*otlpDropped;   // no cache: drops
-                     }
-                  XrdMonRecycleBody(m.body);
-                  otlpPipe.recycle(std::move(m));
-                 }
-                 else
-                 {if (otlpPipe.closedDrained()) break;
-                  drain(otlpLogCache,   false);  // idle: make progress on backlogs
-                  drain(otlpTraceCache, true);
-                 }
-             }
-         });
+           for (;;)
+              {noteOverflow();
+               serve(s->logs,   s->logCache,   false);
+               serve(s->traces, s->traceCache, true);
+               if (s->logs.closedDrained() && s->traces.closedDrained()) break;
+               if (s->logs.bodies() == 0 && s->traces.bodies() == 0)
+                  {drain(s->logCache,   false);   // idle: work on the backlogs
+                   drain(s->traceCache, true);
+                  }
+              }
+           s->done.store(true);
+          });
+      }
 #endif
 
 // Serializer thread: owns the decoder exclusively (preserving its single-thread
@@ -1851,10 +2141,11 @@ int main(int argc, char* argv[])
            decoder.MemoryTick(now);       // self-rate-limiting; see MemoryTick
            flush();                       // hand one _bulk body to the output thread
           }
-       flush();                           // hand off anything after the pipe closed
+       flush(true);                       // hand off anything after the pipe closed
 #ifdef XRDMON_HAVE_CURL
-       if (osEnabled)   postPipe.close(); // let the output thread drain and exit
-       if (otlpEnabled) otlpPipe.close();
+       // Let every sink thread drain what it has and exit.
+       for (auto& s : osSinks)   s->q.close();
+       for (auto& s : otlpSinks) {s->logs.close(); s->traces.close();}
 #endif
       });
 
@@ -1934,8 +2225,36 @@ int main(int argc, char* argv[])
                   "'%s': %s\n", stateFile.c_str(), strerror(errno));
       }
 #ifdef XRDMON_HAVE_CURL
-   if (output.joinable())     output.join();      // drains the POST pipe
-   if (otlpOutput.joinable()) otlpOutput.join();  // drains the OTLP pipe
+   // Every destination drains in parallel, so the wait is the slowest one
+   // rather than their sum. Give them a grace period to deliver what they hold
+   // and then cut whatever is still in flight: an endpoint that black-holes
+   // packets would otherwise hold the process for its whole retry ladder (five
+   // 30s timeouts) and be SIGKILLed part way through.
+   {const int kSinkGraceSecs = 20;
+    for (int i = 0; i < kSinkGraceSecs * 10; i++)
+        {bool all = true;
+         for (auto& s : osSinks)   all = all && s->done.load();
+         for (auto& s : otlpSinks) all = all && s->done.load();
+         if (all) break;
+         usleep(100000);
+        }
+    for (auto& s : osSinks)
+        if (!s->done.load())
+           {fprintf(stderr, "xrdmoncollect: OpenSearch[%s] did not finish in "
+                    "%ds; abandoning the POST in flight\n",
+                    s->cfg.name.c_str(), kSinkGraceSecs);
+            s->cli->Cancel();
+           }
+    for (auto& s : otlpSinks)
+        if (!s->done.load())
+           {fprintf(stderr, "xrdmoncollect: OTLP[%s] did not finish in %ds; "
+                    "abandoning the POST in flight\n",
+                    s->cfg.name.c_str(), kSinkGraceSecs);
+            s->cli->Cancel();
+           }
+   }
+   for (auto& s : osSinks)   if (s->th.joinable()) s->th.join();
+   for (auto& s : otlpSinks) if (s->th.joinable()) s->th.join();
 #endif
 
    if (exporter.joinable()) {exporterStop = true; exporter.join();}
@@ -1970,11 +2289,8 @@ int main(int argc, char* argv[])
    delete tcpSrv;
    delete fwd;
 #ifdef XRDMON_HAVE_CURL
-   delete os;
-   delete otlp;
-   delete cache;
-   delete otlpLogCache;
-   delete otlpTraceCache;
+   osSinks.clear();      // each sink owns its client and its caches
+   otlpSinks.clear();
 #endif
    return 0;
 }

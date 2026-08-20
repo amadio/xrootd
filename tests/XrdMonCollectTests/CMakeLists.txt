@@ -25,6 +25,16 @@ if(TARGET xrdmoncollect)
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/config_test.sh
             $<TARGET_FILE:xrdmoncollect>)
 
+  # Housekeeping (the idle-incarnation reap, and with it the memory cap) has to
+  # run on the wall clock rather than on packet arrival. Sends one packet, then
+  # stays silent past --server-ttl and the sweep interval. Slow by nature: the
+  # sweep is gated at 60s and only a timed wake-up can reach it.
+  add_test(NAME XrdMonCollect::IdleReap
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/idle_reap_test.sh
+            $<TARGET_FILE:xrdmoncollect>)
+  set_tests_properties(XrdMonCollect::IdleReap
+    PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 200)
+
   # Systemd socket activation (LISTEN_FDS): the harness plays PID 1, holds the
   # UDP socket across a collector restart, and asserts that packets sent while
   # no collector was running come out fully correlated afterwards. Only

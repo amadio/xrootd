@@ -21,6 +21,7 @@
 /* COPYING (GPL license).  If not, see <http://www.gnu.org/licenses/>.        */
 /******************************************************************************/
 
+#include <atomic>
 #include <string>
 
 //-----------------------------------------------------------------------------
@@ -88,6 +89,19 @@ bool Bulk(const std::string& body, std::string& err);
 //! The index/data-stream name (for the action metadata line).
 const std::string& Index() const {return idx;}
 
+//! Retries applied to a transient failure (curl error, 429, 5xx), with
+//! doubling backoff. Set to 0 for a live body when a disk cache is
+//! configured: failing fast and spilling to disk beats holding the body for
+//! the length of the retry ladder while the queue behind it overflows. The
+//! replay path keeps the full ladder, which is also what paces it.
+void SetMaxRetry(int n) {maxRetry = n < 0 ? 0 : n;}
+
+//! Abandon the POST in flight and the rest of the retry ladder. Called from
+//! the shutdown path: a black-holing endpoint would otherwise hold the
+//! process for five 30-second timeouts and be SIGKILLed part way through.
+//! Not reversible -- the instance is finished after this.
+void Cancel() {cancelled = true;}
+
 private:
 
 void*       curl;      // CURL* (opaque to avoid leaking the header)
@@ -98,5 +112,6 @@ std::string authHdr;   // "Authorization: Bearer <token>" or empty
 bool        insecure;
 bool        useCreate; // "create" bulk action (data stream) vs "index"
 int         maxRetry;
+std::atomic<bool> cancelled{false};
 };
 #endif

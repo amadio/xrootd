@@ -21,6 +21,8 @@
 /* COPYING (GPL license).  If not, see <http://www.gnu.org/licenses/>.        */
 /******************************************************************************/
 
+#include <atomic>
+#include <cstddef>
 #include <map>
 #include <string>
 
@@ -59,7 +61,14 @@ bool haveTraces() const {return !spanGroups.empty();}
 std::string takeLogsBody();
 std::string takeTracesBody();
 
-void clear() {logGroups.clear(); spanGroups.clear();}
+void clear()
+     {logGroups.clear(); spanGroups.clear(); logBytes = spanBytes = 0;}
+
+//! Roughly how large the accumulated logs (resp. traces) body would be. Used
+//! to bound how long a caller may keep accumulating before it ships; the tree
+//! held here is several times this in memory, and nothing else bounds it.
+std::size_t approxLogBytes()   const {return logBytes;}
+std::size_t approxTraceBytes() const {return spanBytes;}
 
 private:
 
@@ -75,6 +84,8 @@ struct Group
 // without the key having to be serialized once per document.
 std::map<nlohmann::json, Group> logGroups;
 std::map<nlohmann::json, Group> spanGroups;
+std::size_t logBytes  = 0;
+std::size_t spanBytes = 0;
 
 std::string takeBody(std::map<nlohmann::json, Group>& groups,
                      const char* resourceKey, const char* scopeKey,
@@ -108,6 +119,17 @@ bool Init(std::string& err);
 bool PostLogs(const std::string& body, std::string& err);
 bool PostTraces(const std::string& body, std::string& err);
 
+//! Retries applied to a transient failure (curl error, 429, 5xx), with
+//! doubling backoff. Set to 0 for a live body when a disk cache is
+//! configured: failing fast and spilling to disk beats holding the body for
+//! the length of the retry ladder while the queue behind it overflows. The
+//! replay path keeps the full ladder, which is also what paces it.
+void SetMaxRetry(int n) {maxRetry = n < 0 ? 0 : n;}
+
+//! Abandon the POST in flight and the rest of the retry ladder; see
+//! XrdMonOpenSearch::Cancel(). Not reversible.
+void Cancel() {cancelled = true;}
+
 private:
 
 bool post(const std::string& url, const std::string& body, std::string& err);
@@ -118,6 +140,7 @@ std::string tracesURL;
 std::string authHdr;    // "Authorization: Bearer <token>" or empty
 bool        insecure;
 int         maxRetry;
+std::atomic<bool> cancelled{false};
 };
 #endif
 #endif

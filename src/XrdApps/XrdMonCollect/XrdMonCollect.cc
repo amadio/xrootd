@@ -59,6 +59,9 @@
 #include "XrdApps/XrdMonCollect/XrdMonFilter.hh"
 #include "XrdApps/XrdMonCollect/XrdMonForward.hh"
 #include "XrdApps/XrdMonCollect/XrdMonMemory.hh"
+// For XrdMonBulkAdd(): the --bulk file sink writes _bulk NDJSON with no cluster
+// involved, so the framing is needed even in a build without libcurl.
+#include "XrdApps/XrdMonCollect/XrdMonOpenSearch.hh"
 #include "XrdApps/XrdMonCollect/XrdMonPipe.hh"
 #include "XrdApps/XrdMonCollect/XrdMonShovel.hh"
 #include "XrdApps/XrdMonCollect/XrdMonShovelFrame.hh"
@@ -66,7 +69,6 @@
 #include "XrdMetrics/XrdMetricsRegistry.hh"
 #include "XrdMetrics/XrdMetricsSerializer.hh"
 #ifdef XRDMON_HAVE_CURL
-#include "XrdApps/XrdMonCollect/XrdMonOpenSearch.hh"
 #include "XrdApps/XrdMonCollect/XrdMonOtlp.hh"
 #include <curl/curl.h>
 #endif
@@ -1263,6 +1265,15 @@ int main(int argc, char* argv[])
       {fprintf(stderr, "%s: cannot open '%s': %s\n", argv[0], outFile,
                strerror(errno)); return 4;}
 
+// --bulk only frames the file sink; it has no effect on what the OpenSearch
+// sink posts (that is --os-index). Saying so beats leaving an operator to
+// wonder why their index name never appeared anywhere.
+//
+   if (!bulkIdx.empty() && !fileSink)
+      fprintf(stderr, "%s: warning: --bulk frames the file sink and no file "
+                      "sink is enabled; use --os-index for the OpenSearch "
+                      "target index\n", argv[0]);
+
 // Optional NDJSON-over-TCP forwarding sink (to a buffering frontend).
 //
    XrdMonForward* fwd = fwdPort > 0 ? new XrdMonForward(fwdHost, fwdPort)
@@ -1389,8 +1400,13 @@ int main(int argc, char* argv[])
       [&](const std::string& d)
          {if (fileSink)
              {if (bulkIdx.empty()) fprintf(out, "%s\n", d.c_str());
-                 else fprintf(out, "{\"index\":{\"_index\":\"%s\"}}\n%s\n",
-                              bulkIdx.c_str(), d.c_str());
+                 else
+                 {// Same framing the network sink uses, so a --bulk file can be
+                  // curl'd into a data stream (which rejects "index") as well.
+                  std::string line;
+                  XrdMonBulkAdd(line, bulkIdx, osDataStream, d);
+                  fwrite(line.data(), 1, line.size(), out);
+                 }
              }
 #ifdef XRDMON_HAVE_CURL
           if (osEnabled) {os->Add(batch, d); batchCount++;}

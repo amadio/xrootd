@@ -1,5 +1,6 @@
 add_executable(xrdmoncollect-unit-tests
   XrdMonCollectTests.cc
+  XrdMonBulkTests.cc
   XrdMonDiskCacheTests.cc
   XrdMonOtlpTests.cc
   XrdMonShovelFrameTests.cc XrdMonFilterTests.cc XrdMonMemoryTests.cc

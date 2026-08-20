@@ -24,6 +24,30 @@
 #include <string>
 
 //-----------------------------------------------------------------------------
+//! Append one document to a `_bulk` request body, prefixed with its action
+//! metadata line. Free-standing rather than a member because the framing is a
+//! property of the request format, not of a connection: the --bulk file sink
+//! writes the same NDJSON for later replay with no cluster in sight, and a
+//! collector feeding several clusters accumulates one body per distinct
+//! (index, action) pair rather than one per destination.
+//!
+//! @param batch    body to append to.
+//! @param index    index or data-stream name for the action metadata.
+//! @param create   use the "create" action (data streams reject "index").
+//! @param jsonDoc  the document, serialized, with no trailing newline.
+//-----------------------------------------------------------------------------
+
+inline void XrdMonBulkAdd(std::string& batch, const std::string& index,
+                          bool create, const std::string& jsonDoc)
+{
+   batch += create ? "{\"create\":{\"_index\":\"" : "{\"index\":{\"_index\":\"";
+   batch += index;
+   batch += "\"}}\n";
+   batch += jsonDoc;
+   batch += '\n';
+}
+
+//-----------------------------------------------------------------------------
 //! XrdMonOpenSearch posts batches of documents to an OpenSearch/Elasticsearch
 //! cluster using the _bulk API over HTTP(S). It owns a libcurl handle and
 //! retries transient failures with backoff. One instance is used from a single

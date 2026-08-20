@@ -2565,6 +2565,99 @@ TEST(XrdMonCollect, PromotingAnEntryDoesNotDisturbTheEntryCount)
   EXPECT_EQ(dec.StateEntries(), held);
 }
 
+//------------------------------------------------------------------------------
+// Monitoring payloads that are not valid UTF-8. XRootD carries path and
+// identity bytes verbatim, so a file named in Latin-1 reaches the decoder as
+// bytes JSON cannot represent. They used to abort the process; they must now
+// cost one repaired field and a counter.
+//------------------------------------------------------------------------------
+
+namespace
+{
+const char* const kFFFD = "\xef\xbf\xbd";       // U+FFFD, what a bad byte becomes
+
+// "/store/user/jérôme/data.root" as a Latin-1 filesystem would hand it over.
+const std::string kLatin1Lfn = "/store/user/j\xe9r\xf4me/data.root";
+const std::string kRepairedLfn =
+   std::string("/store/user/j") + kFFFD + "r" + kFFFD + "me/data.root";
+}
+
+TEST(XrdMonCollect, PoisonedLfnStillYieldsADocument)
+{
+  std::string doc;
+  XrdMonDecode dec([&](const std::string& d){doc = d;});
+
+  feedUser7(dec, "h:1");
+  feedOpenId(dec, "h:1", 1, kLatin1Lfn);
+  feedCloseId(dec, "h:1", 1);
+
+  ASSERT_FALSE(doc.empty()) << "the document was lost, not repaired";
+  json j = json::parse(doc);                        // and it is parseable JSON
+  EXPECT_EQ(j["attributes"]["file.path"], kRepairedLfn);
+  EXPECT_EQ(j["attributes"]["file.name"], std::string("data.root"));
+  EXPECT_EQ(dec.GetStats().docs, 1u);
+  EXPECT_EQ(dec.GetStats().badUtf8, 1u);            // the LFN, once
+}
+
+TEST(XrdMonCollect, PoisonedUserDescriptorKeepsTheRestOfTheIdentity)
+{
+  std::string doc;
+  XrdMonDecode dec([&](const std::string& d){doc = d;});
+
+  // The user name carries the bad bytes; protocol, host and the CGI tail
+  // around it must come through untouched.
+  W body; body.u32(7);
+  const std::string info =
+     "xroot/ren\xe9.1:2@wn.example.org\n&p=gsi&o=atlas&x=root";
+  std::vector<unsigned char> pl = body.b;
+  pl.insert(pl.end(), info.begin(), info.end());
+  auto pkt = packet('u', kStod, pl);
+  dec.Process("h:1", (const char*)pkt.data(), pkt.size());
+
+  feedOpenId(dec, "h:1", 1, "/store/data/f.root");
+  feedCloseId(dec, "h:1", 1);
+
+  ASSERT_FALSE(doc.empty());
+  json j = json::parse(doc);
+  EXPECT_EQ(j["attributes"]["user.name"], std::string("ren") + kFFFD);
+  EXPECT_EQ(j["attributes"]["client.address"], "wn.example.org");
+  EXPECT_EQ(j["attributes"]["network.protocol.name"], "xroot");
+  EXPECT_EQ(j["attributes"]["xrootd.vo"], "atlas");
+  EXPECT_EQ(j["attributes"]["user_agent.name"], "root");
+  EXPECT_EQ(dec.GetStats().badUtf8, 1u);   // the whole record, scrubbed once
+}
+
+// An isError record puts the error block straight after the inline LFN, and it
+// is found by walking the record. Repairing the encoding changes the string's
+// length, so the offset has to come from the wire -- get that wrong and every
+// failed open on a badly-named file loses its error code and message.
+TEST(XrdMonCollect, FailedOpenWithAPoisonedLfnStillFindsItsErrorBlock)
+{
+  std::string doc;
+  XrdMonDecode dec([&](const std::string& d){doc = d;});
+  feedUser7(dec, "h:1");
+
+  W body;
+  body.u32(0);                              // fileID union (0 for isError)
+  body.u32(7);                              // inline user dictid
+  body.raw(kLatin1Lfn); body.u8(0);
+  body.raw(errBlock(3011, 5 /*monErrAuth*/, "permission denied"));
+
+  auto payload = todRec(kCloseT, 42);
+  auto r = rec(5 /*isError*/, 0x01 /*hasLFN*/, body.b);
+  payload.insert(payload.end(), r.begin(), r.end());
+  auto pkt = packet('f', kStod, payload);
+  dec.Process("h:1", (const char*)pkt.data(), pkt.size());
+
+  ASSERT_FALSE(doc.empty());
+  json j = json::parse(doc);
+  EXPECT_EQ(j["attributes"]["file.path"], kRepairedLfn);
+  EXPECT_EQ(j["attributes"]["xrootd.error.code"], 3011);
+  EXPECT_EQ(j["attributes"]["error.type"], "permission denied");
+  EXPECT_EQ(j["attributes"]["xrootd.operation.name"], "auth");
+  EXPECT_EQ(dec.GetStats().failed, 1u);
+}
+
 TEST(XrdMonCollect, FrmStageAndPurge)
 {
   XrdMetrics::Collector collector("xrootd");
@@ -4018,6 +4111,31 @@ TEST_F(StateFile, CloseCorrelatesAfterReload)
   EXPECT_EQ(s.opens, 1u);       // stats restored from the snapshot...
   EXPECT_EQ(s.closes, 1u);      // ...and advanced by the post-reload close
   EXPECT_EQ(s.orphanCls, 0u);
+}
+
+// The snapshot is written on the main thread at shutdown, well away from
+// anything that looks like decoding, and a string the encoder refused would
+// abort there too -- after the partial write, so the .tmp file would be left
+// behind as well. Scrubbing on the way in means the snapshot only ever holds
+// what it can encode.
+TEST_F(StateFile, PoisonedStringsSurviveTheSnapshot)
+{
+  feedUserMap();
+  feedOpenId(dec, "10.0.0.1:9930", 100, kLatin1Lfn);
+  ASSERT_TRUE(dec.SaveState(path));
+  EXPECT_FALSE(std::ifstream(path + ".tmp").good());
+
+  std::string doc2;
+  XrdMonDecode dec2([&](const std::string& d){doc2 = d;});
+  std::string note;
+  ASSERT_TRUE(dec2.LoadState(path, 900, note)) << note;
+
+  alt = &dec2;
+  feedClose();
+
+  ASSERT_FALSE(doc2.empty());
+  EXPECT_EQ(json::parse(doc2)["attributes"]["file.path"], kRepairedLfn);
+  EXPECT_EQ(dec2.GetStats().badUtf8, 1u);   // and the count came back with it
 }
 
 // The clock offset describes this collector and this server incarnation, so it

@@ -1718,7 +1718,7 @@ constexpr long kFloorWarnSecs = 300;
 void XrdMonDecode::SetMaxRss(std::size_t n)
 {
    maxRss = n;
-   if (!n) return;
+   if (!n) {rssCeil = rssFloor = maxBytes = 0; return;}   // 0 = unbounded
 
 // The ceiling is a sanity bound, not the operative limit -- the loop is. It is
 // maxRss/8 because bytesOf() under-counts real memory by 4-8x, so a charged

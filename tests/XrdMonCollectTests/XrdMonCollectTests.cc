@@ -4020,3 +4020,138 @@ TEST_F(StateFile, MissingSnapshotIsSilent)
   EXPECT_FALSE(dec2.LoadState(path + ".nonexistent", 900, note));
   EXPECT_TRUE(note.empty());
 }
+
+/******************************************************************************/
+/*                    T h e   J S O N   t r e e   s i n k                     */
+/******************************************************************************/
+
+// A consumer that re-encodes the document (the OTLP batch) takes it as a tree,
+// so the text form exists only for consumers that want text. That makes the
+// "no DocSink" path load-bearing: before the tree sink existed, three separate
+// guards suppressed everything when the text sink was absent, and no test ever
+// reached them because every decoder in this file is built with a live lambda.
+
+TEST(TreeSink, CarriesDocumentsWithNoTextSink)
+{
+  std::vector<json> trees;
+  XrdMonDecode dec(nullptr);                     // no text sink at all
+  dec.SetTreeSink([&](const json& j){ trees.push_back(j); });
+
+  feedUserN(dec, "h:1", 7);
+  openClose(dec, "h:1", 1, 7, 4096, 1024, 0, "/store/data/a.root");
+
+  ASSERT_EQ(trees.size(), 1u);
+  EXPECT_EQ(trees[0]["attributes"]["event.name"], "xrootd.read");
+  EXPECT_EQ(trees[0]["attributes"]["file.path"], "/store/data/a.root");
+  EXPECT_EQ(dec.GetStats().docs, 1u);
+}
+
+// Spans and session rollups take the same exit, and each is gated on its own
+// copy of the guard.
+TEST(TreeSink, CarriesSpansAndSessionsWithNoTextSink)
+{
+  std::vector<json> trees;
+  XrdMonDecode dec(nullptr);
+  dec.SetTreeSink([&](const json& j){ trees.push_back(j); });
+  dec.SetEmitSessions(true);
+  dec.SetEmitSpans(true);
+
+  feedUserN(dec, "h:1", 7);
+  openClose(dec, "h:1", 1, 7, 4096, 1024, 0, "/store/data/a.root");
+  feedDisc(dec, "h:1", 7);
+
+  // close log, close span, session log, session span.
+  ASSERT_EQ(trees.size(), 4u);
+  int logs = 0, spans = 0, sessions = 0;
+  for (const json& j : trees)
+      {const bool isSpan = j.contains("kind");
+       if (isSpan) spans++; else logs++;
+       if (!isSpan && j.contains("attributes")
+       &&  j["attributes"].value("event.name", std::string()) == "xrootd.session")
+          sessions++;
+      }
+  EXPECT_EQ(logs,   2);
+  EXPECT_EQ(spans,  2);
+  EXPECT_EQ(sessions, 1);        // the session log (its span reuses the same
+                                 // attributes, so match on the envelope)
+  EXPECT_EQ(dec.GetStats().spans, 2u);
+}
+
+// The g-stream document is built behind its own `if (gstream && doc)` test,
+// which does not go through emitDoc's return value -- miss it and every
+// --gstream record disappears on an OTLP-only collector.
+TEST(TreeSink, CarriesGStreamRecordsWithNoTextSink)
+{
+  std::vector<json> trees;
+  XrdMonDecode dec(nullptr, nullptr, false, false, /*gstream=*/true);
+  dec.SetTreeSink([&](const json& j){ trees.push_back(j); });
+
+  auto p = gJson('H', "{\"HTTP_GET_200\":{\"count\":240,\"success\":240}}", 3);
+  EXPECT_TRUE(dec.Process("h:1", p.data(), (int)p.size()));
+
+  ASSERT_EQ(trees.size(), 1u);
+  EXPECT_EQ(trees[0]["attributes"]["event.name"], "xrootd.gstream");
+  EXPECT_EQ(trees[0]["attributes"]["xrootd.gstream.provider"], "http");
+  EXPECT_EQ(dec.GetStats().gevents, 1u);
+}
+
+// With both installed the two sinks see the same document, once each: the tree
+// is exactly what the text deserializes to, so a mixed OpenSearch + OTLP
+// collector still serializes only once.
+TEST(TreeSink, BothSinksSeeTheSameDocumentOnce)
+{
+  std::vector<std::string> docs;
+  std::vector<json>        trees;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetTreeSink([&](const json& j){ trees.push_back(j); });
+  dec.SetEmitSessions(true);
+  dec.SetEmitSpans(true);
+
+  feedUserN(dec, "h:1", 7);
+  openClose(dec, "h:1", 1, 7, 4096, 1024, 0, "/a.root");
+  openClose(dec, "h:1", 2, 7, 4096,    0, 8, "/b.root");
+  feedDisc(dec, "h:1", 7);
+
+  ASSERT_EQ(docs.size(), trees.size());
+  ASSERT_EQ(docs.size(), 6u);            // 2 closes + 2 spans + session + span
+  for (std::size_t i = 0; i < docs.size(); i++)
+      EXPECT_EQ(json::parse(docs[i]), trees[i]) << "document " << i;
+}
+
+// The filter runs ahead of both sinks, so a tree-only collector exports the
+// same documents a text one would -- filtering is a property of the pipeline,
+// not of the sink that happens to be attached.
+TEST(TreeSink, FilterAppliesToTheTreeSink)
+{
+  XrdMonFilter flt;
+  std::string err;
+  std::size_t r = flt.AddRule("no-reads");
+  ASSERT_TRUE(flt.AddCondition(r, "event", "xrootd.read", err)) << err;
+  ASSERT_TRUE(flt.SetAction(r, "drop", err)) << err;
+
+  std::vector<json> trees;
+  XrdMonDecode dec(nullptr);
+  dec.SetTreeSink([&](const json& j){ trees.push_back(j); });
+  dec.SetFilter(&flt);
+
+  feedUserN(dec, "h:1", 7);
+  openClose(dec, "h:1", 1, 7, 4096, 1024, 0, "/a.root");
+
+  EXPECT_TRUE(trees.empty());
+  EXPECT_EQ(dec.GetStats().filtered, 1u);
+}
+
+// Neither sink installed is still a valid decoder: it correlates and counts,
+// and emits nothing. `docs` counts documents the pipeline produced, which is
+// deliberately independent of whether a sink was there to take them.
+TEST(TreeSink, NoSinkAtAllStillCorrelates)
+{
+  XrdMonDecode dec(nullptr);
+  feedUserN(dec, "h:1", 7);
+  openClose(dec, "h:1", 1, 7, 4096, 1024, 0, "/a.root");
+
+  EXPECT_EQ(dec.GetStats().opens,  1u);
+  EXPECT_EQ(dec.GetStats().closes, 1u);
+  EXPECT_EQ(dec.GetStats().docs,   1u);
+  EXPECT_EQ(dec.GetStats().filtered, 0u);   // not filtered -- just unattached
+}

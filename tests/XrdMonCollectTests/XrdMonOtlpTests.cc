@@ -353,3 +353,58 @@ TEST(XrdMonOtlp, ByteCountTracksTheBodyItWillProduce)
    EXPECT_LT(claimed - actual, 256u);      // and is tight, not a guess
    EXPECT_EQ(b.logBytes(), 0u);            // reset by the take
 }
+
+// A group survives the body it contributed to, so its resource is serialized
+// once and its buffer is not rebuilt from nothing every cycle. What must not
+// survive is the appearance of having something to send.
+TEST(XrdMonOtlp, AnIdleResourceIsNotShippedAgain)
+{
+   json a, b2;
+   a["resource"]["server.address"] = "srv1";
+   a["attributes"]["event.name"]   = "xrootd.read";
+   b2 = a;
+   b2["resource"]["server.address"] = "srv2";
+
+   XrdMonOtlpBatch batch;
+   batch.add(a);
+   batch.add(b2);
+   ASSERT_EQ(json::parse(batch.takeLogsBody())["resourceLogs"].size(), 2u);
+
+   // Only srv1 reports in the next window.
+   EXPECT_FALSE(batch.haveLogs());        // retained groups are not content
+   batch.add(a);
+   ASSERT_TRUE(batch.haveLogs());
+
+   json body = json::parse(batch.takeLogsBody());
+   ASSERT_EQ(body["resourceLogs"].size(), 1u);
+   const json& attrs = body["resourceLogs"][0]["resource"]["attributes"];
+   ASSERT_EQ(attrs.size(), 1u);
+   EXPECT_EQ(attrs[0]["value"]["stringValue"], "srv1");
+   EXPECT_EQ(body["resourceLogs"][0]["scopeLogs"][0]["logRecords"].size(), 1u);
+
+   // And a wholly quiet window produces nothing at all.
+   EXPECT_FALSE(batch.haveLogs());
+   EXPECT_EQ(batch.logBytes(), 0u);
+}
+
+// The byte count must not carry over the retained groups' envelopes, or it
+// would drift upwards with every cycle and trip the caller's bound early.
+TEST(XrdMonOtlp, ByteCountDoesNotAccumulateAcrossBodies)
+{
+   json doc;
+   doc["resource"]["server.address"] = "srv1";
+   doc["attributes"]["event.name"]   = "xrootd.read";
+
+   XrdMonOtlpBatch b;
+   std::size_t firstClaim = 0;
+   for (int cycle = 0; cycle < 5; cycle++)
+      {for (int i = 0; i < 20; i++) b.add(doc);
+       const std::size_t claim = b.logBytes();
+       const std::size_t body  = b.takeLogsBody().size();
+       if (!cycle) firstClaim = claim;
+       EXPECT_EQ(claim, firstClaim) << "cycle " << cycle;
+       EXPECT_GE(claim, body);
+       EXPECT_LT(claim - body, 256u);
+       EXPECT_EQ(b.logBytes(), 0u);
+      }
+}

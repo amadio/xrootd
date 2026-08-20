@@ -36,6 +36,8 @@
 
 #include "XrdOuc/XrdOucJson.hh"
 
+#include "XrdApps/XrdMonCollect/XrdMonUtil.hh"
+
 namespace XrdMetrics { class Subsystem; }
 
 class XrdMonFilter;
@@ -71,42 +73,48 @@ using TreeSink = std::function<void(const nlohmann::json& jsonDoc)>;
 using RawSink = std::function<void(const std::string& jsonRec)>;
 
 //! Counters describing what has been decoded so far.
+//!
+//! Written by the thread that owns this decoder and read, at scrape time, by
+//! the metrics exporter thread -- hence XrdMonPublished rather than a bare
+//! integer. Every call site still reads and writes them as plain numbers.
 struct Stats
 {
-   uint64_t packets   = 0;   // datagrams seen
-   uint64_t malformed = 0;   // datagrams rejected as too short / inconsistent
-   uint64_t records   = 0;   // individual records decoded
-   uint64_t mapUser   = 0;   // 'u' dictionary records
-   uint64_t mapPath   = 0;   // 'd' dictionary records
-   uint64_t mapInfo   = 0;   // 'i' dictionary records
-   uint64_t mapIdnt   = 0;   // '=' server-identification records
-   uint64_t mapTokn   = 0;   // 'T' token dictionary records
-   uint64_t mapUeac   = 0;   // 'U' user experiment/activity records
-   uint64_t opens     = 0;   // 'f' open records
-   uint64_t closes    = 0;   // 'f' close records
-   uint64_t xfrs      = 0;   // 'f' in-flight transfer snapshot records
-   uint64_t discs     = 0;   // 'f' session disconnect records
-   uint64_t docs      = 0;   // transfer documents emitted
-   uint64_t filtered  = 0;   // documents of any type suppressed by a filter
+   using Count = XrdMonPublished<std::uint64_t>;
+
+   Count packets;            // datagrams seen
+   Count malformed;          // datagrams rejected as too short / inconsistent
+   Count records;            // individual records decoded
+   Count mapUser;            // 'u' dictionary records
+   Count mapPath;            // 'd' dictionary records
+   Count mapInfo;            // 'i' dictionary records
+   Count mapIdnt;            // '=' server-identification records
+   Count mapTokn;            // 'T' token dictionary records
+   Count mapUeac;            // 'U' user experiment/activity records
+   Count opens;              // 'f' open records
+   Count closes;             // 'f' close records
+   Count xfrs;               // 'f' in-flight transfer snapshot records
+   Count discs;              // 'f' session disconnect records
+   Count docs;               // transfer documents emitted
+   Count filtered;           // documents of any type suppressed by a filter
                              // rule before reaching the sink
-   uint64_t failed    = 0;   // 'f' failed/aborted operation records (isError +
+   Count failed;             // 'f' failed/aborted operation records (isError +
                              // hasERR closes)
-   uint64_t orphanCls = 0;   // closes with no matching open
-   uint64_t staleOpens = 0;  // open-file entries dropped without a close
+   Count orphanCls;          // closes with no matching open
+   Count staleOpens;         // open-file entries dropped without a close
                              // (disconnect sweep or file TTL: the close was
                              // lost, e.g. to UDP packet loss)
-   uint64_t traces    = 0;   // 't' stream records decoded
-   uint64_t gevents   = 0;   // 'g' stream records decoded
-   uint64_t redirs    = 0;   // 'r' stream redirect records decoded
-   uint64_t spans     = 0;   // OpenTelemetry span documents emitted (--spans)
-   uint64_t frmEvents = 0;   // 'x'/'p' FRM stage/migrate/purge records
-   uint64_t lost      = 0;   // estimated lost packets (pseq gaps)
-   uint64_t evicted   = 0;   // dictionary/open-file entries evicted (budget/cap)
-   uint64_t reaped    = 0;   // idle server incarnations reclaimed (server TTL)
-   uint64_t memFloored= 0;   // control ticks spent over the RSS cap with the
+   Count traces;             // 't' stream records decoded
+   Count gevents;            // 'g' stream records decoded
+   Count redirs;             // 'r' stream redirect records decoded
+   Count spans;              // OpenTelemetry span documents emitted (--spans)
+   Count frmEvents;          // 'x'/'p' FRM stage/migrate/purge records
+   Count lost;               // estimated lost packets (pseq gaps)
+   Count evicted;            // dictionary/open-file entries evicted (budget/cap)
+   Count reaped;             // idle server incarnations reclaimed (server TTL)
+   Count memFloored;         // control ticks spent over the RSS cap with the
                              // state budget already at its floor (the memory
                              // is not in the correlation state)
-   uint64_t unknown   = 0;   // packets with an unhandled code
+   Count unknown;            // packets with an unhandled code
 };
 
 //! Process one UDP datagram received from sender `src` (used, together with
@@ -115,6 +123,8 @@ struct Stats
 //! @return true if the packet was structurally valid, false if malformed.
 bool Process(const std::string& src, const char* buff, int blen);
 
+//! The decoded-so-far counters. Safe to read from another thread (the metrics
+//! exporter does): every field is an XrdMonPublished.
 const Stats& GetStats() const {return stats;}
 
 //! The weight charged against the memory budget by the correlation state
@@ -129,8 +139,13 @@ const Stats& GetStats() const {return stats;}
 std::size_t StateWeight() const {return lruBytes;}
 
 //! Number of correlation entries held across every incarnation. Exact, unlike
-//! StateWeight(), and O(1) -- std::list::size() is constant since C++11.
-std::size_t StateEntries() const {return lru.size();}
+//! StateWeight().
+//!
+//! Reads a published mirror rather than lru.size(). Not for the cost -- that
+//! is O(1) -- but because a same-list splice still writes the list's size
+//! counter, so Touch(), the hottest operation in the decoder, would be racing
+//! the exporter thread on every promotion for a value that never changes.
+std::size_t StateEntries() const {return lruCount;}
 
 //! Bound the resident correlation state (per-server dictionaries plus the
 //! open-file table) to approximately `n` bytes (0 = unbounded). When exceeded,
@@ -639,6 +654,7 @@ void lruPut(Server* owner, Dict dict, Map& m, const Key& key, uint32_t ikey,
        it->second.lru = lru.insert(lru.end(),
                                    LruNode{owner, dict, ikey, skey, bytes});
        lruBytes += bytes;
+       ++lruCount;
       }
       else
       {LruIt node = it->second.lru;          // preserve across the assignment
@@ -651,7 +667,8 @@ void lruPut(Server* owner, Dict dict, Map& m, const Key& key, uint32_t ikey,
    EnforceBudget();
 }
 void     Touch(LruIt node) {lru.splice(lru.end(), lru, node);}
-void     LruDrop(LruIt node) {lruBytes -= node->bytes; lru.erase(node);}
+void     LruDrop(LruIt node)
+            {lruBytes -= node->bytes; lru.erase(node); --lruCount;}
 // Re-charge an existing entry whose held size changed (e.g. its session rollup
 // grew), keeping lruBytes and the node weight in step.
 void     Recharge(LruIt node, std::size_t bytes)
@@ -779,9 +796,16 @@ const XrdMonFilter*    filter = nullptr;  // document filter (see SetFilter)
 // an optional secondary entry-count cap (maxEntries; 0 = off). serverTTL idle-
 // reaps whole incarnations. lruBytes tracks the charged total.
 //
+// The list itself belongs to the decode thread, and is mutated only through
+// lruPut/Touch/LruDrop/EvictFront so that lruCount -- the published mirror of
+// its length, which is what any other thread may read -- has exactly three
+// places to be maintained.
+//
+using Size = XrdMonPublished<std::size_t>;
 std::list<LruNode> lru;            // front = least-recently-used, back = MRU
-std::size_t maxBytes   = 0;        // byte budget (0 = unbounded)
-std::size_t lruBytes   = 0;        // currently charged bytes
+Size        lruCount;              // published mirror of lru.size()
+Size        maxBytes;              // byte budget (0 = unbounded)
+Size        lruBytes;              // currently charged bytes
 std::size_t maxEntries = 0;        // optional entry-count backstop (0 = off)
 
 // RSS control loop (see MemoryTick). maxRss is the process cap from

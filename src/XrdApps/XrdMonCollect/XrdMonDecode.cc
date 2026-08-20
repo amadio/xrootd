@@ -1127,7 +1127,9 @@ bool XrdMonDecode::SaveState(const std::string& path) const
    j["saved"]   = (int64_t)time(nullptr);
 
    json& jst = j["stats"];
-#define X(fld) jst[#fld] = stats.fld;
+// .get(), because basic_json's assignment is a template and so never sees the
+// counter's conversion operator.
+#define X(fld) jst[#fld] = stats.fld.get();
    XRDMON_STATS_FIELDS(X)
 #undef X
 
@@ -1433,6 +1435,7 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
        servers.clear();
        gsPrev.clear();
        lru.clear();
+       lruCount = 0;
        lruBytes = 0;
        stats = Stats{};
        note = std::string("state file could not be decoded (") + e.what()
@@ -1688,6 +1691,7 @@ void XrdMonDecode::EvictFront()
           case Dict::Activity: n.srv->activity.erase(n.ikey); break;
          }
    lru.pop_front();
+   --lruCount;
    stats.evicted++;
 }
 
@@ -1699,8 +1703,8 @@ void XrdMonDecode::EnforceBudget()
 {
    std::size_t low = maxBytes - maxBytes/16;
    while (!lru.empty()
-       && ((maxBytes   && lruBytes   > low)
-        || (maxEntries && lru.size() > maxEntries)))
+       && ((maxBytes   && lruBytes  > low)
+        || (maxEntries && lruCount  > maxEntries)))
         EvictFront();
 }
 
@@ -1857,8 +1861,7 @@ void XrdMonDecode::ReapServers(time_t now)
        // Unlink every entry's LRU node and uncharge its bytes before the maps
        // (and the Server) are destroyed.
        auto purge = [&](auto& m)
-          {for (auto& kv : m) {lruBytes -= kv.second.lru->bytes;
-                               lru.erase(kv.second.lru);}};
+          {for (auto& kv : m) LruDrop(kv.second.lru);};
        purge(s.users); purge(s.files); purge(s.paths);
        purge(s.infos); purge(s.tokens); purge(s.activity);
 

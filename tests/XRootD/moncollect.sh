@@ -32,6 +32,10 @@ APP_DROPPED=e2e-dropped
 # the e2e still runs on hosts without python3.
 OTLP_PORT=8097
 METRICS_PORT=8098
+# A second OTLP receiver, configured through an [otlp "central"] section rather
+# than the command line: the shape a site uses to keep its own monitoring and
+# feed a central collector at the same time.
+OTLP2_PORT=8099
 
 # The site is the one identity the collector supplies itself: it is not on the
 # monitoring wire (all.sitename names the storage cluster, which this test sets
@@ -40,6 +44,8 @@ METRICS_PORT=8098
 SITE=E2E-SITE
 OTLP_OUT="${PWD}/${NAME}/otlp.captured"
 OTLP_PID="${PWD}/${NAME}/otlp.pid"
+OTLP2_OUT="${PWD}/${NAME}/otlp2.captured"
+OTLP2_PID="${PWD}/${NAME}/otlp2.pid"
 OTLP_CACHE="${PWD}/${NAME}/otlp-cache"
 
 # Security fragment that moncollect.cfg continues into (see the cfg). Generated
@@ -137,6 +143,11 @@ function setup_moncollect() {
 		        > "${PWD}/${NAME}/otlp.log" 2>&1 < /dev/null &
 		echo $! > "${OTLP_PID}"
 		disown 2>/dev/null || true
+		: > "${OTLP2_OUT}"
+		python3 "${SOURCE_DIR}/otlp_mock.py" "${OTLP2_PORT}" "${OTLP2_OUT}" \
+		        > "${PWD}/${NAME}/otlp2.log" 2>&1 < /dev/null &
+		echo $! > "${OTLP2_PID}"
+		disown 2>/dev/null || true
 		# --otlp-token exercises the bearer-auth path; the token is read from a
 		# file (@<path>) so the secret is not passed on the command line.
 		printf 'secrettoken123' > "${PWD}/${NAME}/otlp.token"
@@ -175,6 +186,16 @@ function setup_moncollect() {
 	app = ${APP_DROPPED}
 	action = drop
 	EOF
+	# A second OTLP destination alongside the command-line one (which is the
+	# destination called "default"). Both receive the same documents; each has
+	# its own thread, queue and disk-cache subdirectory.
+	if [ -f "${OTLP2_PID}" ]; then
+		cat >> "${COLLECTOR_CFG}" <<-EOF
+
+		[otlp "central"]
+		url = http://127.0.0.1:${OTLP2_PORT}
+		EOF
+	fi
 	# --sessions folds each close into its client's session and emits a session
 	# document (the trace root) when the client disconnects, which is where the
 	# session start/end/duration are reported.
@@ -389,6 +410,36 @@ sys.exit(1 if bad else 0)
 		assert test -d "${OTLP_CACHE}/otlp-logs"
 		assert test -d "${OTLP_CACHE}/otlp-traces"
 		echo "found: OTLP logs + traces export (with disk cache)"
+	fi
+
+	# A second destination, declared as [otlp "central"], receives the same
+	# documents independently of the first: its own thread, queue and cache.
+	if [ -f "${OTLP2_PID}" ]; then
+		for _ in $(seq 1 30); do
+			grep -q '"key":"xrootd.operation.state"' "${OTLP2_OUT}" 2>/dev/null && break
+			xrdcp -f "${TMPDIR}/ok.ref" "${HOST}/${TMPDIR}/ok.ref" >/dev/null 2>&1 || true
+			sleep 1
+		done
+		assert grep -q '"resourceLogs"' "${OTLP2_OUT}"
+		assert grep -q '"key":"xrootd.operation.state"' "${OTLP2_OUT}"
+		# The token belongs to the "default" destination only: a named section
+		# inherits nothing, least of all a credential.
+		assert_failure grep -q 'Bearer secrettoken123' "${OTLP2_OUT}"
+		assert test -d "${OTLP_CACHE}/otlp-central-logs"
+		assert test -d "${OTLP_CACHE}/otlp-central-traces"
+		# Every sink series is broken out by destination, and each name is one
+		# series of one family (a second family of the same name is an
+		# OpenMetrics error, and observed families bypass the registry's dedup).
+		metrics=$(curl -sf "http://localhost:${METRICS_PORT}/metrics" || true)
+		for d in default central; do
+			grep -q \
+			  "xrootd_collector_otlp_failures_total{site=\"${SITE}\",destination=\"${d}\"}" \
+			  <<<"${metrics}" \
+			  || error "no otlp_failures_total series for destination ${d}"
+		done
+		test "$(grep -c '^# HELP xrootd_collector_otlp_failures_total ' <<<"${metrics}")" \
+		     -eq 1 || error "otlp_failures_total emitted more than one family"
+		echo "found: a second OTLP destination, exported independently"
 	fi
 
 	# With VOMS, the proxy's fake VOMS attribute certificate must surface on the

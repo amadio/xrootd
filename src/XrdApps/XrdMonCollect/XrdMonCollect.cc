@@ -1375,7 +1375,17 @@ int main(int argc, char* argv[])
 // Wire up the sinks. With --bulk the file sink is written in OpenSearch _bulk
 // format; the OpenSearch sink batches documents and posts them via _bulk.
 //
-   XrdMonDecode::DocSink docSink =
+// Two sinks, because they want two different things. The file, OpenSearch and
+// forward sinks all consume the document as text, so they share one
+// serialization. The OTLP sink re-encodes the document, so it takes the tree
+// the decoder already built rather than parsing the text back into one. The
+// text sink is installed only when a text consumer exists, which is what makes
+// an OTLP-only collector serialize nothing per document at all.
+//
+   const bool wantText = fileSink || osEnabled || fwd != nullptr;
+
+   XrdMonDecode::DocSink docSink;
+   if (wantText) docSink =
       [&](const std::string& d)
          {if (fileSink)
              {if (bulkIdx.empty()) fprintf(out, "%s\n", d.c_str());
@@ -1384,11 +1394,6 @@ int main(int argc, char* argv[])
              }
 #ifdef XRDMON_HAVE_CURL
           if (osEnabled) {os->Add(batch, d); batchCount++;}
-          if (otlpEnabled)
-             {// Re-parse the just-serialized document to re-encode it as OTLP.
-              nlohmann::json od = nlohmann::json::parse(d, nullptr, false);
-              if (!od.is_discarded()) otlpBatch.add(od);
-             }
 #endif
           if (fwd)
              {std::string e;
@@ -1404,6 +1409,11 @@ int main(int argc, char* argv[])
                  }
              }
          };
+
+#ifdef XRDMON_HAVE_CURL
+   XrdMonDecode::TreeSink treeSink;
+   if (otlpEnabled) treeSink = [&](const nlohmann::json& j){otlpBatch.add(j);};
+#endif
 
    XrdMonDecode::RawSink rawSink;
    if (debug) rawSink = [&](const std::string& r){fprintf(out, "%s\n", r.c_str());};
@@ -1447,6 +1457,9 @@ int main(int argc, char* argv[])
       }
 
    XrdMonDecode decoder(docSink, rawSink, debug, traces, gstream, redirects, subsystem);
+#ifdef XRDMON_HAVE_CURL
+   if (treeSink) decoder.SetTreeSink(treeSink);
+#endif
 // --max-memory caps the whole process, and the decoder meets it by steering
 // its own state budget from a real RSS reading. Where there is no reader, fall
 // back to the old behaviour -- the knob bounds the charged state estimate -- so

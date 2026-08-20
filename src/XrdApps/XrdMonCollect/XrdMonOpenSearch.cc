@@ -67,13 +67,7 @@ bool XrdMonOpenSearch::Init(std::string& err)
 
 void XrdMonOpenSearch::Add(std::string& batch, const std::string& jsonDoc) const
 {
-   // Data streams accept only "create"; a plain index uses "index" (upsert).
-   batch += useCreate ? "{\"create\":{\"_index\":\""
-                      : "{\"index\":{\"_index\":\"";
-   batch += idx;
-   batch += "\"}}\n";
-   batch += jsonDoc;
-   batch += '\n';
+   XrdMonBulkAdd(batch, idx, useCreate, jsonDoc);
 }
 
 bool XrdMonOpenSearch::Bulk(const std::string& body, std::string& err)

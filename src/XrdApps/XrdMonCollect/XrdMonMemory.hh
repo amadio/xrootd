@@ -22,6 +22,7 @@
 /******************************************************************************/
 
 #include <cstddef>
+#include <string>
 
 //-----------------------------------------------------------------------------
 //! Process-level memory introspection and allocator control for xrdmoncollect.
@@ -56,5 +57,23 @@ void XrdMonReleaseMemory();
 //! made are honoured: glibc consumes those before main() runs, so calling
 //! mallopt() unconditionally would silently override them.
 void XrdMonTuneAllocator();
+
+//! Bytes of capacity a recycled body buffer may keep. Comfortably above a
+//! 500-packet OpenSearch `_bulk` body, so steady state never reallocates.
+constexpr std::size_t kBodyKeepBytes = 1u << 20;
+
+//! Empty a body buffer for recycling, releasing its capacity if it has grown
+//! past kBodyKeepBytes.
+//!
+//! std::string::clear() keeps the capacity, which is the whole point of
+//! recycling: the sixteen bodies in each output pipe cycle round without
+//! reallocating. It also means a single outsized batch pins its peak in one of
+//! those slots for the life of the process, and there are thirty-two such
+//! slots. Keep the common case warm; give the outliers back.
+inline void XrdMonRecycleBody(std::string& b)
+{
+   if (b.capacity() > kBodyKeepBytes) std::string().swap(b);
+      else                            b.clear();
+}
 
 #endif

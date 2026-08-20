@@ -4,18 +4,24 @@ xrdmoncollect - collect and correlate XRootD detailed monitoring streams
 .SH SYNOPSIS
 .nf
 
-\fBxrdmoncollect\fR \fB-p\fR \fIport\fR [\fB-b\fR \fIbindaddr\fR] [\fB-o\fR \fIfile\fR] [\fB--bulk\fR \fIindex\fR]
+\fBxrdmoncollect\fR [\fB-c\fR \fIfile\fR] \fB-p\fR \fIport\fR [\fB-b\fR \fIbindaddr\fR] [\fB-o\fR \fIfile\fR] [\fB--bulk\fR \fIindex\fR]
               [\fB--os-url\fR \fIurl\fR [\fB--os-index\fR \fIname\fR] [\fB--os-user\fR \fIuser\fR]
                [\fB--os-pass\fR \fIpass\fR] [\fB--os-token\fR \fItoken\fR] [\fB--os-insecure\fR] [\fB--os-datastream\fR]]
               [\fB--otlp-url\fR \fIurl\fR [\fB--otlp-token\fR \fItoken\fR] [\fB--otlp-insecure\fR]]
               [\fB--cache-dir\fR \fIdir\fR]
-              [\fB--forward\fR \fIhost:port\fR] [\fB--metrics-port\fR \fIport\fR]
+              [\fB--forward\fR \fIhost:port\fR] [\fB--metrics-port\fR \fIport\fR] [\fB--site\fR \fIname\fR]
               [\fB--tcp-port\fR \fIport\fR [\fB--tcp-token\fR \fItoken\fR]]
               [\fB--shovel\fR \fIhost:port\fR [\fB--shovel-token\fR \fItoken\fR] [\fB--spool-max\fR \fIsz\fR]]
               [\fB--flush-count\fR \fIn\fR] [\fB--flush-secs\fR \fIn\fR]
               [\fB--rcvbuf\fR \fIsz\fR] [\fB--queue-depth\fR \fIn\fR]
               [\fB--max-memory\fR \fIsz\fR] [\fB--max-entries\fR \fIn\fR]
+              [\fB--server-ttl\fR \fIs\fR] [\fB--file-ttl\fR \fIs\fR]
+              [\fB--state-file\fR \fIfile\fR] [\fB--state-ttl\fR \fIdur\fR]
+              [\fB--scitags\fR \fIsrc\fR [\fB--scitags-refresh\fR \fIs\fR]] [\fB--dataset\fR \fIre\fR]
+              [\fB--no-resolve\fR]
               [\fB--sessions\fR] [\fB--spans\fR] [\fB--traces\fR] [\fB--gstream\fR] [\fB--redirects\fR] [\fB--debug\fR] [\fB-v\fR]
+
+\fBxrdmoncollect\fR \fB-h\fR | \fB--help\fR
 
 .fi
 .br
@@ -150,7 +156,7 @@ layout and deployment guidance.
 .P
 Usage synopsis can be displayed by typing "\fBxrdmoncollect --help\fR".
 .SH OPTIONS
-\fB-c\fR \fIfile\fR
+\fB-c\fR \fIfile\fR, \fB--config\fR \fIfile\fR
 .RS 5
 Load options from an INI configuration file. Keys live in a single
 \fB[xrdmoncollect]\fR section and mirror the long-option names; command-line
@@ -414,6 +420,21 @@ baselines) once it has reported nothing for more than \fIs\fR seconds, bounding
 the accumulation of dead incarnations across server restarts and rolling
 upgrades (default \fB86400\fR; \fB0\fR = never).
 .RE
+\fB--file-ttl\fR \fIs\fR
+.RS 5
+Expire an open-file entry that has not been touched for more than \fIs\fR
+seconds (\fB0\fR = off, the default), counting it in
+\fBstale_opens_total{cluster,server}\fR. Such an entry is a leaked open whose
+close record was lost, most often to UDP loss; without a TTL it survives until
+the client's disconnect sweep, or until the memory budget evicts it.
+.sp
+Applied only to servers that report in-flight transfer snapshots
+(\fBxfr\fR on \fBxrootd.monitor fstat\fR), because only there does a live
+transfer refresh its entry every reporting interval — anything older is
+genuinely stranded. Set it to at least three times that server's \fBxfr\fR
+period, or long-running transfers will be expired out from under their own
+close records and every one of them will be reported as an orphan close.
+.RE
 \fB--state-file\fR \fIfile\fR
 .RS 5
 Persist the correlation state across restarts: on shutdown (SIGTERM/SIGINT)
@@ -461,6 +482,26 @@ Re-fetch a URL \fB--scitags\fR registry every \fIseconds\fR (default 3600; 0
 disables) so a long-running collector tracks the published registry. The swap
 is atomic with respect to the decode loop, and a failed re-fetch keeps the
 current registry. Ignored for a file source.
+.RE
+\fB--dataset\fR \fIre\fR
+.RS 5
+Emit an \fBxrootd.dataset\fR attribute on every document that carries a
+\fBfile.path\fR: \fIre\fR is a POSIX extended regular expression matched
+against the path, and its first capture group becomes the value. For a
+CMS-style namespace
+(\fI/store/<class>/<era>/<primary-dataset>/...\fR) that is
+.sp
+.RS 3
+\fB--dataset '^/store/[^/]+/[^/]+/([^/]+)/'\fR
+.RE
+.sp
+Pick the group to suit the namespace: an EOS instance might capture the
+project directory, ATLAS the dataset container. Dataset-level popularity
+panels need this; nothing else does. The pattern is compiled once at start-up
+(an uncompilable one is rejected) and matched once per emitted document on the
+serializer thread, never in the receive path, so the cost is negligible at
+realistic close rates \(em keep it anchored and simple all the same. A path it
+does not match simply gets no attribute.
 .RE
 \fB--no-resolve\fR
 .RS 5
@@ -517,6 +558,10 @@ Also emit one JSON object per decoded record (raw, uncorrelated).
 \fB-v\fR
 .RS 5
 Print decoder statistics on exit.
+.RE
+\fB-h\fR, \fB--help\fR
+.RS 5
+Print the option summary and exit.
 .RE
 .SH SERVER CONFIGURATION
 The richness of the transfer document depends on the server's
@@ -581,8 +626,12 @@ Options may be supplied in an INI configuration file as an alternative to the
 command line. The file is loaded from the path given with \fB-c\fR, or
 automatically from \fI/etc/xrootd/xrdmoncollect.cfg\fR when present. All keys are
 placed in a single \fB[xrdmoncollect]\fR section and use the long-option names
-(for example \fBport\fR, \fBos-url\fR, \fBforward\fR, \fBmax-memory\fR);
-command-line options override values from the file. For example:
+(for example \fBos-url\fR, \fBforward\fR, \fBmax-memory\fR); command-line
+options override values from the file. Four keys are spelled differently from
+the option they set, because those options have only a short form:
+\fBport\fR (\fB-p\fR, also accepted as \fBudp-port\fR), \fBbind\fR (\fB-b\fR),
+\fBoutput\fR (\fB-o\fR) and \fBverbose\fR (\fB-v\fR). Flags take a boolean
+value, e.g. \fBspans = true\fR. For example:
 .P
 .RS 5
 .nf
@@ -730,12 +779,57 @@ configuration file; when no inherited socket fits a configured port the
 collector binds that socket itself, so a mismatch merely loses the zero-loss
 property. Without the socket unit (or outside systemd) nothing changes: the
 collector binds its sockets as usual.
+.SH ENVIRONMENT
+\fBSTATE_DIRECTORY\fR
+.RS 5
+Set by systemd from \fBStateDirectory=\fR. When present and \fB--state-file\fR
+was not given, the correlation snapshot defaults to
+\fB$STATE_DIRECTORY/xrdmoncollect-state.json\fR.
+.RE
+\fBLISTEN_FDS\fR, \fBLISTEN_PID\fR
+.RS 5
+Set by systemd socket activation. Sockets passed this way are adopted in
+preference to binding; see \fBSYSTEMD INTEGRATION\fR.
+.RE
+\fBNOTIFY_SOCKET\fR
+.RS 5
+Set by systemd for \fBType=notify\fR. Used to report readiness and, on
+shutdown, that the collector is stopping. Only when built with libsystemd.
+.RE
+\fBMALLOC_ARENA_MAX\fR, \fBGLIBC_TUNABLES\fR, \fBMALLOC_MMAP_THRESHOLD_\fR, \fBMALLOC_TRIM_THRESHOLD_\fR
+.RS 5
+The collector tunes the glibc allocator at start-up \(em bounding arenas,
+pinning the mmap threshold so large output bodies are returned to the operating
+system on free, and lowering the trim threshold \(em because the default
+behaviour makes resident memory a poor proxy for memory in use, which is what
+\fB--max-memory\fR steers on. Any of these set in the environment is left
+alone, so the tuning can be overridden without rebuilding.
+.RE
+.SH FILES
+\fI/etc/xrootd/xrdmoncollect.cfg\fR
+.RS 5
+Default configuration file, used when it exists and \fB-c\fR was not given.
+.RE
+\fI$STATE_DIRECTORY/xrdmoncollect-state.json\fR
+.RS 5
+Correlation snapshot; see \fB--state-file\fR. Written at shutdown and removed
+once read.
+.RE
+\fI<cache-dir>\fR
+.RS 5
+On-failure spool; see \fB--cache-dir\fR. The destination named \fBdefault\fR
+uses the directory itself for OpenSearch and \fIotlp-logs\fR/\fIotlp-traces\fR
+beneath it; every other destination uses \fIos-<name>\fR and
+\fIotlp-<name>-logs\fR/\fIotlp-<name>-traces\fR.
+.RE
 .SH NOTES
 Documentation for all components associated with \fBxrdmoncollect\fR can be
 found at https://xrootd.org/docs.html
 .SH DIAGNOSTICS
 Errors yield an error message and a non-zero exit status. The program otherwise
 runs until terminated; use the kill command to stop it.
+.SH SEE ALSO
+\fBxrootd\fR(8), \fBsystemd.socket\fR(5), \fBsystemd.resource-control\fR(5)
 .SH LICENSE
 LGPL
 .SH SUPPORT LEVEL

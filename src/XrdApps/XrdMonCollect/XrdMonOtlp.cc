@@ -111,7 +111,7 @@ void XrdMonOtlpBatch::add(const json& doc)
    const json  empty = json::object();
    const json& res   = doc.contains("resource") ? doc["resource"] : empty;
    Group& g = groups[res];
-   std::size_t& acct = isSpan ? spanSize : logSize;
+   XrdMonPublished<std::size_t>& acct = isSpan ? spanSize : logSize;
    if (g.resource.empty())                        // once per distinct resource
       {g.resource = XrdMonDump(toKeyValues(res));
        acct += g.resource.size() + kBlockOverhead;

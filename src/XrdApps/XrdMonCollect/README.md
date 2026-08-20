@@ -1963,6 +1963,7 @@ and the OTLP sink, the same shape under its own names:
 ```
 xrootd_collector_otlp_queue_bodies          (gauge: bodies awaiting the export)
 xrootd_collector_otlp_queue_bytes           (gauge: bytes awaiting the export)
+xrootd_collector_otlp_batch_bytes           (gauge: OTLP output accumulated, not yet queued)
 xrootd_collector_otlp_overflow_total        (bodies dropped: queue full)
 xrootd_collector_otlp_failures_total        (OTLP POST failures)
 xrootd_collector_otlp_cache_files           (gauge: cached bodies awaiting replay)
@@ -2140,11 +2141,14 @@ Grafana](#loki--grafana) below.
   `xrootd_collector_state_budget_bytes` against
   `xrootd_process_resident_memory_bytes`, and reclaimed incarnations are counted
   in `xrootd_collector_reaped_servers_total`.
-- The memory cap is best-effort. Only the correlation state can be evicted, so a
-  process held over its cap by something else — the OTLP batch is the largest
-  such consumer, since it materialises a full JSON tree per batch — reports
-  `xrootd_collector_memory_floored_total` instead of shrinking further. Use a
-  cgroup limit (`MemoryMax=`) if you need a hard bound.
+- The memory cap is best-effort. Only the correlation state can be *evicted*,
+  but a control tick that finds the process over its cap also asks the output
+  accumulators to release what they hold — they ship immediately instead of
+  waiting to coalesce, at most once per 15s tick. What remains over the cap
+  after that is memory the collector does not own at all, and it reports
+  `xrootd_collector_memory_floored_total` rather than evicting correlation
+  state it still needs. Use a cgroup limit (`MemoryMax=`) if you need a hard
+  bound.
 - A destination that cannot keep up loses data rather than slowing the collector
   down. Its queue is bounded in bytes, and a full queue drops its oldest body
   (`xrootd_collector_post_overflow_total` /

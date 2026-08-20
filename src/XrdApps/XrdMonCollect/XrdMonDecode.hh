@@ -193,6 +193,18 @@ void MemoryTick(time_t now);
 //! The state budget the loop is currently enforcing, in charged bytes.
 std::size_t MaxBytes() const {return maxBytes;}
 
+//! Take the pending request to release memory this object does not own.
+//!
+//! MemoryTick raises one on a control tick that found the process over its
+//! RSS cap. Correlation state is all this decoder can evict, and the output
+//! accumulators are the other large consumer -- memory the loop can otherwise
+//! only complain about. Reading the request clears it, so a sustained overage
+//! costs one extra flush per control tick (15s) and never defeats the
+//! caller's output coalescing.
+//!
+//! Decode-thread only, like MemoryTick itself.
+bool TakeMemoryRelease() {bool r = memRelease; memRelease = false; return r;}
+
 //! Reclaim a whole server incarnation (its dictionaries and g-stream counter
 //! baselines) once it has gone silent for more than `secs` seconds, bounding
 //! the accumulation of dead incarnations across restarts/upgrades. 0 disables.
@@ -825,6 +837,7 @@ std::size_t rssCeil    = 0;        // largest state budget the loop will set
 std::size_t rssFloor   = 0;        // smallest, below which correlation breaks
 time_t      lastMemTick  = 0;
 time_t      lastFloorWarn = 0;
+bool        memRelease  = false;   // pending request; see TakeMemoryRelease
 long        serverTTL  = 0;        // idle-incarnation reap age, secs (0 = off)
 long        fileTTL    = 0;        // stale open-file entry age, secs (0 = off)
 bool     resolveHosts = true;

@@ -2293,6 +2293,17 @@
           "legendFormat": "otlp queued {{destination}}",
           "refId": "D",
           "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(xrootd_collector_otlp_batch_bytes{site=~\"$site\",instance=~\"$collector\"})",
+          "legendFormat": "otlp not yet queued",
+          "refId": "E",
+          "range": true
         }
       ]
     },

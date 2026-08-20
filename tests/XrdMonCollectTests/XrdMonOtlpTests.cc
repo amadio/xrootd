@@ -137,3 +137,110 @@ TEST(XrdMonOtlp, GroupsByResourceAndResets)
    EXPECT_EQ(body["resourceLogs"][0]["scopeLogs"][0]["logRecords"].size(), 2u);
    EXPECT_FALSE(b.haveLogs());   // cleared by takeLogsBody()
 }
+
+// Distinct resources must not be merged: two servers reporting the same event
+// are two resource blocks, each with its own attribute set.
+TEST(XrdMonOtlp, DistinctResourcesSplitIntoBlocks)
+{
+   json a, b;
+   a["resource"]["service.name"]   = "xrootd";
+   a["resource"]["server.address"] = "srv1";
+   a["attributes"]["event.name"]   = "xrootd.read";
+   b = a;
+   b["resource"]["server.address"] = "srv2";
+
+   XrdMonOtlpBatch batch;
+   batch.add(a);
+   batch.add(b);
+   batch.add(a);
+
+   json body = json::parse(batch.takeLogsBody());
+   ASSERT_EQ(body["resourceLogs"].size(), 2u);
+
+   // Two records under srv1, one under srv2, whichever order they come out in.
+   std::size_t one = 0, two = 0;
+   for (const json& rl : body["resourceLogs"])
+       {const json* sa = kv(rl["resource"]["attributes"], "server.address");
+        ASSERT_NE(sa, nullptr);
+        const std::size_t n = rl["scopeLogs"][0]["logRecords"].size();
+        if ((*sa)["value"]["stringValue"] == "srv1") one = n; else two = n;
+       }
+   EXPECT_EQ(one, 2u);
+   EXPECT_EQ(two, 1u);
+}
+
+// The group key is the resource object, not a serialization of it, so two
+// documents whose resource keys were inserted in a different order still share
+// a block. (nlohmann objects are ordered maps, which is what makes this hold --
+// it is the property the old dump-as-key relied on implicitly.)
+TEST(XrdMonOtlp, ResourceKeyOrderDoesNotSplitGroups)
+{
+   json a, b;
+   a["resource"]["service.name"]   = "xrootd";
+   a["resource"]["server.address"] = "srv1";
+   a["attributes"]["event.name"]   = "xrootd.read";
+
+   b["resource"]["server.address"] = "srv1";      // reverse insertion order
+   b["resource"]["service.name"]   = "xrootd";
+   b["attributes"]["event.name"]   = "xrootd.read";
+
+   XrdMonOtlpBatch batch;
+   batch.add(a);
+   batch.add(b);
+
+   json body = json::parse(batch.takeLogsBody());
+   ASSERT_EQ(body["resourceLogs"].size(), 1u);
+   EXPECT_EQ(body["resourceLogs"][0]["scopeLogs"][0]["logRecords"].size(), 2u);
+}
+
+// A resource attribute written as a signed int and one that arrived through a
+// parse as unsigned compare numerically, so a document replayed from the disk
+// cache groups with a freshly decoded one instead of opening a second block.
+TEST(XrdMonOtlp, IntegerSignednessDoesNotSplitGroups)
+{
+   json a;
+   a["resource"]["service.name"]              = "xrootd";
+   a["resource"]["xrootd.server.incarnation"] = 1700000000;      // signed
+   a["attributes"]["event.name"]              = "xrootd.read";
+
+   json b = a;
+   b["resource"]["xrootd.server.incarnation"] = 1700000000u;     // unsigned
+   ASSERT_NE(a["resource"]["xrootd.server.incarnation"].type(),
+             b["resource"]["xrootd.server.incarnation"].type());
+
+   XrdMonOtlpBatch batch;
+   batch.add(a);
+   batch.add(b);
+
+   json body = json::parse(batch.takeLogsBody());
+   ASSERT_EQ(body["resourceLogs"].size(), 1u);
+   EXPECT_EQ(body["resourceLogs"][0]["scopeLogs"][0]["logRecords"].size(), 2u);
+}
+
+// Logs and spans are accumulated apart, so taking one body leaves the other
+// intact -- with several destinations sharing one batch, a partial take would
+// silently halve somebody's export.
+TEST(XrdMonOtlp, TakingLogsLeavesTracesIntact)
+{
+   json log, span;
+   log["resource"]["service.name"] = "xrootd";
+   log["attributes"]["event.name"] = "xrootd.read";
+   span["resource"]["service.name"] = "xrootd";
+   span["kind"] = "SPAN_KIND_SERVER";
+   span["name"] = "read";
+
+   XrdMonOtlpBatch batch;
+   batch.add(log);
+   batch.add(span);
+   ASSERT_TRUE(batch.haveLogs());
+   ASSERT_TRUE(batch.haveTraces());
+
+   json body = json::parse(batch.takeLogsBody());
+   EXPECT_EQ(body["resourceLogs"].size(), 1u);
+   EXPECT_FALSE(batch.haveLogs());
+   ASSERT_TRUE(batch.haveTraces());
+
+   json traces = json::parse(batch.takeTracesBody());
+   EXPECT_EQ(traces["resourceSpans"][0]["scopeSpans"][0]["spans"].size(), 1u);
+   EXPECT_FALSE(batch.haveTraces());
+}

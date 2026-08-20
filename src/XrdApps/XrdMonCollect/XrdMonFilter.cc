@@ -27,6 +27,7 @@
 #include <fnmatch.h>
 
 #include "XrdApps/XrdMonCollect/XrdMonFilter.hh"
+#include "XrdApps/XrdMonCollect/XrdMonUtil.hh"
 
 using json = nlohmann::json;
 
@@ -336,7 +337,7 @@ bool XrdMonFilter::scalarOf(const json& v, std::string& out)
    if (v.is_number_integer()) {out = std::to_string(v.get<long long>()); return true;}
    if (v.is_number_unsigned()){out = std::to_string(v.get<unsigned long long>());
                                                                        return true;}
-   if (v.is_number_float())   {out = v.dump();                        return true;}
+   if (v.is_number_float())   {out = XrdMonDump(v);                   return true;}
    return false;
 }
 

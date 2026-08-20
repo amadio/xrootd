@@ -758,7 +758,7 @@ void XrdMonDecode::emitSpan(const json& src, const char* name, double tBeg,
 
    stats.spans++;
    if (tree) tree(sp);
-   if (doc)  doc(sp.dump());
+   if (doc)  doc(XrdMonDump(sp));
 }
 
 /******************************************************************************/
@@ -788,7 +788,7 @@ bool XrdMonDecode::emitDoc(json& j, const Server& srv)
                        {{"cluster", srv.mtrCluster}}) += 1;
 
    if (tree) tree(j);
-   if (doc)  doc(j.dump());
+   if (doc)  doc(XrdMonDump(j));
    return true;
 }
 
@@ -1210,7 +1210,7 @@ bool XrdMonDecode::SaveState(const std::string& path) const
    std::string tmp = path + ".tmp";
    std::ofstream out(tmp, std::ios::trunc);
    if (!out) return false;
-   out << j.dump();
+   out << XrdMonDump(j);
    out.flush();
    if (!out) {out.close(); unlink(tmp.c_str()); return false;}
    out.close();
@@ -1499,7 +1499,7 @@ void XrdMonDecode::Malformed(const std::string& src, unsigned char code,
    if (dumpRaw && raw)
       {json j = {{"server", name}, {"stream", streamOf(code)},
                  {"reason", reason}, {"note", "malformed packet"}};
-       raw(j.dump());
+       raw(XrdMonDump(j));
       }
 }
 
@@ -1618,7 +1618,7 @@ bool XrdMonDecode::Process(const std::string& src, const char* buff, int blen)
                   {json j = {{"code", std::string(1, (char)code)},
                              {"server", src}, {"stod", stod},
                              {"len", plen}, {"note", "unhandled stream"}};
-                   raw(j.dump());
+                   raw(XrdMonDump(j));
                   }
                break;
          }
@@ -2023,7 +2023,7 @@ void XrdMonDecode::DecodeMap(unsigned char code, Server& srv,
    if (dumpRaw && raw)
       {json j = {{"code", std::string(1, (char)code)},
                  {"dictid", dictid}, {"info", first}};
-       raw(j.dump());
+       raw(XrdMonDump(j));
       }
 }
 
@@ -2072,7 +2072,7 @@ void XrdMonDecode::DecodeIdent(const std::string& src, int32_t stod,
 
    if (dumpRaw && raw)
       {json j = {{"code", "="}, {"info", first}};
-       raw(j.dump());
+       raw(XrdMonDump(j));
       }
 
 // Emit a server-identity document, but only when the content changes (the
@@ -2221,7 +2221,7 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
          if (dumpRaw && raw)
             {json j = {{"fstream_rec", (int)recType}, {"flag", (int)recFlag},
                        {"size", recSize}, {"id", rd32(rec + 4)}};
-             raw(j.dump());
+             raw(XrdMonDump(j));
             }
 
          switch(recType)
@@ -3368,7 +3368,7 @@ void XrdMonDecode::DecodeGStreamJson(const std::string& src,
        if (dumpRaw && raw)
           {json j = {{"server", src}, {"code", code},
                      {"note", "json monitor packet (uncorrelated)"}};
-           raw(j.dump());
+           raw(XrdMonDump(j));
           }
        return;
       }

@@ -71,6 +71,7 @@ if(NOT XRDCL_ONLY)
       XrdMonCollect/XrdMonShovel.cc
       XrdMonCollect/XrdMonTcpServer.cc
       XrdMonCollect/XrdMonDiskCache.cc
+      XrdMonCollect/XrdMonMemory.cc
       XrdMonCollect/XrdMonOtlp.cc
       XrdMonCollect/XrdMonOpenSearch.cc)
     target_compile_definitions(xrdmoncollect PRIVATE XRDMON_HAVE_CURL)
@@ -82,6 +83,7 @@ if(NOT XRDCL_ONLY)
       XrdMonCollect/XrdMonShovel.cc
       XrdMonCollect/XrdMonTcpServer.cc
       XrdMonCollect/XrdMonDiskCache.cc
+      XrdMonCollect/XrdMonMemory.cc
       XrdMonCollect/XrdMonOtlp.cc)
     target_link_libraries(xrdmoncollect XrdAppUtils XrdUtils Threads::Threads)
   endif()

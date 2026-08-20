@@ -48,6 +48,8 @@ port = 9930
 # basic auth (os-user/os-pass) or a bearer token (os-token, sent as
 # "Authorization: Bearer <token>"); the token wins if both are set. A token of
 # the form @<file> is read from that file so it does not appear in ps/argv.
+# These keys define the destination named "default"; see the [opensearch] and
+# [otlp] sections near the end of this file for additional endpoints.
 # os-url = https://opensearch.example.org:9200
 # os-index = xrootd-transfers
 # os-user = collector
@@ -65,8 +67,10 @@ port = 9930
 
 # On-failure disk cache (shared by the OpenSearch and OTLP sinks): bodies that
 # fail to POST are written here and retried oldest-first (and replayed on
-# startup). OpenSearch bulk bodies live directly under the dir; OTLP bodies under
-# otlp-logs/ and otlp-traces/. Unset = drop on failure.
+# startup). Each destination caches separately. For "default", OpenSearch bulk
+# bodies live directly under the dir and OTLP bodies under otlp-logs/ and
+# otlp-traces/; a destination named <n> uses os-<n>/, otlp-<n>-logs/ and
+# otlp-<n>-traces/. Unset = drop on failure.
 # cache-dir = /var/lib/xrootd/moncollect
 
 # Also stream documents as NDJSON over TCP to a buffering frontend (host:port).
@@ -144,6 +148,42 @@ port = 9930
 # Debugging: also emit one JSON object per decoded record; print stats on exit.
 # debug = false
 # verbose = false
+
+# ----------------------------------------------------------------------------
+# Additional sink destinations
+# ----------------------------------------------------------------------------
+#
+# Both HTTP sinks accept any number of endpoints. The os-*/otlp-* keys above
+# define the one named "default"; each extra one gets its own section. The
+# typical use is keeping a site's own monitoring while also feeding a central
+# collector, from one collector instead of two.
+#
+# Keys are the long-option names without the os-/otlp- prefix: url (required),
+# index, user, pass, token, insecure, datastream for [opensearch]; url
+# (required), token, insecure for [otlp]. An unrecognised key is a fatal error.
+#
+# A named section inherits NOTHING from the keys above, not even the index:
+# inheriting would depend on whether a value came from this file or the command
+# line (read in that order), and an inherited credential would be POSTed to an
+# endpoint it was never meant for. Spell out what each destination needs.
+#
+# Every destination runs its own thread, queue, retry state and cache
+# directory, and every sink metric carries a destination="<name>" label. One
+# that is slow or unreachable cannot stall the collector or the others.
+#
+# A name must start with a letter or digit and may contain only letters,
+# digits, '_', '-' and '.'; it becomes a directory component under cache-dir
+# and a Prometheus label value. Names are compared without regard to case, and
+# "default" is reserved for the keys above.
+#
+# [otlp "wlcg"]
+# url = https://otel.wlcg.example:4318
+# token = @/etc/xrootd/wlcg.token
+#
+# [opensearch "central"]
+# url = https://es.wlcg.example:9200
+# index = wlcg-transfers
+# datastream = true
 
 # Document filtering. Each [filter "<name>"] section is one rule, matched
 # against every finished document just before it reaches the sinks: a rule

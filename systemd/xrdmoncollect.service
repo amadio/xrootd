@@ -48,8 +48,16 @@ ProtectHostname=true
 ProtectKernelLogs=true
 ProtectKernelModules=true
 ProtectKernelTunables=true
+# Hides other processes' /proc entries, never /proc/self -- so the collector can
+# still read its own resident set size for --max-memory.
 ProtectProc=invisible
 ProtectSystem=full
+
+# --max-memory is best-effort: the collector can only evict correlation state,
+# not the receive queue, the pending output bodies or memory its allocator has
+# freed but not returned. This is the only hard bound. Keep it ~25% above
+# --max-memory so the cap has room to work before the kernel intervenes.
+# MemoryMax=1280M
 RemoveIPC=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=true

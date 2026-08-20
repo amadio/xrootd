@@ -2122,7 +2122,7 @@ TEST(XrdMonCollect, MemoryStaysUnderBudget)
   for (uint32_t id = 1; id <= 500; id++)
      feedOpenId(dec, "h:1", id, "/store/data/some/long/path/file.root");
 
-  EXPECT_LE(dec.ResidentBytes(), 4000u);
+  EXPECT_LE(dec.StateWeight(), 4000u);
   EXPECT_GT(dec.GetStats().evicted, 0u);
 }
 
@@ -2133,15 +2133,15 @@ TEST(XrdMonCollect, CloseReleasesMemory)
 {
   XrdMonDecode dec([](const std::string&){});   // unbounded, sessions off
   feedUser7(dec, "h:1");
-  std::size_t base = dec.ResidentBytes();        // just the user entry
+  std::size_t base = dec.StateWeight();        // just the user entry
 
   for (uint32_t id = 1; id <= 50; id++)
      feedOpenId(dec, "h:1", id, "/store/data/file.root");
-  EXPECT_GT(dec.ResidentBytes(), base);          // opens are charged
+  EXPECT_GT(dec.StateWeight(), base);          // opens are charged
 
   for (uint32_t id = 1; id <= 50; id++)
      feedCloseId(dec, "h:1", id);
-  EXPECT_EQ(dec.ResidentBytes(), base);          // each close releases its open
+  EXPECT_EQ(dec.StateWeight(), base);          // each close releases its open
   EXPECT_EQ(dec.GetStats().evicted, 0u);
 }
 
@@ -2157,12 +2157,12 @@ TEST(XrdMonCollect, SessionRollupStaysBounded)
   for (uint32_t id = 1; id <= 80; id++)          // fill past the recent-file cap
      {feedOpenId(dec, "h:1", id, "/store/data/file.root");
       feedCloseId(dec, "h:1", id);}
-  std::size_t capped = dec.ResidentBytes();
+  std::size_t capped = dec.StateWeight();
 
   for (uint32_t id = 81; id <= 200; id++)        // many more cycles
      {feedOpenId(dec, "h:1", id, "/store/data/file.root");
       feedCloseId(dec, "h:1", id);}
-  EXPECT_LE(dec.ResidentBytes(), capped);        // capped: no unbounded growth
+  EXPECT_LE(dec.StateWeight(), capped);        // capped: no unbounded growth
   EXPECT_EQ(dec.GetStats().evicted, 0u);
 }
 
@@ -2174,17 +2174,17 @@ TEST(XrdMonCollect, IdleServerReaped)
   dec.SetServerTTL(100);
 
   feedTransferFrom(dec, "10.0.0.1:9930");         // server A (leaves a user entry)
-  EXPECT_GT(dec.ResidentBytes(), 0u);
+  EXPECT_GT(dec.StateWeight(), 0u);
 
   dec.ReapServers(time(nullptr) + 1000);          // A is now well past its TTL
   EXPECT_EQ(dec.GetStats().reaped, 1u);
-  EXPECT_EQ(dec.ResidentBytes(), 0u);             // A's state was reclaimed
+  EXPECT_EQ(dec.StateWeight(), 0u);             // A's state was reclaimed
 
   feedTransferFrom(dec, "10.0.0.2:9930");         // server B, just seen
-  EXPECT_GT(dec.ResidentBytes(), 0u);
+  EXPECT_GT(dec.StateWeight(), 0u);
   dec.ReapServers(time(nullptr));                 // B is fresh -> survives
   EXPECT_EQ(dec.GetStats().reaped, 1u);
-  EXPECT_GT(dec.ResidentBytes(), 0u);
+  EXPECT_GT(dec.StateWeight(), 0u);
 }
 
 // With no budget, no count cap and no TTL, behaviour is unchanged: everything
@@ -2197,7 +2197,7 @@ TEST(XrdMonCollect, UnboundedKeepsEverything)
       dec.Process("h:1", (const char*)p.data(), p.size());}
 
   EXPECT_EQ(dec.GetStats().evicted, 0u);
-  EXPECT_GT(dec.ResidentBytes(), 0u);
+  EXPECT_GT(dec.StateWeight(), 0u);
 }
 
 TEST(XrdMonCollect, FrmStageAndPurge)
@@ -3318,7 +3318,7 @@ TEST(XrdMonCollect, SessionsDisabledByDefault)
   // No SetEmitSessions(true): sessions are disabled.
 
   feedUserN(dec, "h:1", 7);
-  std::size_t base = dec.ResidentBytes();
+  std::size_t base = dec.StateWeight();
   openClose(dec, "h:1", 1, 7, 1000, 1000, 0, "/a.root");
   openClose(dec, "h:1", 2, 7, 1000, 1000, 0, "/b.root");
   feedDisc(dec, "h:1", 7);
@@ -3328,7 +3328,7 @@ TEST(XrdMonCollect, SessionsDisabledByDefault)
   for (const auto& d : docs)
      EXPECT_NE(json::parse(d)["attributes"]["event.name"], "xrootd.session");
   EXPECT_EQ(dec.GetStats().discs, 1u);             // disconnect still counted
-  EXPECT_EQ(dec.ResidentBytes(), base);            // no rollup retained
+  EXPECT_EQ(dec.StateWeight(), base);            // no rollup retained
 }
 
 TEST(XrdMonCollect, ServerIdentDecoded)
@@ -3635,7 +3635,7 @@ TEST_F(StateFile, CloseCorrelatesAfterReload)
   EXPECT_NE(note.find("restored 1 server incarnation(s)"), std::string::npos)
       << note;
   EXPECT_FALSE(std::ifstream(path).good());  // single-use snapshot was removed
-  EXPECT_GT(dec2.ResidentBytes(), 0u);       // LRU accounting was rebuilt
+  EXPECT_GT(dec2.StateWeight(), 0u);       // LRU accounting was rebuilt
 
   alt = &dec2;
   feedClose();

@@ -133,9 +133,9 @@
           "type": "prometheus",
           "uid": "${DS_PROMETHEUS}"
         },
-        "definition": "label_values(xrootd_collector_state_bytes{site=~\"$site\"}, instance)",
+        "definition": "label_values(xrootd_collector_state_entries{site=~\"$site\"}, instance)",
         "query": {
-          "query": "label_values(xrootd_collector_state_bytes{site=~\"$site\"}, instance)",
+          "query": "label_values(xrootd_collector_state_entries{site=~\"$site\"}, instance)",
           "refId": "collector"
         },
         "refresh": 2,
@@ -296,7 +296,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "count(count by (instance) (xrootd_collector_state_bytes{site=~\"$site\",instance=~\"$collector\"}))",
+          "expr": "count(count by (instance) (xrootd_collector_state_entries{site=~\"$site\",instance=~\"$collector\"}))",
           "legendFormat": "",
           "refId": "A",
           "range": true
@@ -623,8 +623,8 @@
     {
       "id": 8,
       "type": "stat",
-      "title": "Correlation state",
-      "description": "Resident bytes held in the correlation dictionaries; bounded by --max-memory.",
+      "title": "State entries",
+      "description": "Correlation entries held: dictionaries, tokens, activity and open files. Exact, unlike the byte estimate it replaced.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -637,7 +637,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "bytes",
+          "unit": "short",
           "color": {
             "mode": "thresholds"
           },
@@ -674,7 +674,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(xrootd_collector_state_bytes{site=~\"$site\",instance=~\"$collector\"})",
+          "expr": "sum(xrootd_collector_state_entries{site=~\"$site\",instance=~\"$collector\"})",
           "legendFormat": "",
           "refId": "A",
           "range": true
@@ -1592,8 +1592,8 @@
     {
       "id": 21,
       "type": "timeseries",
-      "title": "Correlation state (bytes)",
-      "description": "Memory held by the correlation dictionaries; bounded by --max-memory.",
+      "title": "Process memory",
+      "description": "Resident set size of the collector process -- what --max-memory caps.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -1642,8 +1642,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(xrootd_collector_state_bytes{site=~\"$site\",instance=~\"$collector\"})",
-          "legendFormat": "state bytes",
+          "expr": "sum(xrootd_process_resident_memory_bytes{site=~\"$site\",instance=~\"$collector\"})",
+          "legendFormat": "resident",
           "refId": "A",
           "range": true
         }

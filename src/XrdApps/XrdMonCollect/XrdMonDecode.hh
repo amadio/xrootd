@@ -106,9 +106,20 @@ bool Process(const std::string& src, const char* buff, int blen);
 
 const Stats& GetStats() const {return stats;}
 
-//! Approximate resident bytes of the correlation state currently held (the sum
-//! charged against the memory budget). Useful as a budget-utilisation gauge.
-std::size_t ResidentBytes() const {return lruBytes;}
+//! The weight charged against the memory budget by the correlation state
+//! currently held: the sum of the bytesOf() estimates driving LRU eviction.
+//!
+//! This is a *relative* cost used to rank entries, not a measure of memory.
+//! It counts held strings plus a flat per-entry constant, and charges nothing
+//! for the Server structs, gsPrev, UserInfo::openFiles or the unordered_map
+//! bucket arrays, so it runs 4-8x below the real cost. Anyone asking how much
+//! memory the process uses wants XrdMonProcessRss(), which is what
+//! xrootd_process_resident_memory_bytes reports.
+std::size_t StateWeight() const {return lruBytes;}
+
+//! Number of correlation entries held across every incarnation. Exact, unlike
+//! StateWeight(), and O(1) -- std::list::size() is constant since C++11.
+std::size_t StateEntries() const {return lru.size();}
 
 //! Bound the resident correlation state (per-server dictionaries plus the
 //! open-file table) to approximately `n` bytes (0 = unbounded). When exceeded,

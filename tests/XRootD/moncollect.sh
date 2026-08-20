@@ -550,6 +550,12 @@ sys.exit(1 if bad else 0)
 		# aggregates that carry no other label at all.
 		assert grep -Eq "^xrootd_collector_evicted_total\{site=\"${SITE}\"\}" \
 			"${metrics}"
+		assert grep -Eq "^xrootd_collector_state_entries\{site=\"${SITE}\"\} [1-9]" \
+			"${metrics}"
+		# The "process" subsystem: a second subsystem on the same registry, so
+		# this also proves the global site label reaches beyond "collector".
+		assert grep -Eq "^xrootd_process_resident_memory_bytes\{site=\"${SITE}\"\} [1-9]" \
+			"${metrics}"
 		# Site and cluster are independent: the site comes from the collector's
 		# own config, the cluster from the server's all.sitename.
 		assert_failure grep -E "[{,]cluster=\"${SITE}\"" "${metrics}"

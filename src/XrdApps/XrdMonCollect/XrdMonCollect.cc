@@ -58,6 +58,7 @@
 #include "XrdApps/XrdMonCollect/XrdMonDiskCache.hh"
 #include "XrdApps/XrdMonCollect/XrdMonFilter.hh"
 #include "XrdApps/XrdMonCollect/XrdMonForward.hh"
+#include "XrdApps/XrdMonCollect/XrdMonMemory.hh"
 #include "XrdApps/XrdMonCollect/XrdMonPipe.hh"
 #include "XrdApps/XrdMonCollect/XrdMonShovel.hh"
 #include "XrdApps/XrdMonCollect/XrdMonShovelFrame.hh"
@@ -364,14 +365,26 @@ int openUDP(int port, const char* bindStr)
 // the given TCP port. Prometheus scrapes /metrics; we answer every path.
 //
 // The collector's own metrics registry. The root Collector owns the "xrootd"
-// prefix and its sole subsystem is "collector", so a bare metric name such as
-// "packets_total" is exposed as "xrootd_collector_packets_total".
+// prefix; its subsystems are "collector" (or "shoveler") plus "process", so a
+// bare metric name such as "packets_total" is exposed as
+// "xrootd_collector_packets_total".
 //
 static XrdMetrics::Collector& collectorRegistry()
 {
    static XrdMetrics::Collector collector("xrootd");
    return collector;
 }
+
+// Process-level metrics, shared by both daemon modes and named by the same
+// convention the server uses in XrdStats (xrootd_process_cpu_seconds_total).
+//
+// DEFINED AT THE BOTTOM OF THIS FILE, and that placement is not style:
+// tests/XrdMonCollectTests/dashboards_test.py attributes each registration to
+// the subsystem("...") literal that most recently precedes it in the file
+// text, so a "process" literal anywhere above would relabel every collector
+// metric that follows it. Keep it last, after every other registration.
+//
+static void registerProcessMetrics();
 
 void serveMetrics(int port, std::atomic<bool>& stop)
 {
@@ -564,6 +577,7 @@ int runShoveler(const char* prog, const ShovelerOpts& o)
            sub.observeCounter<std::uint64_t>("spool_dropped_total", "oldest spooled buffers evicted by --spool-max")
               .add({}, [&]{return spool->Dropped();});
           }
+       registerProcessMetrics();     // must follow every sub.* call above
        exporter = std::thread(serveMetrics, o.metricsPort, std::ref(exporterStop));
       }
 
@@ -1478,8 +1492,8 @@ int main(int argc, char* argv[])
        OBS("ident_records_total",
            "=-stream server-identity records decoded", mapIdnt);
 #undef OBS
-       subsystem->observeGauge<std::int64_t>("state_bytes", "approximate resident bytes of correlation state")
-          .add({}, [&]{return (int64_t)decoder.ResidentBytes();});
+       subsystem->observeGauge<std::int64_t>("state_entries", "correlation entries held (dictionaries, tokens, activity, open files)")
+          .add({}, [&]{return (int64_t)decoder.StateEntries();});
        subsystem->observeGauge<std::int64_t>("recv_queue_batches", "packet batches queued from the receiver to the serializer")
           .add({}, [&]{return (int64_t)recvPipe.readyDepth();});
        if (tcpSrv)
@@ -1528,6 +1542,7 @@ int main(int argc, char* argv[])
               .add({}, [&]{return (uint64_t)(otlpLogCache->Replayed() + otlpTraceCache->Replayed());});
           }
 #endif
+       registerProcessMetrics();  // must follow every subsystem-> call above
        exporter = std::thread(serveMetrics, metricsPort, std::ref(exporterStop));
       }
 
@@ -1832,4 +1847,41 @@ int main(int argc, char* argv[])
    delete otlpTraceCache;
 #endif
    return 0;
+}
+
+/******************************************************************************/
+/*              r e g i s t e r P r o c e s s M e t r i c s                   */
+/******************************************************************************/
+
+// Deliberately the last thing in this file. See the forward declaration near
+// collectorRegistry() for why: dashboards_test.py resolves a metric's
+// subsystem by scanning backwards for the nearest subsystem("...") literal,
+// so anything registered below this point would be labelled "process".
+//
+// Called once from each daemon mode, before any thread starts. The guard is
+// not defensive tidiness: observeGauge bypasses the registry's byName_ dedup,
+// so a second call would put two families of the same name in the exposition,
+// which strict OpenMetrics parsers reject.
+//
+// The anonymous namespace is reopened because the declaration sits inside the
+// one that closes above main().
+//
+namespace
+{
+void registerProcessMetrics()
+{
+   static bool done = false;
+   if (done) return;
+   done = true;
+
+// Registered only where there is a reader, so a platform without one shows no
+// series at all rather than a flat and very convincing zero.
+//
+   if (!XrdMonProcessRss()) return;
+
+   collectorRegistry().subsystem("process")
+      .observeGauge<std::int64_t>("resident_memory_bytes",
+                                  "resident set size of the collector process")
+      .add({}, []{return (int64_t)XrdMonProcessRss();});
+}
 }

@@ -2200,6 +2200,245 @@ TEST(XrdMonCollect, UnboundedKeepsEverything)
   EXPECT_GT(dec.StateWeight(), 0u);
 }
 
+//------------------------------------------------------------------------------
+// The RSS control loop behind --max-memory.
+//
+// Every test here drives a scripted RSS through the injected hook, so none of
+// them depends on the real process footprint: the loop's arithmetic is
+// exercised at 4 GiB and at 100 MiB without allocating either. The platform
+// reader itself is covered separately in XrdMonMemoryTests.cc.
+//------------------------------------------------------------------------------
+
+namespace
+{
+constexpr std::size_t kCap = 1u << 30;          // the 1 GiB --max-memory default
+
+struct MemLoop : ::testing::Test
+{
+   std::size_t  fakeRss  = 0;
+   int          releases = 0;
+   time_t       clock    = 1700000000;
+   XrdMonDecode dec{[](const std::string&){}};
+
+   void SetUp() override
+      {dec.SetMemoryHooks({[this]{return fakeRss;}, [this]{releases++;}});
+       dec.SetMaxRss(kCap);
+      }
+
+   // Ticks are gated at 15s inside the decoder, so step well past that.
+   void tick(int n = 1)
+      {for (int i = 0; i < n; i++) {clock += 20; dec.MemoryTick(clock);}}
+
+   // Enough charged state that eviction has something to release. bytesOf()
+   // charges the held LFN plus a flat constant, so a long path is the cheap
+   // way past the loop's 8 MiB floor: 3000 entries at ~4 KiB is ~12 MiB.
+   void fill(uint32_t n = 3000, std::size_t lfnLen = 4096)
+      {feedUser7(dec, "h:1");
+       std::string lfn = "/store/data/" + std::string(lfnLen, 'x') + ".root";
+       for (uint32_t id = 1; id <= n; id++) feedOpenId(dec, "h:1", id, lfn);}
+};
+}
+
+// The guard for every pre-existing budget test: without hooks the loop must
+// not touch anything, which is what lets SetMaxBytes() stay deterministic.
+TEST_F(MemLoop, InertWithoutHooks)
+{
+  XrdMonDecode bare([](const std::string&){});
+  bare.SetMaxRss(kCap);
+  std::size_t was = bare.MaxBytes();
+
+  for (int i = 0; i < 5; i++) bare.MemoryTick(clock += 20);
+
+  EXPECT_EQ(bare.MaxBytes(), was);
+  EXPECT_EQ(bare.GetStats().evicted, 0u);
+}
+
+// Start optimistic: the loop only ever descends from the ceiling.
+TEST_F(MemLoop, StartsAtCeiling)
+{
+  EXPECT_EQ(dec.MaxBytes(), kCap / 8);
+}
+
+// The tick is self-rate-limiting so callers may invoke it every time round
+// their loop; without that the budget would fall once per batch.
+TEST_F(MemLoop, HonoursTickPeriod)
+{
+  fill();
+  fakeRss = kCap + (256u << 20);
+  std::size_t start = dec.MaxBytes();
+
+  dec.MemoryTick(clock += 20);         // acts
+  std::size_t after = dec.MaxBytes();
+  dec.MemoryTick(clock += 1);          // too soon
+  EXPECT_EQ(dec.MaxBytes(), after);
+  EXPECT_LT(after, start);
+}
+
+// Over the cap: the budget comes down and entries go with it.
+TEST_F(MemLoop, ShrinksOnOverage)
+{
+  fill();
+  std::size_t before = dec.MaxBytes();
+  std::uint64_t evicted = dec.GetStats().evicted;
+  fakeRss = kCap + (256u << 20);
+
+  tick();
+
+  EXPECT_LT(dec.MaxBytes(), before);
+  EXPECT_GT(dec.GetStats().evicted, evicted);
+}
+
+// The shrink is proportional to the overage, measured from what the state
+// actually holds. A step straight to the floor on any overage would be a
+// bang-bang controller, and the state would never recover in time to be
+// useful. over/4 of an 8 MiB overage is 2 MiB off a ~12 MiB holding.
+TEST_F(MemLoop, ShrinkIsProportionalToOverage)
+{
+  fill();
+  std::size_t held = dec.StateWeight();
+  ASSERT_GT(held, 10u << 20) << "fixture must build state above the floor";
+
+  fakeRss = kCap + (8u << 20);
+  tick();
+
+  std::size_t want = held - (8u << 20)/4;
+  EXPECT_GT(dec.MaxBytes(), 8u << 20);          // not slammed to the floor
+  EXPECT_NEAR((double)dec.MaxBytes(), (double)want, (double)(1u << 20));
+}
+
+// Trimming is not free, and on a healthy collector it must never happen.
+TEST_F(MemLoop, TrimsOnlyWhenOverCap)
+{
+  fill();
+  fakeRss = kCap / 2;
+  tick(5);
+  EXPECT_EQ(releases, 0);
+
+  fakeRss = kCap * 2;
+  tick(5);
+  EXPECT_EQ(releases, 5);
+}
+
+// The refusal to chase memory it does not own. Pinned far over cap, the loop
+// must stop at the floor rather than evicting the correlation state away.
+TEST_F(MemLoop, NeverGoesBelowFloor)
+{
+  fill();
+  fakeRss = 4ull << 30;
+
+  tick(20);
+
+  EXPECT_EQ(dec.MaxBytes(), 8u << 20);            // exactly the floor
+  EXPECT_GT(dec.GetStats().memFloored, 0u);
+}
+
+// memFloored means "eviction cannot help", not merely "over cap": a tick that
+// actually released something is the loop working, not failing.
+TEST_F(MemLoop, FlooredOnlyWhenEvictionCannotHelp)
+{
+  fill();
+  fakeRss = kCap + (64u << 20);
+
+  tick();                                          // evicts: not floored
+  EXPECT_GT(dec.GetStats().evicted, 0u);
+  EXPECT_EQ(dec.GetStats().memFloored, 0u);
+
+  tick(30);                                        // nothing left to give
+  EXPECT_GT(dec.GetStats().memFloored, 0u);
+}
+
+// Recovery is additive and bounded: back to the ceiling, never past it, and
+// never downwards on the way.
+TEST_F(MemLoop, RecoversToCeiling)
+{
+  fill();
+  fakeRss = 4ull << 30;
+  tick(20);
+  ASSERT_EQ(dec.MaxBytes(), 8u << 20);
+
+  fakeRss = kCap / 2;
+  std::size_t prev = dec.MaxBytes();
+  for (int i = 0; i < 40; i++)
+     {tick();
+      EXPECT_GE(dec.MaxBytes(), prev);             // monotonically non-decreasing
+      EXPECT_LE(dec.MaxBytes(), kCap / 8);         // never past the ceiling
+      prev = dec.MaxBytes();}
+
+  EXPECT_EQ(dec.MaxBytes(), kCap / 8);
+}
+
+// Without a deadband the budget hunts across the cap forever. The budget has
+// to be off its ceiling first, or the growth branch is a no-op regardless and
+// the test proves nothing.
+TEST_F(MemLoop, DeadbandHoldsStation)
+{
+  fill();
+  fakeRss = kCap + (8u << 20);
+  tick();                                          // pull it off the ceiling
+  std::size_t lowered = dec.MaxBytes();
+  ASSERT_LT(lowered, kCap / 8);
+  ASSERT_GT(lowered, 8u << 20);                    // and clear of the floor
+
+  fakeRss = kCap - (kCap / 32);                    // under cap, inside the band
+  tick(5);
+
+  EXPECT_EQ(dec.MaxBytes(), lowered);              // no creep back
+  EXPECT_EQ(releases, 1);                          // and no trimming under cap
+}
+
+// A reader returning 0 means "unknown", never "no memory". Treating it as the
+// latter would evict everything on a platform with no reader.
+TEST_F(MemLoop, IgnoresUnknownRss)
+{
+  fill();
+  std::size_t was = dec.MaxBytes();
+  std::uint64_t evicted = dec.GetStats().evicted;
+  fakeRss = 0;
+
+  tick(5);
+
+  EXPECT_EQ(dec.MaxBytes(), was);
+  EXPECT_EQ(dec.GetStats().evicted, evicted);
+  EXPECT_EQ(releases, 0);
+}
+
+// --max-memory 0 keeps meaning unbounded.
+TEST_F(MemLoop, ZeroCapDisablesLoop)
+{
+  dec.SetMaxRss(0);
+  fill();
+  fakeRss = 8ull << 30;
+
+  tick(5);
+
+  EXPECT_EQ(dec.MaxBytes(), 0u);
+  EXPECT_EQ(dec.GetStats().evicted, 0u);
+  EXPECT_EQ(releases, 0);
+}
+
+// StateEntries() is what the dashboards now discover collectors by, so it has
+// to track the live entry count rather than a high-water mark.
+TEST(XrdMonCollect, StateEntriesTracksLru)
+{
+  XrdMonDecode dec([](const std::string&){});
+  EXPECT_EQ(dec.StateEntries(), 0u);
+
+  feedUser7(dec, "h:1");
+  std::size_t base = dec.StateEntries();
+  EXPECT_GT(base, 0u);
+
+  for (uint32_t id = 1; id <= 10; id++)
+     feedOpenId(dec, "h:1", id, "/store/data/f.root");
+  EXPECT_EQ(dec.StateEntries(), base + 10);
+
+  for (uint32_t id = 1; id <= 10; id++) feedCloseId(dec, "h:1", id);
+  EXPECT_EQ(dec.StateEntries(), base);
+
+  dec.SetServerTTL(1);
+  dec.ReapServers(time(nullptr) + 10000);
+  EXPECT_EQ(dec.StateEntries(), 0u);
+}
+
 TEST(XrdMonCollect, FrmStageAndPurge)
 {
   XrdMetrics::Collector collector("xrootd");

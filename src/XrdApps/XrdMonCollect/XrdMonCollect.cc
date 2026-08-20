@@ -273,6 +273,29 @@ std::size_t parseSize(const char* s)
    return (std::size_t)(v * (double)mul);
 }
 
+// How many bytes of datagram payload one receive batch may accumulate before
+// it is handed on, derived from the memory budget so there is still a single
+// memory knob.
+//
+// The receive queue is the largest consumer no eviction can reach: queueDepth
+// batches of flushCount datagrams is 32000 packets at the defaults, ~256 MB at
+// the 8 KiB an f stream can emit, and none of it is correlation state. Give the
+// queue as a whole a sixteenth of the budget (floored at 8 MiB so a small
+// budget cannot starve it, capped at 256 MiB so a huge one cannot make the
+// bound meaningless) and divide by the depth to get the per-batch share.
+//
+// For ordinary small datagrams flushCount still binds first, so this only
+// takes effect in the case it exists for.
+//
+std::size_t recvBatchBytes(std::size_t budget, int queueDepth)
+{
+   if (!budget) return 0;                          // unbounded
+   std::size_t queue = std::min(std::max(budget/16, (std::size_t)(8u << 20)),
+                                (std::size_t)(256u << 20));
+   std::size_t depth = queueDepth > 0 ? (std::size_t)queueDepth : 1;
+   return std::max((std::size_t)(64u << 10), queue / depth);
+}
+
 // Parse a duration with an optional s/m/h/d suffix (a bare number is seconds).
 // Returns 0 on a malformed value. Used for --state-ttl.
 //
@@ -511,6 +534,7 @@ struct ShovelerOpts
    long        flushSecs;
    std::size_t rcvbuf;
    int         queueDepth;
+   std::size_t maxMemory;    // process memory budget, for the queue byte bound
    int         metricsPort;
    bool        verbose;
 };
@@ -669,6 +693,8 @@ int runShoveler(const char* prog, const ShovelerOpts& o)
    Batch  cur;
    recvPipe.acquire(cur);
    time_t batchStart = time(0);
+   size_t curBytes   = 0;
+   const size_t batchBytes = recvBatchBytes(o.maxMemory, o.queueDepth);
    char   buff[64*1024];
    while (!stopFlag)
         {sockaddr_storage from;
@@ -681,7 +707,7 @@ int runShoveler(const char* prog, const ShovelerOpts& o)
                 {if (!cur.empty() && time(0)-batchStart >= o.flushSecs)
                     {recvPipe.submit(std::move(cur));
                      if (!recvPipe.acquire(cur)) break;
-                     batchStart = time(0);
+                     batchStart = time(0); curBytes = 0;
                     }
                  continue;
                 }
@@ -694,10 +720,12 @@ int runShoveler(const char* prog, const ShovelerOpts& o)
          memcpy(&pkt.addr, &from, fromLen);
          pkt.addrLen = fromLen;
          cur.push_back(std::move(pkt));
-         if (cur.size() >= o.flushCount || time(0)-batchStart >= o.flushSecs)
+         curBytes += (size_t)n;
+         if (cur.size() >= o.flushCount || time(0)-batchStart >= o.flushSecs
+         || (batchBytes && curBytes >= batchBytes))
             {recvPipe.submit(std::move(cur));
              if (!recvPipe.acquire(cur)) break;
-             batchStart = time(0);
+             batchStart = time(0); curBytes = 0;
             }
         }
 
@@ -1155,6 +1183,7 @@ int main(int argc, char* argv[])
        so.flushSecs   = flushSecs;
        so.rcvbuf      = rcvbuf;
        so.queueDepth  = queueDepth;
+       so.maxMemory   = maxMemory;
        so.metricsPort = metricsPort;
        so.verbose     = verbose;
        return runShoveler(argv[0], so);
@@ -1379,6 +1408,12 @@ int main(int argc, char* argv[])
 //
    XrdMonPipe<Batch> recvPipe((size_t)(queueDepth > 0 ? queueDepth : 1));
 
+// Byte bound on a batch, so a stream of large datagrams cannot fill the queue
+// with far more memory than flushCount alone implies. Shared by every producer
+// into this pipe.
+//
+   const size_t batchBytes = recvBatchBytes(maxMemory, queueDepth);
+
 // The TCP listener for shoveled packets produces into the same pipe as the
 // UDP receiver (the pipe is mutex-protected on the producer side), so the
 // serializer cannot tell the transports apart.
@@ -1386,7 +1421,7 @@ int main(int argc, char* argv[])
    XrdMonTcpServer* tcpSrv = nullptr;
    if (tcpPort > 0)
       {tcpSrv = new XrdMonTcpServer(tcpPort, bindStr, loadSecret(tcpToken),
-                                    recvPipe, flushCount, flushSecs);
+                                    recvPipe, flushCount, flushSecs, batchBytes);
        int sdFd = sdInheritedSocket(SOCK_STREAM, tcpPort);
        if (sdFd >= 0)
           {fprintf(stderr, "xrdmoncollect: using systemd-provided TCP socket "
@@ -1760,6 +1795,7 @@ int main(int argc, char* argv[])
       {Batch   cur;
        recvPipe.acquire(cur);
        time_t  batchStart = time(0);
+       size_t  curBytes   = 0;
        char    buff[64*1024];
        while(!stopFlag)
             {sockaddr_storage from;
@@ -1772,7 +1808,7 @@ int main(int argc, char* argv[])
                     {if (!cur.empty() && time(0)-batchStart >= flushSecs)
                         {recvPipe.submit(std::move(cur));
                          if (!recvPipe.acquire(cur)) break;
-                         batchStart = time(0);
+                         batchStart = time(0); curBytes = 0;
                         }
                      continue;
                     }
@@ -1785,10 +1821,12 @@ int main(int argc, char* argv[])
              memcpy(&pkt.addr, &from, fromLen);
              pkt.addrLen = fromLen;
              cur.push_back(std::move(pkt));
-             if (cur.size() >= flushCount || time(0)-batchStart >= flushSecs)
+             curBytes += (size_t)n;
+             if (cur.size() >= flushCount || time(0)-batchStart >= flushSecs
+             || (batchBytes && curBytes >= batchBytes))
                 {recvPipe.submit(std::move(cur));
                  if (!recvPipe.acquire(cur)) break;
-                 batchStart = time(0);
+                 batchStart = time(0); curBytes = 0;
                 }
             }
        if (!cur.empty()) recvPipe.submit(std::move(cur));

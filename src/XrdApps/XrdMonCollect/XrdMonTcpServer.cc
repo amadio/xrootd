@@ -226,6 +226,7 @@ void XrdMonTcpServer::serveConn(int fd)
           };
 
        time_t batchStart = time(0);
+       std::size_t curBytes = 0;
        char   buff[64 * 1024];
        while (!stopping)
             {ssize_t n = recv(fd, buff, sizeof(buff), 0);
@@ -234,7 +235,7 @@ void XrdMonTcpServer::serveConn(int fd)
                  if (errno == EAGAIN || errno == EWOULDBLOCK)
                     {if (!cur.empty() && time(0) - batchStart >= flushSecs)
                         {if (!flushBatch()) break;
-                         batchStart = time(0);
+                         batchStart = time(0); curBytes = 0;
                         }
                      continue;
                     }
@@ -246,10 +247,12 @@ void XrdMonTcpServer::serveConn(int fd)
              if (!reader.Consume(buff, (std::size_t)n, cur))
                 {nMalformed++; break;}    // protocol violation: drop connection
              nFrames += cur.size() - before;
+             curBytes += (std::size_t)n;
              if (cur.size() >= flushCount ||
-                 (!cur.empty() && time(0) - batchStart >= flushSecs))
+                 (!cur.empty() && time(0) - batchStart >= flushSecs) ||
+                 (flushBytes && curBytes >= flushBytes))
                 {if (!flushBatch()) break;
-                 batchStart = time(0);
+                 batchStart = time(0); curBytes = 0;
                 }
             }
        if (!cur.empty()) flushBatch();    // hand off any partial batch

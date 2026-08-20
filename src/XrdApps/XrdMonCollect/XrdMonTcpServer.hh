@@ -57,13 +57,19 @@ public:
    //! @param pipe       the receive pipe shared with the UDP receiver.
    //! @param flushCount packets per batch before it is submitted.
    //! @param flushSecs  max age of a partial batch before it is submitted.
+   //! @param flushBytes payload bytes per batch before it is submitted
+   //!                   (0 = unbounded), so a stream of large frames cannot
+   //!                   fill the shared receive queue with far more memory
+   //!                   than flushCount alone implies.
    XrdMonTcpServer(int port, const char* bindStr, std::string token,
                    XrdMonPipe<XrdMonBatch>& pipe,
-                   std::size_t flushCount, long flushSecs)
+                   std::size_t flushCount, long flushSecs,
+                   std::size_t flushBytes = 0)
                   : port(port), bindStr(bindStr ? bindStr : ""),
                     token(std::move(token)), pipe(pipe),
                     flushCount(flushCount ? flushCount : 1),
-                    flushSecs(flushSecs > 0 ? flushSecs : 1) {}
+                    flushSecs(flushSecs > 0 ? flushSecs : 1),
+                    flushBytes(flushBytes) {}
 
    ~XrdMonTcpServer() { Stop(); }
 
@@ -100,6 +106,7 @@ private:
    XrdMonPipe<XrdMonBatch>& pipe;
    std::size_t flushCount;
    long        flushSecs;
+   std::size_t flushBytes;
 
    int               listenFd = -1;
    int               inheritedFd = -1;   // pre-bound listener (socket activation)

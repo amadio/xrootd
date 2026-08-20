@@ -6,6 +6,7 @@
 
 #include "XrdApps/XrdMonCollect/XrdMonOtlp.hh"
 #include "XrdOuc/XrdOucJson.hh"
+#include "XrdVersion.hh"
 
 #include <gtest/gtest.h>
 
@@ -243,4 +244,112 @@ TEST(XrdMonOtlp, TakingLogsLeavesTracesIntact)
    json traces = json::parse(batch.takeTracesBody());
    EXPECT_EQ(traces["resourceSpans"][0]["scopeSpans"][0]["spans"].size(), 1u);
    EXPECT_FALSE(batch.haveTraces());
+}
+
+//------------------------------------------------------------------------------
+// The body is now assembled as text rather than built as a tree and dumped, so
+// its layout is written out by hand and nothing above would notice it drifting
+// -- every test up to here parses the result, and parsing is order-blind.
+//------------------------------------------------------------------------------
+
+// Byte for byte, including the key order a sorted nlohmann object produced.
+// Note where "scope" falls: after "logRecords" here, before "spans" below.
+TEST(XrdMonOtlp, LogsBodyLayoutIsExact)
+{
+   json doc;
+   doc["resource"]["service.name"] = "xrootd";
+   doc["attributes"]["file.path"]  = "/f.root";
+   doc["eventName"]                = "xrootd.read";
+   doc["severityNumber"]           = 9;
+
+   XrdMonOtlpBatch b;
+   b.add(doc);
+
+   const std::string want =
+      "{\"resourceLogs\":[{\"resource\":{\"attributes\":"
+        "[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"xrootd\"}}]},"
+      "\"scopeLogs\":[{"
+        "\"logRecords\":[{"
+          "\"attributes\":[{\"key\":\"file.path\","
+                           "\"value\":{\"stringValue\":\"/f.root\"}}],"
+          "\"body\":{\"stringValue\":\"xrootd.read\"},"
+          "\"eventName\":\"xrootd.read\","
+          "\"severityNumber\":9}],"
+        "\"scope\":{\"name\":\"xrdmoncollect\",\"version\":\"" XrdVERSION "\"}"
+      "}]}]}";
+   EXPECT_EQ(b.takeLogsBody(), want);
+}
+
+TEST(XrdMonOtlp, TracesBodyLayoutIsExact)
+{
+   json doc;
+   doc["resource"]["service.name"] = "xrootd";
+   doc["attributes"]["file.path"]  = "/f.root";
+   doc["kind"]                     = 3;
+   doc["name"]                     = "xrootd.file";
+
+   XrdMonOtlpBatch b;
+   b.add(doc);
+
+   const std::string want =
+      "{\"resourceSpans\":[{\"resource\":{\"attributes\":"
+        "[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"xrootd\"}}]},"
+      "\"scopeSpans\":[{"
+        "\"scope\":{\"name\":\"xrdmoncollect\",\"version\":\"" XrdVERSION "\"},"
+        "\"spans\":[{"
+          "\"attributes\":[{\"key\":\"file.path\","
+                           "\"value\":{\"stringValue\":\"/f.root\"}}],"
+          "\"kind\":3,"
+          "\"name\":\"xrootd.file\","
+          "\"spanId\":\"\","
+          "\"traceId\":\"\"}]"
+      "}]}]}";
+   EXPECT_EQ(b.takeTracesBody(), want);
+}
+
+// Records within a group are comma separated, and a second group is a second
+// element of the outer array -- the two places a hand-built body can lose or
+// gain a separator.
+TEST(XrdMonOtlp, SeparatorsSurviveSeveralRecordsAndGroups)
+{
+   json a;
+   a["resource"]["server.address"] = "srv1";
+   a["attributes"]["event.name"]   = "xrootd.read";
+   json b2 = a;
+   b2["resource"]["server.address"] = "srv2";
+
+   XrdMonOtlpBatch b;
+   b.add(a); b.add(a); b.add(a);
+   b.add(b2); b.add(b2);
+
+   const std::string text = b.takeLogsBody();
+   json body = json::parse(text);          // no stray or missing commas
+   ASSERT_EQ(body["resourceLogs"].size(), 2u);
+   EXPECT_EQ(body["resourceLogs"][0]["scopeLogs"][0]["logRecords"].size(), 3u);
+   EXPECT_EQ(body["resourceLogs"][1]["scopeLogs"][0]["logRecords"].size(), 2u);
+}
+
+// The byte count is what the caller's coalescing bound consults, so an
+// estimate that drifts from the body it is bounding would silently loosen the
+// only limit on how large the accumulator may grow.
+TEST(XrdMonOtlp, ByteCountTracksTheBodyItWillProduce)
+{
+   json doc;
+   doc["resource"]["server.address"] = "srv1";
+   doc["attributes"]["file.path"]    = std::string("/store/") +
+                                       std::string(200, 'z') + ".root";
+   doc["attributes"]["event.name"]   = "xrootd.read";
+
+   XrdMonOtlpBatch b;
+   EXPECT_EQ(b.logBytes(), 0u);
+   EXPECT_EQ(b.traceBytes(), 0u);
+
+   for (int i = 0; i < 500; i++) b.add(doc);
+   const std::size_t claimed = b.logBytes();
+   EXPECT_EQ(b.traceBytes(), 0u);          // spans accounted separately
+
+   const std::size_t actual = b.takeLogsBody().size();
+   EXPECT_GE(claimed, actual);             // never under-reports what it holds
+   EXPECT_LT(claimed - actual, 256u);      // and is tight, not a guess
+   EXPECT_EQ(b.logBytes(), 0u);            // reset by the take
 }

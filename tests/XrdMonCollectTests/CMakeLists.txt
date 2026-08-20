@@ -2,8 +2,9 @@ add_executable(xrdmoncollect-unit-tests
   XrdMonCollectTests.cc
   XrdMonDiskCacheTests.cc
   XrdMonOtlpTests.cc
-  XrdMonShovelFrameTests.cc XrdMonFilterTests.cc
+  XrdMonShovelFrameTests.cc XrdMonFilterTests.cc XrdMonMemoryTests.cc
   ${CMAKE_SOURCE_DIR}/src/XrdApps/XrdMonCollect/XrdMonDiskCache.cc
+  ${CMAKE_SOURCE_DIR}/src/XrdApps/XrdMonCollect/XrdMonMemory.cc
   ${CMAKE_SOURCE_DIR}/src/XrdApps/XrdMonCollect/XrdMonOtlp.cc)
 
 target_link_libraries(xrdmoncollect-unit-tests

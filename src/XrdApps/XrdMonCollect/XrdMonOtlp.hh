@@ -28,6 +28,8 @@
 
 #include "XrdOuc/XrdOucJson.hh"
 
+#include "XrdApps/XrdMonCollect/XrdMonUtil.hh"
+
 //-----------------------------------------------------------------------------
 //! XrdMonOtlpBatch converts the collector's decoded documents (the nested-JSON
 //! OpenTelemetry-data-model form emitted by XrdMonDecode) into OTLP/JSON export
@@ -74,8 +76,11 @@ void clear()
      {logGroups.clear(); spanGroups.clear(); logSize = spanSize = 0;}
 
 //! Bytes the accumulated logs (resp. traces) hold: the length of the body
-//! they will produce, give or take the envelope. Exact rather than estimated,
-//! which is what lets the caller's byte bound bound actual memory.
+//! they will produce, rounded up by the fixed envelope. Measured rather than
+//! estimated, which is what lets the caller's byte bound bound actual memory.
+//!
+//! Published, because the metrics exporter reads them from its own thread
+//! while the serializer adds to the batch (otlp_batch_bytes).
 std::size_t logBytes()   const {return logSize;}
 std::size_t traceBytes() const {return spanSize;}
 
@@ -96,8 +101,8 @@ struct Group
 // servers reporting, not by the document rate.
 std::map<nlohmann::json, Group> logGroups;
 std::map<nlohmann::json, Group> spanGroups;
-std::size_t logSize  = 0;
-std::size_t spanSize = 0;
+XrdMonPublished<std::size_t> logSize;
+XrdMonPublished<std::size_t> spanSize;
 
 std::string takeBody(std::map<nlohmann::json, Group>& groups,
                      const char* resourceKey, const char* scopeKey,

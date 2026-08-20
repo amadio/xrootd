@@ -1762,6 +1762,13 @@ void XrdMonDecode::MemoryTick(time_t now)
    if (rss > maxRss)
       {std::size_t over = rss - maxRss;
 
+// Ask whoever holds memory this object cannot evict to hand it back on this
+// tick (see TakeMemoryRelease). Raised before anything is evicted, because the
+// output accumulators can be several times the correlation state and giving
+// them up costs a POST, where evicting costs correlation.
+//
+       memRelease = true;
+
 // Every charged byte released frees at least four real ones, since bytesOf()
 // counts held strings plus a flat constant and charges nothing for the map
 // nodes, bucket arrays, Server structs or gsPrev. Shrinking by over/4
@@ -1793,9 +1800,10 @@ void XrdMonDecode::MemoryTick(time_t now)
               {lastFloorWarn = now;
                fprintf(stderr, "xrdmoncollect: resident memory %lluM exceeds the "
                        "%lluM cap with the correlation state already at its "
-                       "%lluM floor; the memory is not in the correlation state "
-                       "(check the OTLP batch, the disk cache, and the "
-                       "container's own memory limit)\n",
+                       "%lluM floor; the memory is not in the correlation "
+                       "state, and the output buffers have already been asked "
+                       "to release theirs (check the sink queues, the disk "
+                       "cache, and the container's own memory limit)\n",
                        (unsigned long long)(rss      >> 20),
                        (unsigned long long)(maxRss   >> 20),
                        (unsigned long long)(rssFloor >> 20));

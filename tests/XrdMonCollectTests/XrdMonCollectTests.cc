@@ -2408,6 +2408,42 @@ TEST_F(MemLoop, IgnoresUnknownRss)
   EXPECT_EQ(releases, 0);
 }
 
+// Correlation state is all this loop can evict, and on a busy collector the
+// output accumulators can be several times its size. Over the cap it asks for
+// them back -- which is the only way the cap reaches memory it does not own.
+TEST_F(MemLoop, AsksForOtherMemoryBackWhenOverCap)
+{
+  fill();
+  EXPECT_FALSE(dec.TakeMemoryRelease());          // nothing pending yet
+
+  fakeRss = kCap / 2;
+  tick(3);
+  EXPECT_FALSE(dec.TakeMemoryRelease()) << "asked while comfortably under cap";
+
+  fakeRss = kCap * 2;
+  tick();
+  EXPECT_TRUE(dec.TakeMemoryRelease());
+}
+
+// Reading the request clears it, so one control tick costs one extra flush and
+// a sustained overage does not turn every pass round the serializer loop into
+// a POST of whatever happens to have accumulated.
+TEST_F(MemLoop, TheReleaseRequestIsOneShot)
+{
+  fill();
+  fakeRss = kCap * 2;
+
+  tick();
+  ASSERT_TRUE(dec.TakeMemoryRelease());
+  EXPECT_FALSE(dec.TakeMemoryRelease());          // consumed
+
+  dec.MemoryTick(clock += 1);                     // inside the tick period
+  EXPECT_FALSE(dec.TakeMemoryRelease());
+
+  tick();                                         // next control tick, still over
+  EXPECT_TRUE(dec.TakeMemoryRelease());
+}
+
 // --max-memory 0 keeps meaning unbounded.
 TEST_F(MemLoop, ZeroCapDisablesLoop)
 {

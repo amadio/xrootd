@@ -2041,6 +2041,17 @@ int main(int argc, char* argv[])
                 cr.add({s->cfg.name}, [s]{return (uint64_t)(s->logCache->Replayed() + s->traceCache->Replayed());});
                }
            }
+
+        // Held by the accumulator between flushes, so it belongs to no
+        // destination and appears on no queue -- the one part of the output
+        // path that used to be invisible. Now bounded, and released outright
+        // when the memory cap says so, but worth watching: a collector that
+        // sits high here is one whose endpoints are all behind at once.
+        if (otlpEnabled)
+           subsystem->observeGauge<std::int64_t>("otlp_batch_bytes",
+                 "bytes of OTLP output accumulated but not yet queued")
+              .add({}, [&]{return (int64_t)(otlpBatch.logBytes()
+                                          + otlpBatch.traceBytes());});
        }
 #endif
        registerProcessMetrics();  // must follow every subsystem-> call above
@@ -2303,7 +2314,10 @@ int main(int argc, char* argv[])
            if (now - lastReap >= reapEvery)
               {decoder.ReapServers(now); lastReap = now;}
            decoder.MemoryTick(now);       // self-rate-limiting; see MemoryTick
-           flush();                       // hand one _bulk body to the output thread
+           // Over the RSS cap, ship what is accumulated rather than holding it
+           // for coalescing: it is memory the decoder cannot evict, so this is
+           // the only way the cap reaches it. At most once per control tick.
+           flush(decoder.TakeMemoryRelease());
           }
        flush(true);                       // hand off anything after the pipe closed
 #ifdef XRDMON_HAVE_CURL

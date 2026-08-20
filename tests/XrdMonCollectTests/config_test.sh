@@ -60,7 +60,7 @@ cat > "${TMP}/ok.cfg" <<EOF
 [xrdmoncollect]
 port = 9932
 no-resolve = true
-max-memory = 64M
+max-memory = 1G
 site = EXAMPLE-SITE
 EOF
 starts -c "${TMP}/ok.cfg" || fail "valid config should start the collector"

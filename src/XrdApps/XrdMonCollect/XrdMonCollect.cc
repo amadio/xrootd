@@ -214,9 +214,10 @@ void usage(const char* prog)
      "  --site <name>    tag everything this collector emits with a site: a\n"
      "                   site label on every metric series and xrootd.site on\n"
      "                   every document (default: none, and nothing is tagged)\n"
-     "  --max-memory <sz> bound correlation state to ~<sz> bytes, evicting the\n"
-     "                   least-recently-used entries (K/M/G suffix; default 256M;\n"
-     "                   0=unbounded)\n"
+     "  --max-memory <sz> cap total process memory at ~<sz> bytes, evicting the\n"
+     "                   least-recently-used correlation entries to meet it\n"
+     "                   (K/M/G suffix; default 1G; 0=unbounded). Best-effort:\n"
+     "                   only the correlation state can be evicted\n"
      "  --max-entries <n> optional hard cap on correlation entries (0=off)\n"
      "  --server-ttl <s> reclaim a server incarnation idle for >s seconds\n"
      "                   (default 86400; 0=never)\n"
@@ -774,7 +775,7 @@ int main(int argc, char* argv[])
    bool        gstream = false;
    bool        redirects = false;
    int         metricsPort = 0;
-   size_t      maxMemory  = 256ull << 20;   // ~256 MiB correlation-state budget
+   size_t      maxMemory  = 1ull << 30;     // ~1 GiB total process memory cap
    size_t      maxEntries = 0;              // optional hard entry cap (off)
    long        serverTtl  = 86400;          // reap incarnations idle > 24h
    long        fileTtl    = 0;              // expire stale open-file entries
@@ -1114,6 +1115,18 @@ int main(int argc, char* argv[])
                argv[0]);
        usage(argv[0]); return 2;}
 
+// --max-memory now caps the whole process, so a value below what the daemon
+// occupies before it decodes anything can only ever hold the state budget at
+// its floor. Warn rather than refuse: the setting is legal, just futile, and a
+// site upgrading from the old correlation-state meaning is exactly who will
+// hit this.
+//
+   if (maxMemory && maxMemory < (128ull << 20))
+      fprintf(stderr, "%s: --max-memory %zuM is below this process's own "
+              "footprint; it now caps total memory, not just correlation "
+              "state, so the state budget will sit at its floor\n",
+              argv[0], maxMemory >> 20);
+
 // The site is a property of this collector, not of the servers reporting to it:
 // it is not on the monitoring wire at all (all.sitename names the storage
 // cluster), and the deployment model is one collector per site. As a global
@@ -1434,7 +1447,22 @@ int main(int argc, char* argv[])
       }
 
    XrdMonDecode decoder(docSink, rawSink, debug, traces, gstream, redirects, subsystem);
-   decoder.SetMaxBytes(maxMemory);
+// --max-memory caps the whole process, and the decoder meets it by steering
+// its own state budget from a real RSS reading. Where there is no reader, fall
+// back to the old behaviour -- the knob bounds the charged state estimate -- so
+// the safeguard degrades rather than disappearing.
+//
+   if (XrdMonProcessRss())
+      {decoder.SetMaxRss(maxMemory);
+       decoder.SetMemoryHooks({XrdMonProcessRss, XrdMonReleaseMemory});
+      }
+      else
+      {decoder.SetMaxBytes(maxMemory);
+       if (maxMemory)
+          fprintf(stderr, "xrdmoncollect: no resident-memory reader on this "
+                  "platform; --max-memory bounds the correlation-state "
+                  "estimate only\n");
+      }
    decoder.SetMaxEntries(maxEntries);
    decoder.SetServerTTL(serverTtl);
    decoder.SetFileTTL(fileTtl);
@@ -1527,6 +1555,9 @@ int main(int argc, char* argv[])
            "dictionary/open-file entries evicted by the memory budget", evicted);
        OBS("reaped_servers_total",
            "idle server incarnations reclaimed by the server TTL", reaped);
+       OBS("memory_floored_total",
+           "control ticks over the memory cap with the state budget already "
+           "at its floor", memFloored);
        OBS("filtered_documents_total",
            "documents suppressed before emission by a [filter] rule", filtered);
        OBS("disconnects_total",
@@ -1544,6 +1575,8 @@ int main(int argc, char* argv[])
 #undef OBS
        subsystem->observeGauge<std::int64_t>("state_entries", "correlation entries held (dictionaries, tokens, activity, open files)")
           .add({}, [&]{return (int64_t)decoder.StateEntries();});
+       subsystem->observeGauge<std::int64_t>("state_budget_bytes", "charged-byte budget the memory cap is currently enforcing")
+          .add({}, [&]{return (int64_t)decoder.MaxBytes();});
        subsystem->observeGauge<std::int64_t>("recv_queue_batches", "packet batches queued from the receiver to the serializer")
           .add({}, [&]{return (int64_t)recvPipe.readyDepth();});
        if (tcpSrv)
@@ -1786,6 +1819,7 @@ int main(int argc, char* argv[])
            time_t now = time(0);
            if (now - lastReap >= reapEvery)
               {decoder.ReapServers(now); lastReap = now;}
+           decoder.MemoryTick(now);       // self-rate-limiting; see MemoryTick
            flush();                       // hand one _bulk body to the output thread
           }
        flush();                           // hand off anything after the pipe closed
@@ -1886,7 +1920,7 @@ int main(int argc, char* argv[])
          "opens=%llu closes=%llu xfrs=%llu discs=%llu docs=%llu "
          "filtered=%llu orphanCloses=%llu lost=%llu evicted=%llu "
          "traces=%llu gevents=%llu redirs=%llu spans=%llu frm=%llu "
-         "unknown=%llu\n",
+         "memFloored=%llu unknown=%llu\n",
          (unsigned long long)s.packets, (unsigned long long)s.malformed,
          (unsigned long long)s.records, (unsigned long long)s.mapUser,
          (unsigned long long)s.mapTokn, (unsigned long long)s.mapUeac,
@@ -1898,7 +1932,8 @@ int main(int argc, char* argv[])
          (unsigned long long)s.lost, (unsigned long long)s.evicted,
          (unsigned long long)s.traces, (unsigned long long)s.gevents,
          (unsigned long long)s.redirs, (unsigned long long)s.spans,
-         (unsigned long long)s.frmEvents, (unsigned long long)s.unknown);
+         (unsigned long long)s.frmEvents, (unsigned long long)s.memFloored,
+         (unsigned long long)s.unknown);
       }
 
    if (out != stdout) fclose(out);

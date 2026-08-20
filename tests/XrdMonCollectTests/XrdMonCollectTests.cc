@@ -1894,9 +1894,11 @@ TEST(XrdMonCollect, LoopbackServerResolvesToLocalHost)
   EXPECT_NE(name, "localhost");                   // never a loopback name
   EXPECT_FALSE(j["resource"].contains("host.name"));  // single canonical field
   // When the advertised FQDN is usable, it is the name substituted.
-  const char* me = XrdNetUtils::MyHostName();
-  if (me && *me && std::string(me).find(':') == std::string::npos
-      && strncmp(me, "localhost", 9) != 0)
+  char* raw = XrdNetUtils::MyHostName(nullptr);   // caller owns the strdup()
+  std::string me = raw ? raw : "";
+  free(raw);
+  if (!me.empty() && me.find(':') == std::string::npos
+      && me.compare(0, 9, "localhost") != 0)
      {EXPECT_EQ(name, me);}
 }
 

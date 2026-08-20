@@ -41,6 +41,15 @@
 //! envelope fields (severity, timeUnixNano, traceId/spanId, name/kind/status)
 //! are already OTLP-compatible in the source document and pass through.
 //!
+//! What accumulates between flushes is the serialized text, not a tree. A
+//! materialised nlohmann::json runs several times the size of its own output,
+//! and this is memory the --max-memory controller cannot evict: it belongs to
+//! neither the correlation state nor the output queues. Holding text instead
+//! costs one small dump per record -- the same bytes that would have been
+//! dumped at flush, plus an allocation -- and in return the accumulator is
+//! about as large as the body it will produce, and knows exactly how large
+//! that is.
+//!
 //! No network dependency, so it is unit-testable on its own; the HTTP transport
 //! lives in XrdMonOtlp below.
 //-----------------------------------------------------------------------------
@@ -56,36 +65,39 @@ void add(const nlohmann::json& doc);
 bool haveLogs()   const {return !logGroups.empty();}
 bool haveTraces() const {return !spanGroups.empty();}
 
-//! Serialize and clear the accumulated logs (resp. traces) as one OTLP/JSON
+//! Assemble and clear the accumulated logs (resp. traces) as one OTLP/JSON
 //! ExportLogsServiceRequest (resp. ExportTraceServiceRequest) body.
 std::string takeLogsBody();
 std::string takeTracesBody();
 
 void clear()
-     {logGroups.clear(); spanGroups.clear(); logBytes = spanBytes = 0;}
+     {logGroups.clear(); spanGroups.clear(); logSize = spanSize = 0;}
 
-//! Roughly how large the accumulated logs (resp. traces) body would be. Used
-//! to bound how long a caller may keep accumulating before it ships; the tree
-//! held here is several times this in memory, and nothing else bounds it.
-std::size_t approxLogBytes()   const {return logBytes;}
-std::size_t approxTraceBytes() const {return spanBytes;}
+//! Bytes the accumulated logs (resp. traces) hold: the length of the body
+//! they will produce, give or take the envelope. Exact rather than estimated,
+//! which is what lets the caller's byte bound bound actual memory.
+std::size_t logBytes()   const {return logSize;}
+std::size_t traceBytes() const {return spanSize;}
 
 private:
 
-// One resource block: the resource attributes (as an OTLP KeyValue array) and
-// the log records / spans sharing that resource.
+// One resource block: the resource attributes as a serialized OTLP KeyValue
+// array, and the serialized log records / spans sharing them, comma separated
+// and ready to drop between brackets.
 struct Group
 {
-   nlohmann::json resource;                              // KeyValue array
-   nlohmann::json records = nlohmann::json::array();     // logRecords or spans
+   std::string resource;
+   std::string records;
 };
 
 // Keyed by the resource object itself, so identical resources share a block
-// without the key having to be serialized once per document.
+// without the key having to be serialized once per document. There is one key
+// per server incarnation, so the trees kept here are bounded by the number of
+// servers reporting, not by the document rate.
 std::map<nlohmann::json, Group> logGroups;
 std::map<nlohmann::json, Group> spanGroups;
-std::size_t logBytes  = 0;
-std::size_t spanBytes = 0;
+std::size_t logSize  = 0;
+std::size_t spanSize = 0;
 
 std::string takeBody(std::map<nlohmann::json, Group>& groups,
                      const char* resourceKey, const char* scopeKey,

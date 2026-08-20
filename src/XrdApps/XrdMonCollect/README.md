@@ -143,6 +143,14 @@ queryable structured metadata ([grafana/loki#19260](https://github.com/grafana/l
 the attribute can be dropped once Loki surfaces the field. This one in-memory
 shape is then framed differently per wire sink.
 
+**A document is serialized at most once, and only if something consumes text.**
+The decoder builds each document as a JSON tree and offers it two ways: as the
+tree, to consumers that re-encode it (the OTLP batch), and as text, to consumers
+that want the serialization (the file, OpenSearch and forward sinks). The text
+sink is installed only when one of the latter exists, so an OTLP-only collector
+never serializes a document at all, and one with OpenSearch serializes it once
+and parses nothing.
+
 The event names the operation, not the stream it came from:
 
 | `eventName` | Record |
@@ -248,20 +256,32 @@ are retried up to four times with exponential backoff (1s, 2s, 4s, 8s; capped at
   size limit.
 - Without `--cache-dir`, the body is **dropped and counted**.
 
-The OpenSearch `_bulk` bodies live flat under the cache directory; the OTLP logs
-and traces cache **separately**, because they replay to different endpoints:
+Every destination caches **separately** — each recovers on its own schedule —
+and so do OTLP logs and traces, since they replay to different endpoints. The
+destination named `default` keeps the original layout, so an upgrade orphans
+nothing:
 
 ```
 <cache-dir>/
-├── 1751450432000-000000.ndjson      # OpenSearch _bulk bodies
+├── 1751450432000-000000.ndjson         # OpenSearch "default" _bulk bodies
 ├── 1751450432500-000001.ndjson
+├── os-central/                         # [opensearch "central"]
+│   └── 1751450433100-000000.ndjson
 ├── otlp-logs/
-│   └── 1751450433000-000000.ndjson  # OTLP /v1/logs bodies
-└── otlp-traces/
-    └── 1751450433200-000000.ndjson  # OTLP /v1/traces bodies
+│   └── 1751450433000-000000.ndjson     # OTLP "default" /v1/logs bodies
+├── otlp-traces/
+│   └── 1751450433200-000000.ndjson     # OTLP "default" /v1/traces bodies
+├── otlp-wlcg-logs/                     # [otlp "wlcg"]
+└── otlp-wlcg-traces/
 ```
 
-Health signals to watch (with `--metrics-port`):
+A destination that has a cache does **not** retry a live POST: it fails fast and
+spills to disk, and the replay path carries the retry ladder (whose backoff is
+also what paces it). Holding a body for the length of the ladder — five
+attempts, 30 s timeout each — while the queue behind it overflows is worse than
+writing it to a cache that is working.
+
+Health signals to watch (with `--metrics-port`), all labelled by `destination`:
 `xrootd_collector_cache_files`/`_bytes` (current backlog),
 `xrootd_collector_cache_stored_total`/`_replayed_total`, and
 `xrootd_collector_dropped_bulk_total`; the OTLP sink has the analogous
@@ -1310,7 +1330,9 @@ fallback when no other sink is configured (`-o` always adds a file too):
   via the `_bulk` API on a dedicated output thread; transient failures (network,
   HTTP 429/5xx) are retried with exponential backoff. With `--cache-dir` a body
   that still fails is written to disk and retried later (see
-  [Durability and offline caching](#durability-and-offline-caching)).
+  [Durability and offline caching](#durability-and-offline-caching)). Accepts
+  any number of endpoints — see
+  [Multiple destinations](#multiple-destinations).
 - **OTLP/HTTP** (`--otlp-url`): posts the documents to an OpenTelemetry endpoint
   as OTLP/JSON — logs to `<url>/v1/logs` and, with `--spans`, spans to
   `<url>/v1/traces` — so xrdmoncollect feeds an **OpenTelemetry Collector** or
@@ -1324,12 +1346,70 @@ fallback when no other sink is configured (`-o` always adds a file too):
   different endpoints); without it a terminal failure drops the body (counted).
   Requires libcurl; `--otlp-insecure` skips TLS verification. This is the
   log/trace analogue of the metrics OTLP push in `XrdHttpMetricsExporter`.
+  Accepts any number of endpoints — see
+  [Multiple destinations](#multiple-destinations).
 - **TCP forward** (`--forward host:port`): streams the same NDJSON over a plain
   TCP connection to a buffering/forwarding frontend — Logstash (`tcp` input),
   Fluentd (`in_tcp`), Vector (`socket` source), or a message-broker bridge. The
   connection is lazily (re)established with a short cool-down; documents
   produced while the consumer is down are dropped (durable buffering is the
   downstream's job). Dependency-free, so it is built even without libcurl.
+  Single-destination.
+
+### Multiple destinations
+
+Both HTTP sinks accept any number of endpoints. The `--os-*`/`--otlp-*` options
+and their config-file equivalents define the destination named `default`; each
+additional one gets an `[opensearch "<name>"]` or `[otlp "<name>"]` section.
+The use this exists for is a site keeping its own monitoring while also feeding
+a central collector, from one collector instead of two — one UDP ingest, one
+correlation state, one memory budget.
+
+```ini
+[xrdmoncollect]
+port      = 9930
+cache-dir = /var/lib/xrootd/moncollect
+
+[otlp "local"]
+url = http://alloy.example.org:4318
+
+[otlp "wlcg"]
+url   = https://otel.wlcg.example:4318
+token = @/etc/xrootd/wlcg.token
+
+[opensearch "site"]
+url   = https://opensearch.example.org:9200
+index = site-transfers
+```
+
+Section keys are the long-option names without the `os-`/`otlp-` prefix: `url`
+(required), `index`, `user`, `pass`, `token`, `insecure`, `datastream` for
+`[opensearch]`; `url` (required), `token`, `insecure` for `[otlp]`. An
+unrecognised key is a fatal error, as it is for a filter rule.
+
+**A named section inherits nothing** from the flat keys, not even the index.
+Inheriting would make the result depend on whether a value came from the file or
+the command line — the two are read in that order — and an inherited credential
+would silently POST the site's own OpenSearch password to the central endpoint
+on every batch. Every key defaults to what its option defaults to.
+
+Every destination has its own thread, queue, retry state and cache directory,
+and every sink metric carries a `destination` label. A destination that is slow
+or unreachable can neither stall the collector nor affect the others: its queue
+is bounded in bytes and drops its oldest body when full, counted separately from
+a drop after a failed POST because the two mean different things — an overflow
+says the destination (or its cache) cannot keep up with the input, not that a
+disk cache is missing.
+
+Names must start with a letter or digit and may contain only letters, digits,
+`_`, `-` and `.`; a name becomes both a directory component under `--cache-dir`
+and a Prometheus label value. They are compared without regard to case, and
+`default` is reserved for the flat keys.
+
+There is no command-line form. Filter rules have none either, for the same
+reason: an ordering rule binding `--otlp-token` to the most recent `--otlp-url`
+is exactly the kind of thing that is wrong in production and looks right in a
+review.
 
 ### Authentication
 
@@ -1373,7 +1453,8 @@ xrdmoncollect -p <port> [-b <bindaddr>] [-o <file>] [--bulk <index>]
               [--flush-count <n>] [--flush-secs <n>] [--debug] [-v]
 
   -c <file>        load options from an INI config file, plus any
-                   [filter "<name>"] document rules (see Configuration)
+                   [filter "<name>"] document rules and
+                   [opensearch|otlp "<name>"] destinations (see Configuration)
   -p <port>        UDP port to listen on (long form: --udp-port; required
                    unless --tcp-port is given)
   -b <bindaddr>    address to bind (default: all interfaces, dual-stack)
@@ -1462,7 +1543,10 @@ metrics-port = 9931
 max-memory = 1G
 ```
 
-The file may additionally carry any number of `[filter "<name>"]` sections,
+The file may additionally carry `[opensearch "<name>"]` and `[otlp "<name>"]`
+sections, one per extra sink destination (see
+[Multiple destinations](#multiple-destinations)), and any number of
+`[filter "<name>"]` sections,
 which drop or tag emitted documents and have no command-line equivalent — see
 [Document filtering](#document-filtering-filter-). Any other section is
 ignored with a warning.
@@ -1620,7 +1704,8 @@ need larger buffers and a bigger memory budget.
 | Too many small POSTs, or POST latency too high | `--flush-count`, `--flush-secs` | Larger/longer flush windows trade freshness for fewer, bigger requests; smaller windows lower end-to-end latency. |
 | `state_budget_bytes` falling away from its ceiling; `evicted_total` climbing | `--max-memory`, `--max-entries`, `--server-ttl` | The cap is being enforced. Raise it to cover the working set (≈ concurrent open files × incarnations); shorten the TTL to reclaim dead incarnations sooner. |
 | `memory_floored_total` climbing | — | The cap cannot be met by evicting correlation state: the memory is elsewhere. Look at the OTLP batch (largest non-state consumer when `--otlp-url` is set), the disk cache, and the container's own limit. |
-| `post_failures_total` / `otlp_failures_total`, growing `cache_files` | `--cache-dir` (+ downstream) | Ensure a cache dir is set so failures spool to disk instead of dropping; investigate the sink. Watch `dropped_bulk_total` for actual loss. |
+| `post_failures_total` / `otlp_failures_total`, growing `cache_files` | `--cache-dir` (+ downstream) | Ensure a cache dir is set so failures spool to disk instead of dropping; investigate the sink. Watch `dropped_bulk_total` for actual loss. Both carry a `destination` label -- check whether one endpoint is failing or all of them. |
+| `post_overflow_total` / `otlp_overflow_total` climbing | the destination, or `--cache-dir` | That destination cannot absorb the input rate: its queue filled and dropped its oldest bodies. Distinct from `dropped_*`, which means a POST failed with nowhere to spill. |
 
 Backpressure is intentional: if a sink stalls, the POST queue fills, the
 serializer slows, and finally the receiver relies on `--rcvbuf` to ride out the
@@ -1853,10 +1938,14 @@ xrootd_collector_token_records_total        (T-stream)
 xrootd_collector_ident_records_total        (=-stream)
 ```
 
-Sink health. The OpenSearch sink:
+Sink health. Every series below carries a `destination="<name>"` label, so a
+collector feeding several endpoints reports each one separately; aggregate with
+`sum by (destination) (...)` or `sum(...)`. The OpenSearch sink:
 
 ```
 xrootd_collector_post_queue_bodies          (gauge: bodies awaiting the POST)
+xrootd_collector_post_queue_bytes           (gauge: bytes awaiting the POST)
+xrootd_collector_post_overflow_total        (bodies dropped: queue full)
 xrootd_collector_post_failures_total        (OpenSearch _bulk POST failures)
 xrootd_collector_cache_files                (gauge: cached bodies awaiting replay)
 xrootd_collector_cache_bytes                (gauge: bytes of cached bodies)
@@ -1869,6 +1958,8 @@ and the OTLP sink, the same shape under its own names:
 
 ```
 xrootd_collector_otlp_queue_bodies          (gauge: bodies awaiting the export)
+xrootd_collector_otlp_queue_bytes           (gauge: bytes awaiting the export)
+xrootd_collector_otlp_overflow_total        (bodies dropped: queue full)
 xrootd_collector_otlp_failures_total        (OTLP POST failures)
 xrootd_collector_otlp_cache_files           (gauge: cached bodies awaiting replay)
 xrootd_collector_otlp_cache_bytes           (gauge: bytes of cached bodies)
@@ -1876,6 +1967,11 @@ xrootd_collector_otlp_cache_stored_total    (bodies written to the disk cache)
 xrootd_collector_otlp_cache_replayed_total  (cached bodies replayed)
 xrootd_collector_otlp_dropped_total         (bodies dropped: no/failed cache)
 ```
+
+`*_overflow_total` and `*_dropped_total` are both data loss but say different
+things: a dropped body means a POST failed with no disk cache to fall back on
+(set `--cache-dir`), while an overflow means the destination — or its cache —
+cannot keep up with the input.
 
 With `--tcp-port`, the shovel listener adds:
 
@@ -2045,6 +2141,18 @@ Grafana](#loki--grafana) below.
   such consumer, since it materialises a full JSON tree per batch — reports
   `xrootd_collector_memory_floored_total` instead of shrinking further. Use a
   cgroup limit (`MemoryMax=`) if you need a hard bound.
+- A destination that cannot keep up loses data rather than slowing the collector
+  down. Its queue is bounded in bytes, and a full queue drops its oldest body
+  (`xrootd_collector_post_overflow_total` /
+  `xrootd_collector_otlp_overflow_total`, labelled by `destination`). This is
+  deliberate — the alternative is one slow endpoint throttling every other sink
+  and, eventually, the UDP socket — but it means a destination whose throughput
+  is chronically below the input rate needs fixing, not tuning: set
+  `--cache-dir` so failures spool, and watch the overflow counters.
+- A payload that is not valid UTF-8 terminates the process. `nlohmann::json`
+  refuses to serialize it and nothing in the decode path catches the exception.
+  It has never been observed in the wild — LFNs come from a filesystem — but it
+  is a crash, not a dropped document.
 - UDP is lossy: a lost open record yields an orphan close
   (`xrootd_collector_orphan_closes_total{cluster,server}`); a lost close leaves a
   stale open, reclaimed at that user's disconnect or by `--file-ttl` and

@@ -180,7 +180,9 @@ Write the file/stdout sink in OpenSearch \fB_bulk\fR format using \fIindex\fR.
 \fB--os-url\fR \fIurl\fR
 .RS 5
 POST documents to an OpenSearch cluster's \fB_bulk\fR API at \fIurl\fR. Requires
-that \fBxrdmoncollect\fR was built with libcurl.
+that \fBxrdmoncollect\fR was built with libcurl. This defines the destination
+named \fBdefault\fR; further destinations are declared in the configuration file
+(see \fBMULTIPLE DESTINATIONS\fR).
 .RE
 \fB--os-index\fR \fIname\fR
 .RS 5
@@ -212,7 +214,10 @@ Target is an OpenSearch data stream; use the \fBcreate\fR bulk action instead of
 Export documents as OTLP/JSON to an OpenTelemetry endpoint (an OpenTelemetry
 Collector, Grafana Alloy, or any OTLP/HTTP receiver): logs are POSTed to
 \fIurl\fR\fB/v1/logs\fR and, with \fB--spans\fR, spans to \fIurl\fR\fB/v1/traces\fR,
-with \fBContent-Type: application/json\fR. The nested \fBresource\fR/\fBattributes\fR
+with \fBContent-Type: application/json\fR. This defines the destination named
+\fBdefault\fR; further destinations are declared in the configuration file (see
+\fBMULTIPLE DESTINATIONS\fR).
+The nested \fBresource\fR/\fBattributes\fR
 objects are re-encoded into the strict OTLP \fBresourceLogs\fR/\fBresourceSpans\fR
 envelope with typed \fBKeyValue\fR attributes. Batched per flush on a dedicated
 output thread with retry/backoff; with \fB--cache-dir\fR a body that still fails
@@ -238,11 +243,18 @@ Directory for the on-failure disk cache, shared by the OpenSearch and OTLP sinks
 (and, in shoveler mode, the frame spool). When set, a body that still fails to
 POST after retries is written under \fIdir\fR
 and retried oldest-first once the sink recovers; files left by a previous run are
-replayed on startup. The OpenSearch \fB_bulk\fR bodies live directly under
-\fIdir\fR; the OTLP bodies live under the \fBotlp-logs\fR and \fBotlp-traces\fR
-subdirectories (they replay to different endpoints); shoveled frame buffers live
-under \fBshovel\fR. The sink caches have no size limit (the shovel spool is
-capped by \fB--spool-max\fR).
+replayed on startup. Each destination caches separately, since each recovers on its own schedule.
+For the destination named \fBdefault\fR the OpenSearch \fB_bulk\fR bodies live
+directly under \fIdir\fR and the OTLP bodies under the \fBotlp-logs\fR and
+\fBotlp-traces\fR subdirectories (logs and traces replay to different
+endpoints); a destination named \fIn\fR uses \fBos-\fR\fIn\fR, or
+\fBotlp-\fR\fIn\fR\fB-logs\fR and \fBotlp-\fR\fIn\fR\fB-traces\fR. Shoveled
+frame buffers live under \fBshovel\fR. The sink caches have no size limit (the
+shovel spool is capped by \fB--spool-max\fR).
+A destination that has a cache does not retry a live POST: it fails fast and
+spills to disk, and the replay path carries the retry ladder. Holding a body for
+the length of the ladder would let the queue behind it overflow with a working
+cache configured.
 When unset (the default), a body that cannot be posted is dropped (counted in
 \fBxrootd_collector_dropped_bulk_total\fR / \fBxrootd_collector_otlp_dropped_total\fR).
 .RE
@@ -575,6 +587,58 @@ forward = logstash.example.org:5044
 max-memory = 1G
 .fi
 .RE
+.SS Multiple destinations
+Both HTTP sinks accept any number of destinations. The flat \fBos-*\fR and
+\fBotlp-*\fR keys, and their command-line equivalents, define the one named
+\fBdefault\fR; each additional endpoint gets an \fB[opensearch "\fIname\fB"]\fR
+or \fB[otlp "\fIname\fB"]\fR section. The typical use is a site keeping its own
+monitoring while also feeding a central collector, from one instance rather than
+two. There is no command-line equivalent.
+.P
+.RS 5
+.nf
+[xrdmoncollect]
+port = 9930
+cache-dir = /var/lib/xrootd/moncollect
+
+[otlp "local"]
+url = http://alloy.example.org:4318
+
+[otlp "wlcg"]
+url = https://otel.wlcg.example:4318
+token = @/etc/xrootd/wlcg.token
+
+[opensearch "site"]
+url = https://opensearch.example.org:9200
+index = site-transfers
+.fi
+.RE
+.P
+Keys inside an \fB[opensearch]\fR section are \fBurl\fR (required), \fBindex\fR,
+\fBuser\fR, \fBpass\fR, \fBtoken\fR, \fBinsecure\fR and \fBdatastream\fR; inside
+an \fB[otlp]\fR section, \fBurl\fR (required), \fBtoken\fR and \fBinsecure\fR.
+They are the long-option names without the \fBos-\fR/\fBotlp-\fR prefix, and an
+unrecognised one is a fatal error.
+.P
+A named section \fBinherits nothing\fR from the flat keys, not even the index:
+inheriting would make the result depend on whether a value came from the file or
+the command line, since the two are read in that order, and an inherited
+credential would silently be POSTed to an endpoint it was never meant for. Every
+key defaults to what the corresponding option defaults to.
+.P
+Every destination runs its own thread, queue, retry state and disk-cache
+directory, and every sink metric carries a \fBdestination\fR label. One that is
+slow or unreachable can neither stall the collector nor affect another: its
+queue is bounded in bytes and drops its oldest body when full, counted in
+\fBxrootd_collector_post_overflow_total\fR /
+\fBxrootd_collector_otlp_overflow_total\fR (which is distinct from a drop after
+a failed POST -- an overflow means the destination cannot keep up, not that a
+disk cache is missing).
+.P
+A section name must start with a letter or digit and may contain only letters,
+digits, \fB_\fR, \fB-\fR and \fB.\fR; it becomes both a directory component
+under \fB--cache-dir\fR and a Prometheus label value. Names are compared without
+regard to case, and \fBdefault\fR is reserved for the flat keys.
 .SS Document filtering
 The configuration file may also carry any number of \fB[filter "\fIname\fB"]\fR
 sections, each one a rule matched against every finished document just before it

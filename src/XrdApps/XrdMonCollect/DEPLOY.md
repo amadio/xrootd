@@ -338,6 +338,12 @@ metrics-port = 9932
 
 ### 3.2 Central collector
 
+Both HTTP sinks accept any number of destinations. The `otlp-*`/`os-*` keys
+below define the one named `default`; the section after this one shows how to
+add a second — the case this exists for is a site keeping its own monitoring
+while also feeding a central WLCG collector, from one collector rather than
+two.
+
 ```ini
 # /etc/xrootd/xrdmoncollect.cfg — site collector host (collector mode)
 [xrdmoncollect]
@@ -364,7 +370,8 @@ spans = true
 # os-pass = <password>            # or: os-token = @/etc/xrootd/opensearch.token
 
 # On-failure disk cache: bodies that fail to POST are spooled here and
-# replayed oldest-first (survives collector restarts).
+# replayed oldest-first (survives collector restarts). Each destination
+# caches separately, under its own subdirectory.
 cache-dir = /var/lib/xrootd/moncollect
 
 # Prometheus self-metrics: decoder health, packet loss, sink health,
@@ -425,6 +432,53 @@ the ingest volume. The collector reports the rules it loaded at start-up:
 ```
 xrdmoncollect: 2 filter rule(s) loaded (1 tag, 1 drop, 0 keep)
 ```
+
+#### Local monitoring plus a central collector
+
+Append a section per additional endpoint. The keys above are the destination
+named `default`; each section is another, with its own thread, queue, retry
+state and cache subdirectory. A dead central collector therefore cannot stall
+the site's own monitoring, or vice versa.
+
+```ini
+# Continues /etc/xrootd/xrdmoncollect.cfg above.
+
+# A central WLCG collector, alongside the site's own Alloy above.
+[otlp "wlcg"]
+url   = https://otel.wlcg.example:4318
+token = @/etc/xrootd/wlcg.token
+
+# ...or a second OpenSearch cluster, writing a differently named index.
+[opensearch "wlcg"]
+url        = https://es.wlcg.example:9200
+index      = wlcg-transfers
+datastream = true
+token      = @/etc/xrootd/wlcg-os.token
+```
+
+A named section **inherits nothing** from the keys above, not even the index —
+spell out what each destination needs. That is deliberate: an inherited
+credential would send the site's own OpenSearch password to the central
+endpoint on every batch.
+
+With `cache-dir = /var/lib/xrootd/moncollect` the layout becomes:
+
+```
+/var/lib/xrootd/moncollect/
+├── *.ndjson             # OpenSearch "default" (unchanged from before)
+├── os-wlcg/             # [opensearch "wlcg"]
+├── otlp-logs/           # OTLP "default"
+├── otlp-traces/
+├── otlp-wlcg-logs/      # [otlp "wlcg"]
+└── otlp-wlcg-traces/
+```
+
+Every sink metric gains a `destination` label, so existing `sum(...)` alerts
+keep working while `sum by (destination) (...)` shows which endpoint is in
+trouble. Two new counters,
+`xrootd_collector_post_overflow_total` and `xrootd_collector_otlp_overflow_total`,
+count bodies dropped because a destination's queue filled — distinct from
+`dropped_*`, which means a POST failed with no disk cache to spill to.
 
 TLS note: `otlp-url` is HTTPS. If Alloy uses the self-signed certificate
 from section 13.1, add it to the collector host's trust store rather than
@@ -2287,7 +2341,8 @@ All from the `moncollect` Prometheus job (section 9):
 | collector/shoveler down | `up{job="moncollect"} == 0` | pipeline blind |
 | packet loss | `rate(xrootd_collector_packets_lost_total[10m]) > 0` | UDP loss — check MTU/`fbsz` (section 2.1) and `rcvbuf` |
 | malformed input | `rate(xrootd_collector_malformed_total[10m]) > 0` | truncation or stray traffic on the port |
-| sink failing | `rate(xrootd_collector_post_failures_total[10m]) > 0` or the `otlp_*` failure counters | backend unreachable — spool is absorbing |
+| sink failing | `sum by (destination) (rate(xrootd_collector_post_failures_total[10m])) > 0` or the `otlp_*` failure counters | that backend is unreachable — spool is absorbing |
+| sink shedding | `rate(xrootd_collector_post_overflow_total[10m]) > 0` or `otlp_overflow_total` | that destination cannot keep up with the input; its queue filled and dropped its oldest bodies. Data loss, distinct from `dropped_*` (a failed POST with nowhere to spill) |
 | spool backlog | `xrootd_collector_cache_files` growing for >1 h | backend outage outlasting the buffer |
 | shovel spool dropping | `rate(xrootd_shoveler_spool_dropped_total[10m]) > 0` | outage exceeded `spool-max` — data loss |
 | state pressure | `xrootd_collector_evicted_total` climbing | raise `max-memory` or lower `server-ttl` |

@@ -200,3 +200,34 @@ TEST(XrdMonDiskCache, MaxBytesDropsOldest)
    ASSERT_EQ(rec.seen.size(), 1u);
    EXPECT_EQ(rec.seen[0], "ddddddddd");     // only the newest survived
 }
+
+// Several destinations nest their caches under one --cache-dir, so a sibling
+// cache's directory can sit inside this one's scan. Adopting it as a body
+// would have the replay read a directory, fail, and unlink it -- taking the
+// other destination's whole backlog with it.
+TEST(XrdMonDiskCache, IgnoresSubdirectoriesInTheScan)
+{
+   const std::string d = freshDir("dc-nested");
+   {XrdMonDiskCache seed(d);
+    std::string e;
+    ASSERT_TRUE(seed.Init(e)) << e;
+    ASSERT_TRUE(seed.Store("real-body", e)) << e;
+   }
+   // A sibling destination's cache, named so it matches the default suffix.
+   ASSERT_EQ(system(("mkdir -p '" + d + "/os-central.ndjson'").c_str()), 0);
+
+   XrdMonDiskCache c(d);
+   std::string e;
+   ASSERT_TRUE(c.Init(e)) << e;
+   EXPECT_EQ(c.Files(), 1u);
+
+   Recorder rec;
+   auto cb = [&](const std::string& b){ return rec(b); };
+   EXPECT_EQ(c.ReplayOldest(cb, e), 1);
+   ASSERT_EQ(rec.seen.size(), 1u);
+   EXPECT_EQ(rec.seen[0], "real-body");
+   EXPECT_EQ(c.ReplayOldest(cb, e), 0);         // nothing else was adopted
+
+   // The sibling's directory is still there.
+   EXPECT_EQ(system(("test -d '" + d + "/os-central.ndjson'").c_str()), 0);
+}

@@ -1924,6 +1924,9 @@ int main(int argc, char* argv[])
        // same name in the exposition, which strict OpenMetrics parsers reject.
        OBS("unknown_packets_total",
            "packets with an unhandled stream code", unknown);
+       OBS("invalid_utf8_total",
+           "wire strings repaired because their bytes were not valid UTF-8",
+           badUtf8);
        OBS("evicted_total",
            "dictionary/open-file entries evicted by the memory budget", evicted);
        OBS("reaped_servers_total",

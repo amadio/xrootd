@@ -767,7 +767,7 @@
       "id": 11,
       "type": "timeseries",
       "title": "Ingest funnel",
-      "description": "What arrives against what leaves. Packets received and documents emitted are the two ends; malformed, unknown-stream, filtered and estimated-lost account for what does not make it through. Filtered documents were dropped deliberately by a [filter] rule, so they are not a fault.",
+      "description": "What arrives against what leaves. Packets received and documents emitted are the two ends; malformed, unknown-stream, filtered and estimated-lost account for what does not make it through. Filtered documents were dropped deliberately by a [filter] rule, so they are not a fault. Repaired strings are not a loss either -- the document is emitted with U+FFFD where the server sent bytes that were not valid UTF-8 -- but a steady rate of them means something upstream is naming files in another encoding.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -877,6 +877,17 @@
           "expr": "sum(rate(xrootd_collector_packets_lost_total{site=~\"$site\",instance=~\"$collector\",cluster=~\"$cluster\",server=~\"$server\"}[$__rate_interval]))",
           "legendFormat": "estimated lost",
           "refId": "F",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(xrootd_collector_invalid_utf8_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
+          "legendFormat": "non-UTF-8 strings repaired",
+          "refId": "G",
           "range": true
         }
       ]

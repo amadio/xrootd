@@ -115,6 +115,8 @@ struct Stats
                              // state budget already at its floor (the memory
                              // is not in the correlation state)
    Count unknown;            // packets with an unhandled code
+   Count badUtf8;            // wire strings whose bytes were not valid UTF-8
+                             // and were repaired on the way in
 };
 
 //! Process one UDP datagram received from sender `src` (used, together with
@@ -590,6 +592,12 @@ double   toServerClock(const Server& srv, double t) const
 //! cluster and the bare source IP.
 void     Malformed(const std::string& src, unsigned char code,
                    const char* reason, const Server* srv = nullptr);
+//! Repair a string that came straight off the wire, counting it if its bytes
+//! were not valid UTF-8. Apply it to the raw record text, before anything is
+//! cut out of it: every descriptor field, CGI value, LFN and error message
+//! derived from it is then clean, and so is everything downstream -- the
+//! documents, the state file and the metric labels.
+void     Scrub(std::string& s) {if (XrdMonUtf8Clean(s)) stats.badUtf8++;}
 void     DecodeMap(unsigned char code, Server& srv,
                    uint32_t dictid, const char* info, int ilen);
 void     DecodeIdent(const std::string& src, int32_t stod, Server& srv,

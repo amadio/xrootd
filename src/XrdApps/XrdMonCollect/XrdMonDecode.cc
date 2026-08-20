@@ -1117,7 +1117,7 @@ constexpr int kStateVersion = 3;
    X(mapIdnt) X(mapTokn) X(mapUeac) X(opens) X(closes) X(xfrs) X(discs)   \
    X(docs) X(failed) X(orphanCls) X(staleOpens) X(traces) X(gevents)      \
    X(redirs) X(spans) X(frmEvents) X(lost) X(evicted) X(reaped)            \
-   X(memFloored) X(unknown)
+   X(memFloored) X(unknown) X(badUtf8)
 }
 
 bool XrdMonDecode::SaveState(const std::string& path) const
@@ -1914,6 +1914,7 @@ void XrdMonDecode::DecodeMap(unsigned char code, Server& srv,
 // terminated up to ilen).
 //
    std::string text(info, ilen > 0 ? ilen : 0);
+   Scrub(text);
    std::string first = text.substr(0, text.find('\n'));
 
    if (code == XROOTD_MON_MAPUSER)
@@ -2041,6 +2042,7 @@ void XrdMonDecode::DecodeIdent(const std::string& src, int32_t stod,
 // &ver=". The first line carries the login user and host, the second a CGI tail.
 //
    std::string text(info, ilen > 0 ? ilen : 0);
+   Scrub(text);
    std::string first = text.substr(0, text.find('\n'));
 
    ServerIdent& id = srv.ident;
@@ -2102,6 +2104,7 @@ void XrdMonDecode::DecodeFrm(const std::string& src, int32_t stod, Server& srv,
 // for purge records). 'x' carries stage and migrate, 'p' carries purge.
 //
    std::string text(info, ilen > 0 ? ilen : 0);
+   Scrub(text);
    auto nl1  = text.find('\n');
    std::string who  = text.substr(0, nl1);
    std::string rest = (nl1 == std::string::npos) ? "" : text.substr(nl1 + 1);
@@ -2256,6 +2259,7 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
                           const char* l = (const char*)(rec + 20);
                           int maxL = recSize - 20;
                           of.lfn.assign(l, strnlen(l, maxL));
+                          Scrub(of.lfn);
                          }
                       // Register the file under its user so a disconnect can
                       // sweep opens whose close record was lost (DropUserFiles).
@@ -2803,6 +2807,7 @@ std::string XrdMonDecode::otelError(json& a, const unsigned char* err,
    a["xrootd.error.code"]      = ri32(err);
    const char* m = (const char*)(err + 8);
    std::string msg(m, strnlen(m, errLen - 8));
+   Scrub(msg);
    if (!msg.empty()) a["error.type"] = msg;
    return cat;
 }
@@ -2832,9 +2837,14 @@ void XrdMonDecode::EmitError(const std::string& src, int32_t stod, Server& srv,
    if ((recFlag & XrdXrootdMonFileHdr::hasLFN) && recSize > 12)
       {user = rd32(rec + 8);
        const char* l = (const char*)(rec + 12);
-       std::string lfn(l, strnlen(l, recSize - 12));
+       const std::size_t llen = strnlen(l, recSize - 12);
+       std::string lfn(l, llen);
+       Scrub(lfn);
        setFile(a, lfn);
-       off = 12 + (int)lfn.size() + 1;       // past the lfn's terminating null
+       // From the wire length, not lfn.size(): repairing the encoding is what
+       // makes the two differ, and the error block that follows is found by
+       // walking the record, not the repaired copy.
+       off = 12 + (int)llen + 1;             // past the lfn's terminating null
        otelIdentity(a, srv, user);
        // A failed operation still dates the session: it happened while the
        // client was connected, and a session may consist of nothing else.
@@ -3500,6 +3510,7 @@ void XrdMonDecode::DecodeRStream(const std::string& src, int32_t stod,
              slen = savail;
             }
          std::string hp(sp, slen > 0 ? strnlen(sp, slen) : 0);
+         Scrub(hp);
 
          stats.redirs++;
          const char* kind = (type & 0xf0) == XROOTD_MON_REDLOCAL

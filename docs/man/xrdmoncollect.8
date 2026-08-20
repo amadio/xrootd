@@ -570,6 +570,12 @@ structurally invalid packets (\fBbad_plen\fR, \fBshort_packet\fR,
 \fB--debug\fR to log the server, stream, and reason of each rejected packet.
 \fBunknown_packets_total\fR counts unhandled stream codes (usually stray
 traffic on the port).
+\fBinvalid_utf8_total\fR counts strings arriving off the wire whose bytes were
+not valid UTF-8. Each offending byte is replaced with U+FFFD as the string is
+read, before any field is cut out of it, so the document is emitted with one
+mangled field rather than dropped and the state file and metric labels carry
+the same repaired bytes. A steady rate means files are being named in an
+encoding other than UTF-8, which JSON cannot represent faithfully.
 .SH CONFIGURATION FILE
 Options may be supplied in an INI configuration file as an alternative to the
 command line. The file is loaded from the path given with \fB-c\fR, or

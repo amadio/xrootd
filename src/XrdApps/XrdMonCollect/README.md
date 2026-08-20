@@ -1664,6 +1664,9 @@ stream class, and the metrics tell them apart:
   `packets_total{stream="g:<provider>"}` like the binary form.
 - `unknown_packets_total` — packets with an unhandled stream code (usually
   stray traffic, e.g. a scanner hitting the port).
+- `invalid_utf8_total` — wire strings repaired because their bytes were not
+  valid UTF-8 (see Limitations). Counts strings, not packets: one record can
+  contribute several.
 
 ## Deployment and tuning
 
@@ -1913,6 +1916,7 @@ xrootd_collector_packets_total{cluster,server,stream}
 xrootd_collector_packets_lost_total{cluster,server,stream}
 xrootd_collector_malformed_total{cluster,server,stream,reason}
 xrootd_collector_unknown_packets_total      (packets with an unhandled stream code)
+xrootd_collector_invalid_utf8_total         (wire strings repaired: bytes were not UTF-8)
 xrootd_collector_disconnects_total          (f-stream session disconnect records)
 xrootd_collector_evicted_total              (entries evicted by the memory budget)
 xrootd_collector_reaped_servers_total       (incarnations reclaimed by --server-ttl)
@@ -2149,10 +2153,16 @@ Grafana](#loki--grafana) below.
   and, eventually, the UDP socket — but it means a destination whose throughput
   is chronically below the input rate needs fixing, not tuning: set
   `--cache-dir` so failures spool, and watch the overflow counters.
-- A payload that is not valid UTF-8 terminates the process. `nlohmann::json`
-  refuses to serialize it and nothing in the decode path catches the exception.
-  It has never been observed in the wild — LFNs come from a filesystem — but it
-  is a crash, not a dropped document.
+- Strings that are not valid UTF-8 are repaired, not rejected. XRootD carries
+  path and identity bytes verbatim, and JSON is defined over Unicode, so a file
+  named in some other encoding has no faithful representation in the output.
+  Every string is checked as it arrives off the wire and each byte that is not
+  part of a well-formed sequence is replaced with U+FFFD, counted in
+  `xrootd_collector_invalid_utf8_total`. The document is emitted with one
+  mangled field rather than dropped, and the repair happens once, before the
+  descriptor is split — so the document, the state file and the metric labels
+  all carry the same bytes. A non-zero rate means something upstream is naming
+  files in another encoding; it is not packet loss and not a collector fault.
 - UDP is lossy: a lost open record yields an orphan close
   (`xrootd_collector_orphan_closes_total{cluster,server}`); a lost close leaves a
   stale open, reclaimed at that user's disconnect or by `--file-ttl` and

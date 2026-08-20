@@ -1104,7 +1104,8 @@ constexpr int kStateVersion = 3;
    X(packets) X(malformed) X(records) X(mapUser) X(mapPath) X(mapInfo)    \
    X(mapIdnt) X(mapTokn) X(mapUeac) X(opens) X(closes) X(xfrs) X(discs)   \
    X(docs) X(failed) X(orphanCls) X(staleOpens) X(traces) X(gevents)      \
-   X(redirs) X(spans) X(frmEvents) X(lost) X(evicted) X(reaped) X(unknown)
+   X(redirs) X(spans) X(frmEvents) X(lost) X(evicted) X(reaped)            \
+   X(memFloored) X(unknown)
 }
 
 bool XrdMonDecode::SaveState(const std::string& path) const
@@ -1689,6 +1690,111 @@ void XrdMonDecode::EnforceBudget()
        && ((maxBytes   && lruBytes   > low)
         || (maxEntries && lru.size() > maxEntries)))
         EvictFront();
+}
+
+/******************************************************************************/
+/*                  R S S   c o n t r o l   l o o p                           */
+/******************************************************************************/
+
+namespace
+{
+// Control period. Not chosen for the cost of the sample -- reading
+// /proc/self/statm is a few microseconds -- but to couple the sample to the
+// trim. Integrating against an RSS reading that predates the last release
+// would wind the budget down two or three times for one error.
+//
+constexpr long kMemTickSecs = 15;
+
+// Absolute floor on the charged state budget. Below roughly this much the
+// collector stops doing its job: every close becomes an orphan and documents
+// lose their identity, which converts a memory problem into a correctness one.
+//
+constexpr std::size_t kStateFloorBytes = 8u << 20;
+
+// How long to stay quiet between warnings about being stuck at the floor.
+constexpr long kFloorWarnSecs = 300;
+}
+
+void XrdMonDecode::SetMaxRss(std::size_t n)
+{
+   maxRss = n;
+   if (!n) return;
+
+// The ceiling is a sanity bound, not the operative limit -- the loop is. It is
+// maxRss/8 because bytesOf() under-counts real memory by 4-8x, so a charged
+// budget of R/8 already corresponds to something like 0.5R-1R of real state;
+// past that the state alone could fill the cap.
+//
+   rssCeil  = n / 8;
+   rssFloor = std::min(std::max(kStateFloorBytes, n/128), rssCeil/2);
+   maxBytes = rssCeil;          // start optimistic; the loop only descends
+}
+
+// One step of the loop: additive-increase, proportional-decrease over the
+// existing eviction path. Fast down, slow up, because memory pressure is
+// urgent and recovery is not.
+//
+void XrdMonDecode::MemoryTick(time_t now)
+{
+   if (!maxRss || !memHooks.rss)         return;   // loop disabled
+   if (now - lastMemTick < kMemTickSecs) return;
+   lastMemTick = now;
+
+   std::size_t rss = memHooks.rss();
+   if (!rss) return;                               // unreadable: hold station
+
+   if (rss > maxRss)
+      {std::size_t over = rss - maxRss;
+
+// Every charged byte released frees at least four real ones, since bytesOf()
+// counts held strings plus a flat constant and charges nothing for the map
+// nodes, bucket arrays, Server structs or gsPrev. Shrinking by over/4
+// therefore targets the actual overage: unity gain in the quantity being
+// controlled rather than in the proxy. The true ratio can be 8, so this is
+// under-damped by at most 2x and converges over a few ticks instead of
+// slamming to the floor on the first one.
+//
+       std::size_t step = std::max(over/4, rssFloor/16);
+
+// Shrink from what the state actually holds, not from the nominal budget: a
+// budget already below lruBytes can release nothing, so winding it down there
+// is integrator windup that only delays recovery.
+//
+       std::size_t held = std::min(maxBytes, lruBytes);
+       maxBytes = std::max(held > step ? held - step : rssFloor, rssFloor);
+
+       std::uint64_t before = stats.evicted;
+       EnforceBudget();
+       if (memHooks.release) memHooks.release();
+
+// Over the cap, at the floor, and eviction found nothing left to take. The
+// memory is somewhere this loop does not own, and saying so is the whole point
+// of having a floor rather than evicting until the state is gone.
+//
+       if (maxBytes <= rssFloor && stats.evicted == before)
+          {stats.memFloored++;
+           if (now - lastFloorWarn >= kFloorWarnSecs)
+              {lastFloorWarn = now;
+               fprintf(stderr, "xrdmoncollect: resident memory %lluM exceeds the "
+                       "%lluM cap with the correlation state already at its "
+                       "%lluM floor; the memory is not in the correlation state "
+                       "(check the OTLP batch, the disk cache, and the "
+                       "container's own memory limit)\n",
+                       (unsigned long long)(rss      >> 20),
+                       (unsigned long long)(maxRss   >> 20),
+                       (unsigned long long)(rssFloor >> 20));
+              }
+          }
+      }
+      else if (rss + maxRss/16 < maxRss && maxBytes < rssCeil)
+      {
+// Deadband: without it the budget hunts across the cap. Sixteen ticks (four
+// minutes) from floor to ceiling is fast enough that a transient does not
+// cripple correlation for long, slow enough that the loop cannot oscillate
+// against the lag between evicting and the allocator reflecting it.
+//
+       maxBytes = std::min(rssCeil, maxBytes + rssCeil/16);
+      }
 }
 
 /******************************************************************************/

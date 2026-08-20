@@ -552,6 +552,10 @@ sys.exit(1 if bad else 0)
 			"${metrics}"
 		assert grep -Eq "^xrootd_collector_state_entries\{site=\"${SITE}\"\} [1-9]" \
 			"${metrics}"
+		# The memory cap's setpoint. Non-zero because --max-memory defaults on;
+		# without it the control loop would be silently inert.
+		assert grep -Eq "^xrootd_collector_state_budget_bytes\{site=\"${SITE}\"\} [1-9]" \
+			"${metrics}"
 		# The "process" subsystem: a second subsystem on the same registry, so
 		# this also proves the global site label reaches beyond "collector".
 		assert grep -Eq "^xrootd_process_resident_memory_bytes\{site=\"${SITE}\"\} [1-9]" \

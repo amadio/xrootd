@@ -95,6 +95,9 @@ struct Stats
    uint64_t lost      = 0;   // estimated lost packets (pseq gaps)
    uint64_t evicted   = 0;   // dictionary/open-file entries evicted (budget/cap)
    uint64_t reaped    = 0;   // idle server incarnations reclaimed (server TTL)
+   uint64_t memFloored= 0;   // control ticks spent over the RSS cap with the
+                             // state budget already at its floor (the memory
+                             // is not in the correlation state)
    uint64_t unknown   = 0;   // packets with an unhandled code
 };
 
@@ -133,6 +136,37 @@ void SetMaxBytes(std::size_t n) {maxBytes = n;}
 //! Optional hard cap on the total number of correlation entries (0 = off).
 //! A secondary backstop to the byte budget, evicting least-recently-used.
 void SetMaxEntries(std::size_t n) {maxEntries = n;}
+
+//! Platform hooks the RSS control loop needs, injected rather than linked so
+//! this object carries no platform code and so unit tests can drive the loop
+//! with a scripted RSS. `rss` returns the process resident set size in bytes
+//! (0 = unknown, which parks the loop); `release` asks the allocator to return
+//! free heap to the OS. Both are called only from the thread that owns this
+//! decoder. Leaving either empty disables the loop -- its default state, which
+//! is what keeps the fixed-budget SetMaxBytes() tests deterministic.
+struct MemoryHooks
+{
+   std::function<std::size_t()> rss;
+   std::function<void()>        release;
+};
+void SetMemoryHooks(MemoryHooks h) {memHooks = std::move(h);}
+
+//! Cap on TOTAL process resident memory (0 = off), the meaning of
+//! --max-memory.
+//!
+//! Best-effort, not a guarantee: only the correlation state is under this
+//! object's control, so the loop responds to an overage by lowering the state
+//! budget and reports memFloored once it has nothing left to give. Sets the
+//! initial state budget, so call it before SetMaxBytes() if both are used.
+void SetMaxRss(std::size_t n);
+
+//! One step of the RSS control loop; see MemoryTick's definition for the rule.
+//! Cheap and self-rate-limiting, so the caller may invoke it every time round
+//! its loop. Must run on the thread that owns this decoder.
+void MemoryTick(time_t now);
+
+//! The state budget the loop is currently enforcing, in charged bytes.
+std::size_t MaxBytes() const {return maxBytes;}
 
 //! Reclaim a whole server incarnation (its dictionaries and g-stream counter
 //! baselines) once it has gone silent for more than `secs` seconds, bounding
@@ -736,6 +770,16 @@ std::list<LruNode> lru;            // front = least-recently-used, back = MRU
 std::size_t maxBytes   = 0;        // byte budget (0 = unbounded)
 std::size_t lruBytes   = 0;        // currently charged bytes
 std::size_t maxEntries = 0;        // optional entry-count backstop (0 = off)
+
+// RSS control loop (see MemoryTick). maxRss is the process cap from
+// --max-memory; rssCeil and rssFloor bound the state budget it steers.
+//
+MemoryHooks memHooks;
+std::size_t maxRss     = 0;        // process RSS cap (0 = loop disabled)
+std::size_t rssCeil    = 0;        // largest state budget the loop will set
+std::size_t rssFloor   = 0;        // smallest, below which correlation breaks
+time_t      lastMemTick  = 0;
+time_t      lastFloorWarn = 0;
 long        serverTTL  = 0;        // idle-incarnation reap age, secs (0 = off)
 long        fileTTL    = 0;        // stale open-file entry age, secs (0 = off)
 bool     resolveHosts = true;

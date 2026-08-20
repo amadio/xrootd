@@ -56,8 +56,16 @@ class XrdMonDecode
 public:
 
 //! Called with one finished transfer document, serialized as a single JSON
-//! object (no trailing newline). The caller frames it for its sink.
+//! object (no trailing newline). The caller frames it for its sink. May be
+//! empty, in which case no document is ever serialized — see TreeSink.
 using DocSink = std::function<void(const std::string& jsonDoc)>;
+
+//! Called with the same finished document as a live JSON tree, immediately
+//! before the DocSink and independently of it. A consumer that re-encodes the
+//! document (the OTLP batch) takes this one, so the text form is produced only
+//! for consumers that genuinely want text and a document is never serialized
+//! and parsed back.
+using TreeSink = std::function<void(const nlohmann::json& jsonDoc)>;
 
 //! Optional: called with one JSON object per decoded record (dump mode).
 using RawSink = std::function<void(const std::string& jsonRec)>;
@@ -214,6 +222,10 @@ void SetEmitSessions(bool v) {emitSessions = v;}
 //! logs it can be high volume. Building the session span uses the per-session
 //! rollup, so it is only meaningful together with SetEmitSessions.
 void SetEmitSpans(bool v) {emitSpans = v;}
+
+//! Install the tree sink (see TreeSink). Independent of the DocSink: a
+//! document is emitted if either is set, and each is called at most once.
+void SetTreeSink(TreeSink v) {tree = std::move(v);}
 
 //! Override the wall clock the decoder samples. Map records carry no time of
 //! their own, so their arrival has to be timed here; the same clock anchors the
@@ -752,6 +764,7 @@ std::unordered_map<std::string, Server> servers;
 // by "<server>|<provider>|<metric>".
 std::unordered_map<std::string, uint64_t> gsPrev;
 DocSink  doc;
+TreeSink tree;
 RawSink  raw;
 std::function<time_t()> nowFn;   // wall-clock source; empty = time(nullptr)
 bool     dumpRaw;

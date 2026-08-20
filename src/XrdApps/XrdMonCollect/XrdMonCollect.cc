@@ -655,7 +655,7 @@ int runShoveler(const char* prog, const ShovelerOpts& o)
        std::string buf;
        for (;;)
           {if (recvPipe.takeFor(b, 1000))
-              {buf.clear();
+              {XrdMonRecycleBody(buf);   // reused every batch; do not keep a peak
                std::size_t n = 0;
                for (auto& p : b)
                    if (XrdMonShovelEncode(buf, (const sockaddr*)&p.addr,
@@ -1670,7 +1670,7 @@ int main(int argc, char* argv[])
                          }
                          else if (droppedBulk) ++*droppedBulk;  // no cache: drops
                      }
-                  body.clear();
+                  XrdMonRecycleBody(body);
                   postPipe.recycle(std::move(body));
                  }
                  else
@@ -1742,7 +1742,7 @@ int main(int argc, char* argv[])
                          }
                          else if (otlpDropped) ++*otlpDropped;   // no cache: drops
                      }
-                  m.body.clear();
+                  XrdMonRecycleBody(m.body);
                   otlpPipe.recycle(std::move(m));
                  }
                  else

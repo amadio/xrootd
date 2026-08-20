@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "XrdApps/XrdMonCollect/XrdMonMemory.hh"
@@ -69,4 +70,33 @@ TEST(XrdMonMemory, ReleaseAndTuneAreRepeatable)
 
    if (!XrdMonProcessRss()) GTEST_SKIP() << "no RSS reader on this platform";
    EXPECT_GT(XrdMonProcessRss(), 0u);   // still readable afterwards
+}
+
+// The recycling pipes exist so bodies do not reallocate every batch, so a
+// normal-sized body must come back with its capacity intact -- otherwise this
+// "fix" would quietly undo the optimisation it is protecting.
+//
+TEST(XrdMonMemory, RecycleKeepsOrdinaryBodyWarm)
+{
+   std::string b(64 * 1024, 'x');
+   std::size_t was = b.capacity();
+
+   XrdMonRecycleBody(b);
+
+   EXPECT_TRUE(b.empty());
+   EXPECT_EQ(b.capacity(), was);        // still warm for the next batch
+}
+
+// The case that motivates it: one outsized batch would otherwise pin its peak
+// in one of the thirty-two recycled slots for the life of the process.
+//
+TEST(XrdMonMemory, RecycleReleasesOutlierCapacity)
+{
+   std::string b(8 * kMiB, 'x');
+   ASSERT_GT(b.capacity(), kBodyKeepBytes);
+
+   XrdMonRecycleBody(b);
+
+   EXPECT_TRUE(b.empty());
+   EXPECT_LE(b.capacity(), kBodyKeepBytes);
 }

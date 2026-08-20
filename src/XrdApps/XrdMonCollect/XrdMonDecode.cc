@@ -723,7 +723,7 @@ void XrdMonDecode::otelBegin(json& j, const char* eventName, double tSecs,
 void XrdMonDecode::emitSpan(const json& src, const char* name, double tBeg,
                             double tEnd, const std::string& parentSpanId)
 {
-   if (!emitSpans || !doc) return;
+   if (!emitSpans || (!doc && !tree)) return;
 
 // A span reuses the log record's resource, event attributes and trace/span ids,
 // but swaps the log envelope (severity/timeUnixNano) for the OTLP span fields
@@ -757,22 +757,26 @@ void XrdMonDecode::emitSpan(const json& src, const char* name, double tBeg,
    sp["status"] = status;
 
    stats.spans++;
-   doc(sp.dump());
+   if (tree) tree(sp);
+   if (doc)  doc(sp.dump());
 }
 
 /******************************************************************************/
 /*                              e m i t D o c                                 */
 /******************************************************************************/
 
-// The one place a finished document becomes a string and reaches the sink. The
-// filter runs here, at the very end of the pipeline, so everything it might
-// suppress has already been folded into the correlation state, the session
-// rollups and the Prometheus series: filtering changes what is exported, never
-// what is measured.
+// The one place a finished document reaches the sinks. The filter runs here, at
+// the very end of the pipeline, so everything it might suppress has already been
+// folded into the correlation state, the session rollups and the Prometheus
+// series: filtering changes what is exported, never what is measured.
+//
+// The tree sink sees the document as built; the text sink is the only reason it
+// is ever serialized, so a collector whose only consumer re-encodes the tree
+// (OTLP) pays no dump at all.
 //
 bool XrdMonDecode::emitDoc(json& j, const Server& srv)
 {
-   if (!doc) return false;
+   if (!doc && !tree) return false;
    if (filter && !filter->Apply(j)) {stats.filtered++; return false;}
 
 // Every document goes out through here, whatever produced it, so this is where
@@ -783,7 +787,8 @@ bool XrdMonDecode::emitDoc(json& j, const Server& srv)
                        "documents emitted to the sinks (after filtering)",
                        {{"cluster", srv.mtrCluster}}) += 1;
 
-   doc(j.dump());
+   if (tree) tree(j);
+   if (doc)  doc(j.dump());
    return true;
 }
 
@@ -3308,7 +3313,7 @@ void XrdMonDecode::EmitGStreamRecord(const std::string& src, int32_t stod,
 
 // (b) forward the record (structured payload) as a document.
 //
-   if (gstream && doc)
+   if (gstream && (doc || tree))
       {json j;
        otelResource(j, src, stod, srv);
        otelBegin(j, "xrootd.gstream", tEnd ? tEnd : tBeg, false);

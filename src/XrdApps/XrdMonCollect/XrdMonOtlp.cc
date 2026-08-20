@@ -22,6 +22,7 @@
 #include "XrdVersion.hh"
 
 #include "XrdApps/XrdMonCollect/XrdMonOtlp.hh"
+#include "XrdApps/XrdMonCollect/XrdMonUtil.hh"
 
 using json = nlohmann::json;
 
@@ -59,7 +60,7 @@ json toAnyValue(const json& v)
            return json{{"arrayValue", json{{"values", std::move(vals)}}}};
           }
       }
-   return json{{"stringValue", v.dump()}};
+   return json{{"stringValue", XrdMonDump(v)}};
 }
 
 // Re-encode a flat dotted-key object (the collector's resource/attributes) as an
@@ -181,7 +182,7 @@ std::string XrdMonOtlpBatch::takeBody(std::map<nlohmann::json, Group>& groups,
 
    json body;
    body[resourceKey] = std::move(blocks);
-   return body.dump();
+   return XrdMonDump(body);
 }
 
 std::string XrdMonOtlpBatch::takeLogsBody()

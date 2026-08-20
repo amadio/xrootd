@@ -23,6 +23,9 @@
 
 #include <atomic>
 #include <ostream>
+#include <string>
+
+#include "XrdOuc/XrdOucJson.hh"
 
 //-----------------------------------------------------------------------------
 //! A value written by exactly one thread and read by others.
@@ -86,5 +89,28 @@ template<class T>
 std::ostream& operator<<(std::ostream& os, const XrdMonPublished<T>& p)
 {
    return os << p.get();
+}
+
+//-----------------------------------------------------------------------------
+//! Serialize a document. The only serializer this program uses.
+//!
+//! nlohmann's default handler throws type_error.316 the moment a string is not
+//! valid UTF-8, and every thread in the collector runs its loop bare, so the
+//! throw is a process abort -- the receiver, the sinks and everything still
+//! unspooled go with it. The bytes in question arrive from the network: LFNs,
+//! user descriptors, CGI tails and server error text, none of it under this
+//! program's control.
+//!
+//! So: substitute U+FFFD rather than throw. Losing one field of one record
+//! beats losing the collector, and the encoding problem is reported separately
+//! (invalid_utf8_total) rather than inferred from a stack trace.
+//!
+//! Costs nothing over the strict handler: both decode UTF-8 to escape it
+//! correctly, and only the action on an invalid sequence differs.
+//-----------------------------------------------------------------------------
+
+inline std::string XrdMonDump(const nlohmann::json& j)
+{
+   return j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 }
 #endif

@@ -19,6 +19,8 @@
 /* COPYING (GPL license).  If not, see <http://www.gnu.org/licenses/>.        */
 /******************************************************************************/
 
+#include <cstring>
+
 #include "XrdVersion.hh"
 
 #include "XrdApps/XrdMonCollect/XrdMonOtlp.hh"
@@ -32,8 +34,6 @@ using json = nlohmann::json;
 
 namespace
 {
-const char* const kScopeVersion = XrdVERSION;
-
 // Encode one JSON scalar (or, as a fallback, a nested value) as an OTLP AnyValue.
 // 64-bit integers are strings per proto3 JSON; arrays of scalars (e.g. the
 // semconv user.roles string array) become a proper arrayValue; nested objects
@@ -65,23 +65,28 @@ json toAnyValue(const json& v)
 
 // Re-encode a flat dotted-key object (the collector's resource/attributes) as an
 // OTLP KeyValue array: [{"key":"file.path","value":{"stringValue":"..."}}, ...].
-// `bytes` accumulates a rough serialized size of what was encoded. It is a
-// by-product of a walk that has to happen anyway, which is the point: the
-// batch has to bound its own growth, and dumping it to measure it would undo
-// the whole reason the tree is carried instead of text.
 //
-json toKeyValues(const json& obj, std::size_t& bytes)
+json toKeyValues(const json& obj)
 {
    json arr = json::array();
    if (obj.is_object())
       for (auto it = obj.begin(); it != obj.end(); ++it)
-          {const json& v = it.value();
-           bytes += it.key().size() + 32          // key, quotes, OTLP wrapper
-                  + (v.is_string() ? v.get_ref<const std::string&>().size() : 16);
-           arr.push_back({{"key", it.key()}, {"value", toAnyValue(v)}});
-          }
+          arr.push_back({{"key", it.key()}, {"value", toAnyValue(it.value())}});
    return arr;
 }
+
+// The instrumentation scope, identical in every block. Written out rather than
+// built, so it costs nothing per block; the version is a literal, so adjacent
+// string concatenation does the whole thing at compile time.
+const char kScopeBlock[] =
+   "\"scope\":{\"name\":\"xrdmoncollect\",\"version\":\"" XrdVERSION "\"}";
+
+// What one resource block costs beyond its own content: the scope object,
+// which is the bulk of it, plus room for the brackets and keys around it and
+// for the request envelope. An upper bound on purpose -- the figure it feeds
+// is a memory bound, so erring high is the safe direction, and pinning it to
+// the character would only make the assembly below harder to change.
+const std::size_t kBlockOverhead = sizeof(kScopeBlock) + 96;
 
 // A present string field, else empty.
 std::string strField(const json& doc, const char* key)
@@ -106,13 +111,15 @@ void XrdMonOtlpBatch::add(const json& doc)
    const json  empty = json::object();
    const json& res   = doc.contains("resource") ? doc["resource"] : empty;
    Group& g = groups[res];
-   std::size_t& acct = isSpan ? spanBytes : logBytes;
-   if (g.records.empty()) g.resource = toKeyValues(res, acct); // once per resource
+   std::size_t& acct = isSpan ? spanSize : logSize;
+   if (g.resource.empty())                        // once per distinct resource
+      {g.resource = XrdMonDump(toKeyValues(res));
+       acct += g.resource.size() + kBlockOverhead;
+      }
 
    json rec;
-   std::size_t recBytes = 128;                    // envelope fields
    json attrs = doc.contains("attributes")
-              ? toKeyValues(doc["attributes"], recBytes) : json::array();
+              ? toKeyValues(doc["attributes"]) : json::array();
    if (isSpan)
       {// The span document already carries OTLP-compatible name/kind/status and
        // the *UnixNano times; pass them through and attach the id linkage.
@@ -156,8 +163,10 @@ void XrdMonOtlpBatch::add(const json& doc)
        rec["attributes"] = std::move(attrs);
       }
 
-   g.records.push_back(std::move(rec));
-   acct += recBytes;
+   const std::string text = XrdMonDump(rec);
+   if (!g.records.empty()) {g.records += ','; acct++;}
+   g.records += text;
+   acct += text.size();
 }
 
 std::string XrdMonOtlpBatch::takeBody(std::map<nlohmann::json, Group>& groups,
@@ -165,24 +174,46 @@ std::string XrdMonOtlpBatch::takeBody(std::map<nlohmann::json, Group>& groups,
                                       const char* scopeKey,
                                       const char* recordsKey)
 {
-   json blocks = json::array();
+// nlohmann objects are sorted maps, so the body this used to build came out in
+// alphabetical key order; reproduce it rather than leaving the layout to drift
+// on a change nobody meant to make. The order differs between the two signals:
+// "logRecords" sorts before "scope", "spans" after it.
+//
+   const bool recsFirst = std::strcmp(recordsKey, "scope") < 0;
+
+   std::size_t need = 32;
+   for (const auto& kv : groups)
+       need += kv.second.resource.size() + kv.second.records.size() + 128;
+
+   std::string body;
+   body.reserve(need);
+   body += "{\"";  body += resourceKey;  body += "\":[";
+
+   bool first = true;
    for (auto& kv : groups)
-       {json scope;
-        scope["scope"]["name"]    = "xrdmoncollect";
-        scope["scope"]["version"] = kScopeVersion;
-        scope[recordsKey]      = std::move(kv.second.records);
-
-        json block;
-        block["resource"]["attributes"] = std::move(kv.second.resource);
-        block[scopeKey] = json::array({std::move(scope)});
-        blocks.push_back(std::move(block));
+       {if (!first) body += ',';
+        first = false;
+        body += "{\"resource\":{\"attributes\":";
+        body += kv.second.resource;
+        body += "},\"";  body += scopeKey;  body += "\":[{";
+        if (recsFirst)
+           {body += '"'; body += recordsKey; body += "\":[";
+            body += kv.second.records;
+            body += "],";
+           }
+        body += kScopeBlock;
+        if (!recsFirst)
+           {body += ",\""; body += recordsKey; body += "\":[";
+            body += kv.second.records;
+            body += ']';
+           }
+        body += "}]}";
        }
-   groups.clear();
-   (&groups == &logGroups ? logBytes : spanBytes) = 0;
+   body += "]}";
 
-   json body;
-   body[resourceKey] = std::move(blocks);
-   return XrdMonDump(body);
+   groups.clear();
+   (&groups == &logGroups ? logSize : spanSize) = 0;
+   return body;
 }
 
 std::string XrdMonOtlpBatch::takeLogsBody()

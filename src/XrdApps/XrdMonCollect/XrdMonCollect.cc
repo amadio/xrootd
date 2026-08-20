@@ -1665,8 +1665,9 @@ int main(int argc, char* argv[])
    const long kCoalesceSecs = 2;
    // ...and never hold more than a queue slot's worth, whatever the clock says.
    // Time alone bounds nothing: a burst can build tens of megabytes inside two
-   // seconds, and for OTLP that is tens of megabytes of json trees, which
-   // nothing else in the process can reclaim.
+   // seconds, and this is memory nothing else in the process can reclaim -- it
+   // is in neither the correlation state nor the output queues. Both
+   // accumulators measure themselves exactly, so this bounds real bytes.
    const std::size_t kCoalesceBytes = qBytes ? qBytes : (4u << 20);
    time_t     otlpLastShip  = time(0);
    for (OsGroup& g : osGroups) g.lastShip = otlpLastShip;
@@ -1708,8 +1709,8 @@ int main(int argc, char* argv[])
           }
        if ((otlpBatch.haveLogs() || otlpBatch.haveTraces())
        &&  (force || now - otlpLastShip >= kCoalesceSecs || anyOtlpIdle()
-            || otlpBatch.approxLogBytes()   >= kCoalesceBytes
-            || otlpBatch.approxTraceBytes() >= kCoalesceBytes))
+            || otlpBatch.logBytes()   >= kCoalesceBytes
+            || otlpBatch.traceBytes() >= kCoalesceBytes))
           {otlpLastShip = now;
            if (otlpBatch.haveLogs())
               {XrdMonBody b =

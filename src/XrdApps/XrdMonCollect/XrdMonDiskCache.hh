@@ -65,23 +65,50 @@ public:
    //! Whether any cached bodies are awaiting replay.
    bool Empty() const { return pending.empty(); }
 
+   //! What the replay callback learned from the sink. Unavailable is the
+   //! endpoint being down or overloaded — worth retrying later. Rejected means
+   //! the sink understood the body and permanently refused it (e.g. an OTLP
+   //! receiver's validation error): replaying it again can only fail the same
+   //! way, and because replay is strictly oldest-first, keeping it would block
+   //! every body queued behind it for good.
+   enum class Verdict : unsigned char { Delivered, Unavailable, Rejected };
+
    //! Replay the oldest cached body through `cb`. Returns 1 if a body was
-   //! replayed and removed (cb returned true, or the file was unreadable and so
-   //! dropped — see err), 0 if nothing is pending, and -1 if cb reported the
-   //! sink still unavailable (the file is kept for a later attempt).
+   //! replayed and removed (Delivered), quarantined (Rejected — the file is
+   //! renamed with a .rejected suffix, kept for post-mortem but out of the
+   //! backlog; see err), or dropped because the file was unreadable (see err);
+   //! 0 if nothing is pending; and -1 on Unavailable (the file is kept for a
+   //! later attempt).
+   int ReplayOldest(const std::function<Verdict(const std::string&)>& cb,
+                    std::string& err);
+
+   //! Compatibility form for sinks that only distinguish delivered from
+   //! unavailable (true/false).
    int ReplayOldest(const std::function<bool(const std::string&)>& cb,
                     std::string& err);
 
-   std::size_t   Files()    const { return files.load(); }
-   std::uint64_t Bytes()    const { return bytes.load(); }
-   std::uint64_t Stored()   const { return stored.load(); }
-   std::uint64_t Replayed() const { return replayed.load(); }
-   std::uint64_t Dropped()  const { return dropped.load(); }
+   //! Persist one body the sink has already permanently refused straight into
+   //! quarantine (a .rejected file in the cache directory): it is never
+   //! replayed, but stays inspectable. Returns false (with err) on an I/O
+   //! error.
+   bool Quarantine(const std::string& body, std::string& err);
+
+   std::size_t   Files()      const { return files.load(); }
+   std::uint64_t Bytes()      const { return bytes.load(); }
+   std::uint64_t Stored()     const { return stored.load(); }
+   std::uint64_t Replayed()   const { return replayed.load(); }
+   std::uint64_t Dropped()    const { return dropped.load(); }
+   std::uint64_t Rejected()   const { return rejected.load(); }
 
 private:
 
    std::string path(const std::string& name) const { return dir + "/" + name; }
    void        dropOldest();
+   //! Atomically write `body` to `<name>` (via .tmp + rename); err on failure.
+   bool        writeFile(const std::string& name, const std::string& body,
+                         std::string& err);
+   //! Remove the head of the backlog and account `sz` bytes out of the cache.
+   void        popHead(std::uint64_t sz);
 
    std::string                dir;
    std::string                suffix;        // cache file suffix, e.g. ".ndjson"
@@ -93,6 +120,7 @@ private:
    std::atomic<std::uint64_t> stored{0};
    std::atomic<std::uint64_t> replayed{0};
    std::atomic<std::uint64_t> dropped{0};     // oldest bodies evicted by the cap
+   std::atomic<std::uint64_t> rejected{0};    // bodies quarantined as .rejected
 };
 
 #endif

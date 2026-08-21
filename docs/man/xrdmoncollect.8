@@ -259,6 +259,12 @@ POST documents to an OpenSearch cluster's \fB_bulk\fR API at \fIurl\fR. Requires
 that \fBxrdmoncollect\fR was built with libcurl. This defines the destination
 named \fBdefault\fR; further destinations are declared in the configuration file
 (see \fBMULTIPLE DESTINATIONS\fR).
+A body the cluster \fIpermanently refuses\fR (any 4xx other than 429, e.g. a
+mapping conflict or a blocked index) is never retried: it is quarantined as a
+\fB.rejected\fR file under \fB--cache-dir\fR (or dropped without one) and the
+cluster's full response text is logged, naming the exact reason. A \fB2xx\fR
+reporting \fIper-item\fR failures is a warning, not a rejection: the rest of the
+body was indexed, so re-posting it would duplicate what got through.
 .RE
 \fB--os-index\fR \fIname\fR
 .RS 5
@@ -299,7 +305,11 @@ envelope with typed \fBKeyValue\fR attributes. Batched per flush and posted on
 that destination's own sink thread
 with retry/backoff; with \fB--cache-dir\fR a body that still fails
 is written to disk and retried later (see \fB--cache-dir\fR), otherwise it is
-dropped. Requires that \fBxrdmoncollect\fR was built with libcurl.
+dropped. A body the endpoint \fIpermanently refuses\fR (any 4xx other than 429,
+e.g. a Loki validation error) is never retried: it is quarantined as a
+\fB.rejected\fR file under \fB--cache-dir\fR (or dropped without one) and the
+endpoint's full response text is logged, naming the exact reason. Requires that
+\fBxrdmoncollect\fR was built with libcurl.
 Pointing \fIurl\fR at Loki's OTLP endpoint (e.g. \fBhttp://loki:3100/otlp\fR)
 feeds the ready-to-import \fBgrafana-loki-dashboard.json\fR; see the README.
 .RE
@@ -332,6 +342,11 @@ A destination that has a cache does not retry a live POST: it fails fast and
 spills to disk, and the replay path carries the retry ladder. Holding a body for
 the length of the ladder would let the queue behind it overflow with a working
 cache configured.
+A body a sink permanently refuses is renamed to a \fB.rejected\fR file beside
+the backlog: it is never replayed (and ignored on startup) but kept for
+inspection, so one refused body cannot block the bodies queued behind it
+(counted in \fBxrootd_collector_cache_rejected_total\fR /
+\fBxrootd_collector_otlp_cache_rejected_total\fR).
 When unset (the default), a body that cannot be posted is dropped (counted in
 \fBxrootd_collector_dropped_bulk_total\fR / \fBxrootd_collector_otlp_dropped_total\fR).
 .RE
@@ -915,7 +930,9 @@ once read.
 On-failure spool; see \fB--cache-dir\fR. The destination named \fBdefault\fR
 uses the directory itself for OpenSearch and \fIotlp-logs\fR/\fIotlp-traces\fR
 beneath it; every other destination uses \fIos-<name>\fR and
-\fIotlp-<name>-logs\fR/\fIotlp-<name>-traces\fR.
+\fIotlp-<name>-logs\fR/\fIotlp-<name>-traces\fR. Bodies a sink permanently
+refused are kept alongside as \fI*.rejected\fR and never replayed; removing
+them is left to the operator who has read them.
 .RE
 .SH NOTES
 Documentation for all components associated with \fBxrdmoncollect\fR can be

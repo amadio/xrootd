@@ -302,8 +302,9 @@ bool XrdMonOtlp::Init(std::string& err)
    return true;
 }
 
-bool XrdMonOtlp::post(const std::string& url, const std::string& body,
-                      std::string& err)
+XrdMonOtlp::PostResult XrdMonOtlp::post(const std::string& url,
+                                        const std::string& body,
+                                        std::string& err)
 {
    CURL* c = (CURL*)curl;
 
@@ -315,8 +316,8 @@ bool XrdMonOtlp::post(const std::string& url, const std::string& body,
    hdrs = curl_slist_append(hdrs, "Expect:");
    if (!authHdr.empty()) hdrs = curl_slist_append(hdrs, authHdr.c_str());
 
-   int  backoff = 1;
-   bool ok = false;
+   int        backoff = 1;
+   PostResult result  = PostResult::Transient;
    for (int attempt = 0; attempt <= maxRetry; attempt++)
        {if (cancelled) {err = "cancelled"; break;}
         std::string resp;
@@ -341,28 +342,43 @@ bool XrdMonOtlp::post(const std::string& url, const std::string& body,
         long code = 0;
         curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
 
-        if (rc == CURLE_OK && code >= 200 && code < 300) {err.clear(); ok = true; break;}
+        if (rc == CURLE_OK && code >= 200 && code < 300)
+           {err.clear(); result = PostResult::Ok; break;}
 
         if (rc != CURLE_OK) err = curl_easy_strerror(rc);
-           else err = "HTTP " + std::to_string(code) + " from OTLP endpoint";
+           else
+           {err = "HTTP " + std::to_string(code) + " from OTLP endpoint";
+            // The response body is the receiver's own account of what it
+            // refused (e.g. Loki names the failed validation and the stream).
+            // Fold it onto the error line, control characters and all.
+            if (!resp.empty())
+               {for (char& ch : resp)
+                    if ((unsigned char)ch < 0x20) ch = ' ';
+                err += ": " + resp;
+               }
+           }
 
         bool transient = (rc != CURLE_OK) || code == 429 || (code >= 500);
-        if (!transient || attempt == maxRetry) break;
+        if (!transient) {result = PostResult::Rejected; break;}
+        result = PostResult::Transient;
+        if (attempt == maxRetry) break;
         // Sleep in slices so Cancel() is not held off for the whole backoff.
         for (int i = 0; i < backoff && !cancelled; i++) sleep(1);
         if (backoff < 16) backoff *= 2;
        }
 
    curl_slist_free_all(hdrs);
-   return ok;
+   return result;
 }
 
-bool XrdMonOtlp::PostLogs(const std::string& body, std::string& err)
+XrdMonOtlp::PostResult XrdMonOtlp::PostLogs(const std::string& body,
+                                            std::string& err)
 {
    return post(logsURL, body, err);
 }
 
-bool XrdMonOtlp::PostTraces(const std::string& body, std::string& err)
+XrdMonOtlp::PostResult XrdMonOtlp::PostTraces(const std::string& body,
+                                              std::string& err)
 {
    return post(tracesURL, body, err);
 }

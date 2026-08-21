@@ -483,6 +483,21 @@ takes about 165 s to say so. If a body still cannot be delivered:
   `cache_bytes` against the free space (see `DEPLOY.md` §18.1).
 - Without `--cache-dir`, the body is **dropped and counted**.
 
+A **permanent rejection** is handled differently: when the endpoint answers with
+any other 4xx (it understood the request and refused it — a Loki timestamp or
+label validation error, an OpenSearch mapping conflict, a blocked index),
+retrying can only fail the same way, so the body is **quarantined** instead of
+cached. It is kept beside the backlog as a `*.rejected` file — never replayed,
+ignored on restart — and one log line reports the endpoint's **full response
+text**, which names the exact failure. Because replay is strictly oldest-first,
+this is what keeps a single refused body from permanently blocking every body
+queued behind it. Without `--cache-dir` the body is dropped, as above, but the
+log line is still emitted in full.
+
+A `_bulk` response that reports **per-item** failures is not a rejection: the
+rest of the body was indexed, so re-posting it would duplicate what got through.
+It is logged as a warning and the body is considered delivered.
+
 Every destination caches **separately** — each recovers on its own schedule —
 and so do OTLP logs and traces, since they replay to different endpoints. The
 destination named `default` keeps the original layout, so an upgrade orphans
@@ -495,7 +510,8 @@ nothing:
 ├── os-central/                         # [opensearch "central"]
 │   └── 1751450433100-000000.ndjson
 ├── otlp-logs/
-│   └── 1751450433000-000000.ndjson     # OTLP "default" /v1/logs bodies
+│   ├── 1751450433000-000000.ndjson     # OTLP "default" /v1/logs bodies
+│   └── 1751450433100-000001.ndjson.rejected   # quarantined: endpoint refused it
 ├── otlp-traces/
 │   └── 1751450433200-000000.ndjson     # OTLP "default" /v1/traces bodies
 ├── otlp-wlcg-logs/                     # [otlp "wlcg"]
@@ -510,9 +526,12 @@ it overflows is worse than writing it to a cache that is working.
 
 Health signals to watch (with `--metrics-port`), all labelled by `destination`:
 `xrootd_collector_cache_files`/`_bytes` (current backlog),
-`xrootd_collector_cache_stored_total`/`_replayed_total`, and
-`xrootd_collector_dropped_bulk_total`; the OTLP sink has the analogous
-`otlp_cache_*` / `otlp_dropped_total` series.
+`xrootd_collector_cache_stored_total`/`_replayed_total`,
+`xrootd_collector_cache_rejected_total` (bodies the cluster permanently
+refused), and `xrootd_collector_dropped_bulk_total`; the OTLP sink has the
+analogous `otlp_cache_*` / `otlp_dropped_total` series. Any growth on a
+`*_cache_rejected_total` deserves a look at the collector log and the
+`*.rejected` files it names — nothing else will replay them.
 
 ### Shoveler mode (reliable TCP transport)
 
@@ -2238,6 +2257,7 @@ xrootd_collector_cache_files                (gauge: cached bodies awaiting repla
 xrootd_collector_cache_bytes                (gauge: bytes of cached bodies)
 xrootd_collector_cache_stored_total         (bodies written to the disk cache)
 xrootd_collector_cache_replayed_total       (cached bodies replayed)
+xrootd_collector_cache_rejected_total       (bodies the cluster refused: quarantined)
 xrootd_collector_dropped_bulk_total         (bodies dropped: no/failed cache)
 ```
 
@@ -2253,6 +2273,7 @@ xrootd_collector_otlp_cache_files           (gauge: cached bodies awaiting repla
 xrootd_collector_otlp_cache_bytes           (gauge: bytes of cached bodies)
 xrootd_collector_otlp_cache_stored_total    (bodies written to the disk cache)
 xrootd_collector_otlp_cache_replayed_total  (cached bodies replayed)
+xrootd_collector_otlp_cache_rejected_total  (bodies the endpoint refused: quarantined)
 xrootd_collector_otlp_dropped_total         (bodies dropped: no/failed cache)
 ```
 

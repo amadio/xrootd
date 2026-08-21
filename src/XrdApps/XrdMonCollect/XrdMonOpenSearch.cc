@@ -78,7 +78,8 @@ void XrdMonOpenSearch::Add(std::string& batch, const std::string& jsonDoc) const
    XrdMonBulkAdd(batch, idx, useCreate, jsonDoc);
 }
 
-bool XrdMonOpenSearch::Bulk(const std::string& body, std::string& err)
+XrdMonOpenSearch::PostResult
+XrdMonOpenSearch::Bulk(const std::string& body, std::string& err)
 {
    CURL* c = (CURL*)curl;
 
@@ -90,8 +91,8 @@ bool XrdMonOpenSearch::Bulk(const std::string& body, std::string& err)
    hdrs = curl_slist_append(hdrs, "Expect:");
    if (!authHdr.empty()) hdrs = curl_slist_append(hdrs, authHdr.c_str());
 
-   int backoff = 1;
-   bool ok = false;
+   int        backoff = 1;
+   PostResult result  = PostResult::Transient;
    for (int attempt = 0; attempt <= maxRetry; attempt++)
        {if (cancelled) {err = "cancelled"; break;}
         std::string resp;
@@ -121,26 +122,40 @@ bool XrdMonOpenSearch::Bulk(const std::string& body, std::string& err)
         curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
 
         if (rc == CURLE_OK && code >= 200 && code < 300)
-           {// A 2xx still reports per-item failures via "errors":true.
+           {// A 2xx still reports per-item failures via "errors":true. That is
+            // a warning, not a rejection: the rest of the body was indexed, so
+            // re-posting it would duplicate everything that got through.
             if (resp.find("\"errors\":true") != std::string::npos)
                err = "OpenSearch reported per-item errors in the bulk response";
                else err.clear();
-            ok = true;
+            result = PostResult::Ok;
             break;
            }
 
         // Retry transient conditions (network error, 429, 5xx).
         if (rc != CURLE_OK)
            err = curl_easy_strerror(rc);
-           else err = "HTTP " + std::to_string(code) + " from OpenSearch";
+           else
+           {err = "HTTP " + std::to_string(code) + " from OpenSearch";
+            // The response body is the cluster's own account of what it
+            // refused (the rejected mapping, the blocked index). Fold it onto
+            // the error line, control characters and all.
+            if (!resp.empty())
+               {for (char& ch : resp)
+                    if ((unsigned char)ch < 0x20) ch = ' ';
+                err += ": " + resp;
+               }
+           }
 
         bool transient = (rc != CURLE_OK) || code == 429 || (code >= 500);
-        if (!transient || attempt == maxRetry) break;
+        if (!transient) {result = PostResult::Rejected; break;}
+        result = PostResult::Transient;
+        if (attempt == maxRetry) break;
         // Sleep in slices so Cancel() is not held off for the whole backoff.
         for (int i = 0; i < backoff && !cancelled; i++) sleep(1);
         if (backoff < 16) backoff *= 2;
        }
 
    curl_slist_free_all(hdrs);
-   return ok;
+   return result;
 }

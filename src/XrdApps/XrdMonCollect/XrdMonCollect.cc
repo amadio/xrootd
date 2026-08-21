@@ -899,6 +899,17 @@ const int kSinkRetries = 4;
 // without limit.
 const std::size_t kSinkQueueBodies = 16;
 
+// Both sink clients report the same three outcomes under their own nested enum
+// (neither header can name a shared one without pulling in the other's, or the
+// cache's). This is where they meet the cache's view of the same distinction.
+template<class R>
+XrdMonDiskCache::Verdict verdictOf(R r)
+{
+   return r == R::Ok       ? XrdMonDiskCache::Verdict::Delivered
+        : r == R::Rejected ? XrdMonDiskCache::Verdict::Rejected
+                           : XrdMonDiskCache::Verdict::Unavailable;
+}
+
 // A destination's live state: its client, its queue, its thread, its disk cache
 // and its own counters. Everything a failing destination touches is private to
 // it, which is the point -- a central collector going down must not stall the
@@ -2015,6 +2026,7 @@ int main(int argc, char* argv[])
             auto& cb = subsystem->observeGauge<std::int64_t>("cache_bytes", "bytes of cached _bulk bodies on disk", {}, kDest);
             auto& cs = subsystem->observeCounter<std::uint64_t>("cache_stored_total", "_bulk bodies written to the disk cache", {}, kDest);
             auto& cr = subsystem->observeCounter<std::uint64_t>("cache_replayed_total", "cached _bulk bodies successfully replayed", {}, kDest);
+            auto& cj = subsystem->observeCounter<std::uint64_t>("cache_rejected_total", "_bulk bodies permanently refused by the cluster and quarantined as .rejected files", {}, kDest);
             for (auto& up : osSinks)
                {OsSink* s = up.get();
                 if (!s->cache) continue;
@@ -2022,6 +2034,7 @@ int main(int argc, char* argv[])
                 cb.add({s->cfg.name}, [s]{return (int64_t)s->cache->Bytes();});
                 cs.add({s->cfg.name}, [s]{return (uint64_t)s->cache->Stored();});
                 cr.add({s->cfg.name}, [s]{return (uint64_t)s->cache->Replayed();});
+                cj.add({s->cfg.name}, [s]{return (uint64_t)s->cache->Rejected();});
                }
            }
 
@@ -2046,6 +2059,7 @@ int main(int argc, char* argv[])
             auto& cb = subsystem->observeGauge<std::int64_t>("otlp_cache_bytes", "bytes of cached OTLP bodies on disk", {}, kDest);
             auto& cs = subsystem->observeCounter<std::uint64_t>("otlp_cache_stored_total", "OTLP bodies written to the disk cache", {}, kDest);
             auto& cr = subsystem->observeCounter<std::uint64_t>("otlp_cache_replayed_total", "cached OTLP bodies successfully replayed", {}, kDest);
+            auto& cj = subsystem->observeCounter<std::uint64_t>("otlp_cache_rejected_total", "OTLP bodies permanently refused by the endpoint and quarantined as .rejected files", {}, kDest);
             for (auto& up : otlpSinks)
                {OtlpSink* s = up.get();
                 if (!s->logCache) continue;
@@ -2053,6 +2067,7 @@ int main(int argc, char* argv[])
                 cb.add({s->cfg.name}, [s]{return (int64_t)(s->logCache->Bytes() + s->traceCache->Bytes());});
                 cs.add({s->cfg.name}, [s]{return (uint64_t)(s->logCache->Stored() + s->traceCache->Stored());});
                 cr.add({s->cfg.name}, [s]{return (uint64_t)(s->logCache->Replayed() + s->traceCache->Replayed());});
+                cj.add({s->cfg.name}, [s]{return (uint64_t)(s->logCache->Rejected() + s->traceCache->Rejected());});
                }
            }
 
@@ -2103,35 +2118,45 @@ int main(int argc, char* argv[])
       {OsSink* s = up.get();
        s->th = std::thread([s, kDrainPerIter]()
           {
-           // POST one body; true on success. Drives both live bodies and cache
-           // replays, so a failure counts once regardless of the source.
-           auto post = [s](const std::string& b, int retries)->bool
+           // POST one body. Drives both live bodies and cache replays, so a
+           // failure counts once regardless of the source. A transient failure
+           // is rate-limited to one warning per 10s (a down cluster would log
+           // per body); a permanent rejection is always logged in full -- it
+           // names the body being lost and the cluster's reason, and it does
+           // not recur per retry cycle because the body leaves the replay path.
+           auto post = [s](const std::string& b, int retries)
               {s->cli->SetMaxRetry(retries);
                std::string e;
-               bool ok = s->cli->Bulk(b, e);
-               if (!ok)
+               XrdMonOpenSearch::PostResult r = s->cli->Bulk(b, e);
+               if (r != XrdMonOpenSearch::PostResult::Ok)
                   {if (s->failures) ++*s->failures;
                    time_t now = time(0);
-                   if (now - s->warnAt >= 10)
+                   if (r == XrdMonOpenSearch::PostResult::Rejected
+                       || now - s->warnAt >= 10)
                       {s->warnAt = now;
                        fprintf(stderr, "xrdmoncollect: OpenSearch[%s] bulk post "
-                               "failed: %s\n", s->cfg.name.c_str(), e.c_str());}
+                               "%s: %s\n", s->cfg.name.c_str(),
+                               r == XrdMonOpenSearch::PostResult::Rejected
+                                  ? "rejected by endpoint" : "failed",
+                               e.c_str());}
                   }
                   else if (!e.empty())
                      fprintf(stderr, "xrdmoncollect: OpenSearch[%s]: %s\n",
                              s->cfg.name.c_str(), e.c_str());
-               return ok;
+               return r;
               };
            // Replay up to kDrainPerIter cached bodies, oldest first, stopping
            // as soon as the sink is down again. The replay keeps the full retry
-           // ladder, whose backoff is also what paces this loop.
+           // ladder, whose backoff is also what paces this loop. A rejected
+           // body is quarantined by the cache (counted as progress), so a
+           // poison body cannot pin the backlog behind it.
            auto drain = [&]()
               {if (!s->cache) return;
                std::string e;
                for (int i = 0; i < kDrainPerIter; i++)
                   {int r = s->cache->ReplayOldest(
                               [&](const std::string& b)
-                                 {return post(b, kSinkRetries);}, e);
+                                 {return verdictOf(post(b, kSinkRetries));}, e);
                    if (!e.empty())
                       {fprintf(stderr, "xrdmoncollect: OpenSearch[%s]: %s\n",
                                s->cfg.name.c_str(), e.c_str()); e.clear();}
@@ -2177,15 +2202,37 @@ int main(int argc, char* argv[])
                       // With a cache to fall back on the live attempt does not
                       // retry: holding this body for the whole ladder while the
                       // queue behind it overflows loses more than it saves.
-                      else if (!post(*body, s->cache ? 0 : kSinkRetries))
-                      {if (s->cache)
-                          {if (!s->cache->Store(*body, e))
-                              {if (s->dropped) ++*s->dropped;
-                               fprintf(stderr, "xrdmoncollect: OpenSearch[%s] "
-                                       "cache store failed: %s\n",
-                                       s->cfg.name.c_str(), e.c_str());}
+                      else
+                      {switch (post(*body, s->cache ? 0 : kSinkRetries))
+                          {case XrdMonOpenSearch::PostResult::Ok:
+                                break;
+                           case XrdMonOpenSearch::PostResult::Rejected:
+                                // Retrying can only fail identically: keep the
+                                // body as evidence, never as backlog.
+                                if (s->dropped) ++*s->dropped;
+                                if (s->cache)
+                                   {if (s->cache->Quarantine(*body, e))
+                                         fprintf(stderr, "xrdmoncollect: "
+                                                 "OpenSearch[%s]: %s\n",
+                                                 s->cfg.name.c_str(), e.c_str());
+                                    else fprintf(stderr, "xrdmoncollect: "
+                                                 "OpenSearch[%s] quarantine "
+                                                 "failed: %s\n",
+                                                 s->cfg.name.c_str(), e.c_str());
+                                   }
+                                break;
+                           default:      // transient: cache for replay
+                                if (s->cache)
+                                   {if (!s->cache->Store(*body, e))
+                                       {if (s->dropped) ++*s->dropped;
+                                        fprintf(stderr, "xrdmoncollect: "
+                                                "OpenSearch[%s] cache store "
+                                                "failed: %s\n",
+                                                s->cfg.name.c_str(), e.c_str());}
+                                   }
+                                   else if (s->dropped) ++*s->dropped;
+                                break;
                           }
-                          else if (s->dropped) ++*s->dropped;   // no cache: drops
                       }
                    body.reset();
                    s->busy.store(false);
@@ -2206,29 +2253,35 @@ int main(int argc, char* argv[])
       {OtlpSink* s = up.get();
        s->th = std::thread([s, kDrainPerIter]()
           {
-           auto post = [s](bool traces, const std::string& b, int retries)->bool
+           // See the OpenSearch sink above for why a rejection is logged
+           // unconditionally where a transient failure is rate-limited.
+           auto post = [s](bool traces, const std::string& b, int retries)
               {s->cli->SetMaxRetry(retries);
                std::string e;
-               bool ok = traces ? s->cli->PostTraces(b, e)
-                                : s->cli->PostLogs(b, e);
-               if (!ok)
+               XrdMonOtlp::PostResult r = traces ? s->cli->PostTraces(b, e)
+                                                 : s->cli->PostLogs(b, e);
+               if (r != XrdMonOtlp::PostResult::Ok)
                   {if (s->failures) ++*s->failures;
                    time_t now = time(0);
-                   if (now - s->warnAt >= 10)
+                   if (r == XrdMonOtlp::PostResult::Rejected
+                       || now - s->warnAt >= 10)
                       {s->warnAt = now;
-                       fprintf(stderr, "xrdmoncollect: OTLP[%s] %s post failed: "
+                       fprintf(stderr, "xrdmoncollect: OTLP[%s] %s post %s: "
                                "%s\n", s->cfg.name.c_str(),
-                               traces ? "traces" : "logs", e.c_str());
+                               traces ? "traces" : "logs",
+                               r == XrdMonOtlp::PostResult::Rejected
+                                  ? "rejected by endpoint" : "failed",
+                               e.c_str());
                       }
                   }
-               return ok;
+               return r;
               };
            auto drain = [&](XrdMonDiskCache* c, bool traces)
               {if (!c) return;
                std::string e;
                for (int i = 0; i < kDrainPerIter; i++)
                   {int r = c->ReplayOldest([&](const std::string& b)
-                              {return post(traces, b, kSinkRetries);}, e);
+                              {return verdictOf(post(traces, b, kSinkRetries));}, e);
                    if (!e.empty())
                       {fprintf(stderr, "xrdmoncollect: OTLP[%s]: %s\n",
                                s->cfg.name.c_str(), e.c_str()); e.clear();}
@@ -2249,14 +2302,35 @@ int main(int argc, char* argv[])
                                "failed: %s\n", s->cfg.name.c_str(), e.c_str());}
                    drain(c, traces);
                   }
-                  else if (!post(traces, *body, c ? 0 : kSinkRetries))
-                  {if (c)
-                      {if (!c->Store(*body, e))
-                          {if (s->dropped) ++*s->dropped;
-                           fprintf(stderr, "xrdmoncollect: OTLP[%s] cache store "
-                                   "failed: %s\n", s->cfg.name.c_str(), e.c_str());}
+                  else
+                  {switch (post(traces, *body, c ? 0 : kSinkRetries))
+                      {case XrdMonOtlp::PostResult::Ok:
+                            break;
+                       case XrdMonOtlp::PostResult::Rejected:
+                            // Retrying can only fail identically: keep the body
+                            // as evidence, never as backlog.
+                            if (s->dropped) ++*s->dropped;
+                            if (c)
+                               {if (c->Quarantine(*body, e))
+                                     fprintf(stderr, "xrdmoncollect: OTLP[%s]: "
+                                             "%s\n", s->cfg.name.c_str(),
+                                             e.c_str());
+                                else fprintf(stderr, "xrdmoncollect: OTLP[%s] "
+                                             "quarantine failed: %s\n",
+                                             s->cfg.name.c_str(), e.c_str());
+                               }
+                            break;
+                       default:         // transient: cache for replay
+                            if (c)
+                               {if (!c->Store(*body, e))
+                                   {if (s->dropped) ++*s->dropped;
+                                    fprintf(stderr, "xrdmoncollect: OTLP[%s] "
+                                            "cache store failed: %s\n",
+                                            s->cfg.name.c_str(), e.c_str());}
+                               }
+                               else if (s->dropped) ++*s->dropped;
+                            break;
                       }
-                      else if (s->dropped) ++*s->dropped;   // no cache: drops
                   }
                s->busy.store(false);
               };

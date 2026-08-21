@@ -128,7 +128,22 @@ out=$("${BIN}" -c "${TMP}/indent.cfg" 2>&1)
 test $? -ne 0 || fail "indented filter keys should fail"
 grep -q "column 1" <<<"${out}" || fail "expected the column-1 hint, got: ${out}"
 
-# 11. A valid rule set loads, is reported at start-up, and the collector runs.
+# 11. A config without any [filter] section -- the common production shape --
+#     loads no rules and reports none: filtering must be entirely inert when it
+#     was not asked for.
+cat > "${TMP}/nofilter.cfg" <<EOF
+[xrdmoncollect]
+port = 9936
+EOF
+"${BIN}" -c "${TMP}/nofilter.cfg" >/dev/null 2>"${TMP}/nofsummary" &
+pid=$!
+sleep 1
+kill -0 "${pid}" 2>/dev/null || fail "no-filter config should start"
+kill "${pid}" 2>/dev/null; wait "${pid}" 2>/dev/null
+grep -q "filter rule" "${TMP}/nofsummary" \
+	&& fail "no-filter config must not report rules: $(cat "${TMP}/nofsummary")"
+
+# 12. A valid rule set loads, is reported at start-up, and the collector runs.
 cat > "${TMP}/filter.cfg" <<EOF
 [xrdmoncollect]
 port = 9934
@@ -151,7 +166,7 @@ kill "${pid}" 2>/dev/null; wait "${pid}" 2>/dev/null
 grep -q "2 filter rule(s) loaded (1 tag, 1 drop, 0 keep)" "${TMP}/summary" \
 	|| fail "expected the rule summary, got: $(cat "${TMP}/summary")"
 
-# 12. Sink destinations: [opensearch "<name>"] and [otlp "<name>"]. The same
+# 13. Sink destinations: [opensearch "<name>"] and [otlp "<name>"]. The same
 #     validation as filter rules, for the same reason -- a destination that
 #     silently fails to load leaves the collector with one fewer sink, and if it
 #     leaves none at all the file sink takes over and floods stdout.
@@ -199,7 +214,7 @@ out=$("${BIN}" -c "${TMP}/dest-twice.cfg" 2>&1)
 test $? -ne 0 || fail "a repeated url should fail"
 grep -q "column 1" <<<"${out}" || fail "expected the column-1 hint, got: ${out}"
 
-# 13. Two destinations of each kind load and the collector runs, with each
+# 14. Two destinations of each kind load and the collector runs, with each
 #     destination's series labelled and each holding its own disk cache
 #     directory ("default" keeps the legacy paths; named ones are prefixed).
 if command -v curl >/dev/null 2>&1; then

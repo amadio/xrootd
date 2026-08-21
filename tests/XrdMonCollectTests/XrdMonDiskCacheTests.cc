@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,26 @@ struct Recorder
    bool result = true;
    bool operator()(const std::string& b) { seen.push_back(b); return result; }
 };
+
+// Names of the files in `dir` ending in `suffix` (sorted for stable asserts).
+std::vector<std::string> filesWithSuffix(const std::string& dir,
+                                         const std::string& suffix)
+{
+   std::vector<std::string> out;
+   std::string cmd = "ls -1 '" + dir + "' 2>/dev/null";
+   FILE* p = popen(cmd.c_str(), "r");
+   if (!p) return out;
+   char line[512];
+   while (fgets(line, sizeof(line), p))
+      {std::string n = line;
+       while (!n.empty() && (n.back() == '\n' || n.back() == '\r')) n.pop_back();
+       if (n.size() >= suffix.size() &&
+           n.compare(n.size() - suffix.size(), suffix.size(), suffix) == 0)
+          out.push_back(n);
+      }
+   pclose(p);
+   return out;
+}
 }
 
 TEST(XrdMonDiskCache, StoreThenReplayInFifoOrder)
@@ -171,6 +192,75 @@ TEST(XrdMonDiskCache, CustomSuffixStoredAndRescanned)
    EXPECT_EQ(same.ReplayOldest(cb, e), 1);
    ASSERT_EQ(rec.seen.size(), 1u);
    EXPECT_EQ(rec.seen[0], "framed-bytes");
+}
+
+// A permanently refused body must not pin the backlog: it is moved aside as a
+// .rejected file (kept for post-mortem) and the bodies behind it drain. This is
+// the regression guard for the OTLP export wedging on a single body an OTLP
+// receiver rejects with a validation error (e.g. Loki answering 400).
+TEST(XrdMonDiskCache, RejectedReplayQuarantinesAndDrains)
+{
+   std::string dir = freshDir("dc-reject");
+   XrdMonDiskCache c(dir);
+   std::string e;
+   ASSERT_TRUE(c.Init(e)) << e;
+   ASSERT_TRUE(c.Store("poison", e)) << e;
+   ASSERT_TRUE(c.Store("good", e)) << e;
+
+   std::vector<std::string> seen;
+   auto cb = [&](const std::string& b)
+      {seen.push_back(b);
+       return b == "poison" ? XrdMonDiskCache::Verdict::Rejected
+                            : XrdMonDiskCache::Verdict::Delivered;
+      };
+
+   // The rejection is progress (1, not -1): the head leaves the backlog.
+   EXPECT_EQ(c.ReplayOldest(cb, e), 1);
+   EXPECT_NE(e.find("quarantined"), std::string::npos) << e;
+   e.clear();
+   EXPECT_EQ(c.Files(), 1u);
+   EXPECT_EQ(c.Rejected(), 1u);
+   EXPECT_EQ(c.Replayed(), 0u);
+
+   // The body behind the poison one is now deliverable.
+   EXPECT_EQ(c.ReplayOldest(cb, e), 1);
+   EXPECT_EQ(c.ReplayOldest(cb, e), 0);
+   ASSERT_EQ(seen.size(), 2u);
+   EXPECT_EQ(seen[0], "poison");
+   EXPECT_EQ(seen[1], "good");
+   EXPECT_TRUE(c.Empty());
+   EXPECT_EQ(c.Replayed(), 1u);
+
+   // The evidence is on disk, and a restart does not resurrect it as backlog.
+   EXPECT_EQ(filesWithSuffix(dir, ".rejected").size(), 1u);
+   XrdMonDiskCache c2(dir);
+   ASSERT_TRUE(c2.Init(e)) << e;
+   EXPECT_EQ(c2.Files(), 0u);
+   EXPECT_EQ(filesWithSuffix(dir, ".rejected").size(), 1u);
+}
+
+// The live-path form: a body the sink has already refused goes straight to
+// quarantine without ever entering the pending backlog.
+TEST(XrdMonDiskCache, QuarantineBypassesBacklog)
+{
+   std::string dir = freshDir("dc-quarantine");
+   XrdMonDiskCache c(dir);
+   std::string e;
+   ASSERT_TRUE(c.Init(e)) << e;
+
+   ASSERT_TRUE(c.Quarantine("refused-body", e));
+   EXPECT_NE(e.find("quarantined"), std::string::npos) << e;
+   EXPECT_TRUE(c.Empty());
+   EXPECT_EQ(c.Files(), 0u);
+   EXPECT_EQ(c.Bytes(), 0u);
+   EXPECT_EQ(c.Rejected(), 1u);
+
+   auto names = filesWithSuffix(dir, ".rejected");
+   ASSERT_EQ(names.size(), 1u);
+   std::ifstream f(dir + "/" + names[0]);
+   std::string content((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+   EXPECT_EQ(content, "refused-body");
 }
 
 TEST(XrdMonDiskCache, MaxBytesDropsOldest)

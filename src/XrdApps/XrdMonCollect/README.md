@@ -398,7 +398,7 @@ The `_bulk` framing (`XrdMonOpenSearch::Add`) emits, per document, an
 action/metadata line followed by the source line:
 
 ```
-{"index":{"_index":"xrootd-transfers"}}
+{"index":{"_index":"xrootd-file-ops"}}
 {"resource":{…},"attributes":{"event.name":"xrootd.read",…}}
 ```
 
@@ -612,7 +612,7 @@ xrdmoncollect -p 9930 -o /var/log/xrootd/transfers.ndjson -v
 
 # Post directly to an OpenSearch data stream
 xrdmoncollect -p 9930 --os-url https://opensearch:9200 \
-              --os-index xrootd-transfers --os-datastream \
+              --os-index xrootd-file-ops --os-datastream \
               --os-user admin --os-pass secret
 
 # Export to an OpenTelemetry collector / Grafana Alloy (logs, plus spans)
@@ -1733,7 +1733,7 @@ xrdmoncollect [-c <file>] -p <port> [-b <bindaddr>] [-o <file>] [--bulk <index>]
   -o <file>        append output to <file> (default: stdout unless a network sink)
   --bulk <index>   write OpenSearch _bulk format to the file/stdout sink
   --os-url <url>   POST documents to an OpenSearch cluster's _bulk API
-  --os-index <n>   index/data-stream name (default: xrootd-transfers)
+  --os-index <n>   index/data-stream name (default: xrootd-file-ops)
   --os-user <u>    basic-auth user
   --os-pass <p>    basic-auth password
   --os-token <t>   bearer token (Authorization: Bearer); wins over basic auth;
@@ -1804,7 +1804,7 @@ file is a fatal error. See `xrdmoncollect.cfg.example` for the full key list.
 [xrdmoncollect]
 port = 9930
 os-url = https://opensearch.example.org:9200
-os-index = xrootd-transfers
+os-index = xrootd-file-ops
 forward = logstash.example.org:5044
 metrics-port = 9931
 max-memory = 1G
@@ -2037,11 +2037,11 @@ and `xrootd.*` keys) is provided in
 [`opensearch-template.json`](opensearch-template.json)
 (IPs as `ip`, byte counters as `long`, identifiers as `keyword`, strings mapped
 to `keyword` by default rather than analyzed `text`). Apply it once before
-ingesting; it also creates the data stream backing the `xrootd-transfers` name:
+ingesting; it also creates the data stream backing the `xrootd-file-ops` name:
 
 ```sh
 curl -s -H 'Content-Type: application/json' \
-     -XPUT https://opensearch:9200/_index_template/xrootd-transfers \
+     -XPUT https://opensearch:9200/_index_template/xrootd-file-ops \
      --data-binary @opensearch-template.json
 ```
 
@@ -2052,10 +2052,10 @@ use a plain rolling index with an ISM rollover policy instead.
 
 A ready-to-import OpenSearch Dashboards saved-objects file is provided in
 [`opensearch-dashboards.ndjson`](opensearch-dashboards.ndjson): an
-`xrootd-transfers*` index pattern plus a *XRootD Transfers (xrdmoncollect)*
-dashboard built on the log records — throughput over time, read/write
-rates, VO / auth-method / locality breakdowns, error categories, transfer
-duration distribution, and top files/users/sites. Import it under **Dashboards
+`xrootd-file-ops*` index pattern plus a *XRootD File Operations
+(xrdmoncollect)* dashboard built on the log records — throughput over time,
+read/write rates, VO / auth-method / locality breakdowns, error categories,
+operation duration distribution, and top files/users/sites. Import it under **Dashboards
 Management → Saved Objects → Import** (or via the API):
 
 ```sh
@@ -2115,11 +2115,11 @@ Dataset popularity — which datasets are read, how much, by whom — has been a
 long-standing request from the experiments (CMS in particular, for dynamic
 data placement and cache/cleanup decisions). Two ready-to-import dashboards
 present the same visualizations on each stack, built entirely from the
-transfer log records:
+file operation log records:
 
 - [`opensearch-popularity.ndjson`](opensearch-popularity.ndjson) — *XRootD
   Data Popularity (xrdmoncollect)* for OpenSearch Dashboards; import exactly
-  like the transfers dashboard above (it reuses the same `xrootd-transfers`
+  like the file operations dashboard above (it reuses the same `xrootd-file-ops`
   index pattern, so importing both files with `overwrite=true` is fine).
 - [`grafana-loki-popularity-dashboard.json`](grafana-loki-popularity-dashboard.json)
   — *XRootD Data Popularity (Loki)* for Grafana on Loki; import and select
@@ -2127,7 +2127,7 @@ transfer log records:
 
 Both follow the same three-zone layout: top-level stats (total bytes read,
 active users, distinct datasets/directories), stacked read-volume time series
-(by SciTags experiment, by VO, by client site, and transfers vs accesses),
+(by SciTags experiment, by VO, by client site, and bytes vs accesses),
 and top-10 leaderboards (datasets by bytes and by accesses, users by bytes,
 client sites) with a dataset-activity-over-time panel to catch datasets
 suddenly becoming popular.

@@ -1,9 +1,9 @@
 {
   "//": "Composable index template for xrdmoncollect OpenTelemetry documents. Apply with:",
-  "//apply": "curl -XPUT $OS/_index_template/xrootd-transfers -H 'Content-Type: application/json' -d @opensearch-template.json",
+  "//apply": "curl -XPUT $OS/_index_template/xrootd-file-ops -H 'Content-Type: application/json' -d @opensearch-template.json",
   "//schema": "Documents follow the OpenTelemetry data model: a process-level 'resource' object and an event-level 'attributes' object, both keyed by dotted semantic-convention names. OpenSearch expands the dots into sub-objects, so 'file.path' indexes as attributes.file.path, etc.",
-  "//datastream": "The data_stream block makes 'xrootd-transfers' a data stream (append-only, time-series). Drop it for a plain rolling index, and remove --os-datastream from xrdmoncollect.",
-  "index_patterns": ["xrootd-transfers*"],
+  "//datastream": "The data_stream block makes 'xrootd-file-ops' a data stream (append-only, time-series). Drop it for a plain rolling index, and remove --os-datastream from xrdmoncollect.",
+  "index_patterns": ["xrootd-file-ops*"],
   "data_stream": {},
   "priority": 200,
   "template": {

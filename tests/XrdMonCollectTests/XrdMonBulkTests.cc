@@ -14,8 +14,8 @@
 TEST(XrdMonBulk, IndexActionForAPlainIndex)
 {
    std::string b;
-   XrdMonBulkAdd(b, "xrootd-transfers", false, "{\"a\":1}");
-   EXPECT_EQ(b, "{\"index\":{\"_index\":\"xrootd-transfers\"}}\n{\"a\":1}\n");
+   XrdMonBulkAdd(b, "xrootd-file-ops", false, "{\"a\":1}");
+   EXPECT_EQ(b, "{\"index\":{\"_index\":\"xrootd-file-ops\"}}\n{\"a\":1}\n");
 }
 
 // Data streams reject the "index" action outright, so --os-datastream has to
@@ -23,8 +23,8 @@ TEST(XrdMonBulk, IndexActionForAPlainIndex)
 TEST(XrdMonBulk, CreateActionForADataStream)
 {
    std::string b;
-   XrdMonBulkAdd(b, "xrootd-transfers", true, "{\"a\":1}");
-   EXPECT_EQ(b, "{\"create\":{\"_index\":\"xrootd-transfers\"}}\n{\"a\":1}\n");
+   XrdMonBulkAdd(b, "xrootd-file-ops", true, "{\"a\":1}");
+   EXPECT_EQ(b, "{\"create\":{\"_index\":\"xrootd-file-ops\"}}\n{\"a\":1}\n");
 }
 
 // A body is accumulated across calls, and every record is newline-terminated:

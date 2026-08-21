@@ -27,6 +27,11 @@ BUILTIN_VARS = {
     "__timeFilter", "timeFilter", "__auto",
 }
 
+# A query that groups, in either PromQL or LogQL: the aggregation modifiers
+# in both spellings (`sum by (x)` and `sum(...) by (x)`) plus the top-k
+# functions, which group implicitly.
+GROUPED = re.compile(r'\b(?:by|without)\s*\(|\b(?:topk|bottomk)\s*\(')
+
 # Metrics that deliberately appear on no dashboard. Keep this empty if you
 # can: an entry here is a metric nobody can see.
 UNCHARTED = set()
@@ -170,6 +175,21 @@ def check_dashboard(path, seen_uids, registered, labels, charted):
         fail(f"{path.name}: panel type '{kind}' is used but not in __requires")
     for kind in sorted(declared - used - {"grafana", "prometheus", "loki"}):
         fail(f"{path.name}: __requires declares unused panel type '{kind}'")
+
+    # A grouped query hands the panel a table-shaped frame -- one row per
+    # label value -- rather than one frame per series. Reducing that
+    # (values: false) collapses it to a single item named after the value
+    # column, which is what the panel then draws instead of the categories.
+    for panel in dash.get("panels", []):
+        if panel.get("type") not in ("piechart", "bargauge"):
+            continue
+        exprs = [t.get("expr", "") for t in panel.get("targets", [])]
+        if not any(GROUPED.search(e) for e in exprs):
+            continue
+        if not panel.get("options", {}).get("reduceOptions", {}).get("values"):
+            fail(f"{path.name}: panel {panel['id']} {panel.get('title')!r} "
+                 f"groups by a label but has reduceOptions.values=false -- it "
+                 f"will draw one item named after the value column")
 
     # Every $variable has to be declared.
     declared_vars = {v["name"] for v in dash["templating"]["list"]}

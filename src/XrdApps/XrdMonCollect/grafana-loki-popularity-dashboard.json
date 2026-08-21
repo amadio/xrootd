@@ -250,7 +250,7 @@
       "id": 2,
       "type": "stat",
       "title": "Active users",
-      "description": "Distinct user names with at least one transfer.",
+      "description": "Distinct user names with at least one file operation.",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"

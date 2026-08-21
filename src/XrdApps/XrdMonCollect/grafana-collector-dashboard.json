@@ -1218,7 +1218,7 @@
       "id": 17,
       "type": "table",
       "title": "Packets by server and stream",
-      "description": "One row per reporting server, one column per stream code, totalled over the dashboard window. A server with traffic but a zero f column is not sending fstat records, so none of its transfers will ever be correlated -- check its xrootd.monitor directive.",
+      "description": "One row per reporting server, one column per stream code, totalled over the dashboard window. A server with traffic but a zero f column is not sending fstat records, so none of its file operations will ever be correlated -- check its xrootd.monitor directive.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -1817,7 +1817,7 @@
       "id": 24,
       "type": "timeseries",
       "title": "Unpaired opens and closes",
-      "description": "Correlation failures. Stale opens are open records that never saw a close before the file TTL expired; orphan closes are closes whose open was lost or evicted. Both mean transfer documents are incomplete.",
+      "description": "Correlation failures. Stale opens are open records that never saw a close before the file TTL expired; orphan closes are closes whose open was lost or evicted. Both mean file operation documents are incomplete.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"

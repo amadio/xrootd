@@ -1864,7 +1864,7 @@ guide (`src/XrdApps/XrdMonCollect/`):
 |------|------------|---------|
 | `grafana-collector-dashboard.json` | Prometheus | collector health: ingest and decode rates, packet loss, the reporting server fleet, sinks, shovel transport |
 | `grafana-cluster-dashboard.json` | Prometheus | storage activity: throughput, file operations, sessions, errors, redirects, `g`-stream backends |
-| `grafana-loki-dashboard.json` | Loki | transfer documents: throughput, clients, users, errors |
+| `grafana-loki-dashboard.json` | Loki | file operation documents: throughput, clients, users, errors |
 | `grafana-loki-popularity-dashboard.json` | Loki | data popularity by dataset/path |
 
 The two Prometheus dashboards split by audience: the first answers "is the

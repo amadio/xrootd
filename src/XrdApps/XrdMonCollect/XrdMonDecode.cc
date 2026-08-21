@@ -274,6 +274,14 @@ constexpr std::size_t kSessionFilesMax = 64;
 // stale extreme in place indefinitely.
 constexpr long kClockWindow = 3600;
 
+// How far ahead of this collector's clock a session document's timestamp may
+// land before it is snapped back to the collector's own time. An OTLP receiver
+// enforces a future-timestamp grace of its own (Loki refuses anything more
+// than 10 minutes ahead, and a refused body is lost), so the emitted stamp
+// must stay comfortably inside that while still tolerating ordinary skew
+// between the server's clock and ours.
+constexpr double kMaxFutureSkew = 300;
+
 // FNV-1a hash used to synthesize deterministic OpenTelemetry trace/span ids from
 // the monitoring stream's own correlation keys (server incarnation, user dictid,
 // file id). Deterministic ids let a downstream tracing backend stitch a client
@@ -2359,12 +2367,23 @@ XrdMonDecode::sessionSpanOf(int32_t stod, const Server& srv, const UserInfo* u,
 //
    s.end = tRec;
    if (s.end <= 0 && u) s.end = (double)u->sLast;
-   if (s.end <= 0) s.end = toServerClock(srv, (double)Now());
-// The offset is estimated from what the server reports, so a producer sending
-// nonsense window times could drive it far enough negative to push the end off
-// the epoch. isoTime renders a non-positive time as an empty string, which is
-// what a strict consumer chokes on -- the very failure being fixed here -- so
-// fall back to this collector's own clock, which is always sane.
+   if (s.end <= 0)
+      {// The offset feeding this translation is estimated from what the server
+       // reports, so a producer sending nonsense window times can drive it
+       // arbitrarily wrong in either direction. Off the epoch downward it is
+       // caught below; far into the future it becomes the document's record
+       // timestamp and a strict consumer refuses it outright (Loki's OTLP
+       // ingester allows minutes of grace, and a refused body is lost), so an
+       // estimate beyond ordinary skew falls back to this collector's own
+       // clock. The server-stamped rungs above are deliberately not clamped:
+       // they are measurements, reported in the server's clock like every
+       // other document's times.
+       s.end = toServerClock(srv, (double)Now());
+       if (s.end > (double)Now() + kMaxFutureSkew) s.end = (double)Now();
+      }
+// isoTime renders a non-positive time as an empty string, which is what a
+// strict consumer chokes on -- the very failure being fixed here -- so fall
+// back to this collector's own clock, which is always sane.
 //
    if (s.end <= 0) s.end = (double)Now();
 

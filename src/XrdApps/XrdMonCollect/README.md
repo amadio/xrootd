@@ -718,6 +718,17 @@ Several opt-in streams add finer-grained events:
   `xrootd_collector_session_starts_total{cluster,server,source}`
   makes the mix visible: a server reporting mostly `disconnect` is losing `u`
   records, or its `xrootd.monitor` destination lacks the `user` flag.
+
+  When the disconnect record itself carries no usable time (its packet's TOD
+  was lost) and no close was folded, the end must be *estimated* through that
+  same clock offset — and the end doubles as the session document's record
+  timestamp. Since the offset is a running maximum over server-reported window
+  ends, one bogus window time poisons it for the rest of the hour. An estimate
+  landing more than five minutes ahead of the collector's clock therefore falls
+  back to the collector's own time, because a strict OTLP receiver (Loki, for
+  one) refuses far-future timestamps outright and the refused document would be
+  quarantined and lost. Server-*stamped* times are reported as-is, like every
+  other document's.
 - `--spans` additionally emits an OpenTelemetry **span** document alongside each
   concluded-operation log: a file-operation span per close or failed operation
   (spanning open → close, with `status` `STATUS_CODE_OK`/`STATUS_CODE_ERROR`) and,

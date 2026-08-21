@@ -153,6 +153,76 @@ shoveler spools frames to disk under \fB--cache-dir\fR while the collector is
 unreachable, replaying them oldest-first on reconnect (capped by
 \fB--spool-max\fR, evicting the oldest buffers). See the README for the frame
 layout and deployment guidance.
+.SS Threads
+The daemon has one blocking boundary and one shedding one, and which is which
+determines what a stall costs.
+.P
+.nf
+                       xrdmoncollect (collector mode)
+
+ UDP :--udp-port ---+
+                    v
+       +----------------------+   batch closes on --flush-count,
+       | RECEIVER (main)      |   --flush-secs, or a byte budget
+       +----------+-----------+
+                  |  recvPipe: --queue-depth batches,
+ XSHV :--tcp-port |  bounded, recycling, BLOCKS the producer
+       +----------+-----------+  (the only backpressure there is)
+       | TCP ACCEPT           |
+       | + TCP CONNECTION xN  |========+
+       |   (up to 512)        |        |
+       +----------------------+        v
+                       +----------------------------------------+
+                       | SERIALIZER                             |
+                       |  sole owner of the decoder             |
+                       |  decode, correlate, emitDoc()          |
+                       |  the file/stdout and --forward sinks   |
+                       |    are written INLINE, on this thread  |
+                       |  each 1s idle wake: reap servers (60s),|
+                       |  memory tick (15s), flush (coalescing) |
+                       +------------------+---------------------+
+                                          | sink queue: 16 bodies AND
+                                          | a byte cap, never blocks,
+                                          | drops the OLDEST, counted
+             +----------------+-----------+------------+
+             v                v                        v
+     +---------------++---------------+        +---------------+
+     | SINK THREAD   || SINK THREAD   |        | SINK THREAD   |
+     | opensearch    || opensearch    |        | otlp          |
+     |  "default"    ||  "central"    |        |  "default"    |
+     | POST /_bulk   || POST /_bulk   |        | 2 queues:     |
+     |               ||               |        |  logs+traces  |
+     +-------+-------++-------+-------+        +-------+-------+
+             +----------------+--- on failure ---------+
+                    disk cache (--cache-dir): spill, then replay
+                    oldest-first.  One directory per destination.
+
+   off the data path, both optional:
+     +--------------------------+  +--------------------------+
+     | METRICS EXPORTER         |  | SCITAGS REFRESHER        |
+     | --metrics-port           |  | --scitags <url>          |
+     +--------------------------+  +--------------------------+
+.fi
+.P
+Receive to decode blocks because the producer is the kernel and a dropped
+datagram is unrecoverable. Decode to sink never blocks because the consumer is a
+remote endpoint: a queue that fills sheds its oldest body and counts it, so a
+dead central collector cannot slow the decoder or affect the other destinations.
+The unit of parallelism is the \fIdestination\fR, not the sink kind; one OTLP
+destination is a single thread draining two queues (logs and traces, which
+replay to different endpoints and so cache apart). The serializer is the sole
+decoder, so correlation state needs no locking, and it waits with a timeout
+rather than blocking so that housekeeping runs on the clock instead of on packet
+arrival. In shoveler mode the receiver feeds a sender thread instead, and nothing
+is decoded, correlated or serialized.
+.P
+Shutdown order is load-bearing: the TCP connection threads are joined before the
+receive pipe closes (they are producers into it), the correlation state is
+snapshotted only once the serializer has joined, and every sink then gets 20
+seconds to deliver what it holds -- in parallel, so the wait is the slowest and
+not their sum -- before whatever is still in flight is cancelled. The bundled
+unit allows for this with \fBTimeoutStopSec=45\fR. See the README for the full
+thread model, the queue budget arithmetic and the coalescing rule.
 .P
 Usage synopsis can be displayed by typing "\fBxrdmoncollect --help\fR".
 .SH OPTIONS
@@ -278,6 +348,13 @@ Serve aggregated metrics in Prometheus exposition format over HTTP on
 \fIport\fR. A shoveler serves its own metric set under the
 \fBxrootd_shoveler_\fR prefix.
 .P
+The exporter binds IPv4 \fBINADDR_ANY\fR and \fBignores --bind\fR, unlike the UDP
+and shovel listeners, so on an IPv6-only host it is unreachable. It serves one
+connection at a time, answers every path with the full exposition, and has no
+authentication: restrict it with a firewall or a host-local bind in the
+orchestrator, and do not scrape it at sub-second intervals -- a large registry
+serialized on every request is a self-inflicted stall.
+.P
 Every per-server series carries \fBcluster\fR and \fBserver\fR labels, so
 \fBsum by (cluster)\fR gives a whole storage system. \fBcluster\fR is the
 server's \fBall.sitename\fR, which this collector reads as the name of the
@@ -362,15 +439,29 @@ arrive slowly (default: 5).
 .RE
 \fB--rcvbuf\fR \fIsz\fR
 .RS 5
-Kernel UDP receive buffer size (\fBSO_RCVBUF\fR; K/M/G suffix; default 16M).
-A larger buffer absorbs bursts and the brief windows when the receiver waits on
-a full pipeline, so the kernel does not drop datagrams.
+Kernel UDP receive buffer size (K/M/G suffix; default 16M). A larger buffer
+absorbs bursts and the brief windows when the receiver waits on a full pipeline,
+so the kernel does not drop datagrams.
+.P
+The request is made with \fBSO_RCVBUFFORCE\fR first and falls back to plain
+\fBSO_RCVBUF\fR, so it can exceed \fBnet.core.rmem_max\fR only when the process
+holds \fBCAP_NET_ADMIN\fR -- which the bundled \fBxrdmoncollect.service\fR does
+not grant. Under the shipped units the supported way past that ceiling is
+\fBReceiveBuffer=\fR in \fBxrdmoncollect.socket\fR, which systemd applies as
+root before dropping privileges (see \fBSYSTEMD INTEGRATION\fR); otherwise raise
+\fBnet.core.rmem_max\fR on the host. Note also that the kernel doubles whatever
+is granted, and reports the doubled figure in \fBss -uanm\fR.
 .RE
 \fB--queue-depth\fR \fIn\fR
 .RS 5
 Number of packet batches that may be in flight between the receiver and the
 serializer threads (default: 64). When the serializer falls behind, the receiver
 waits for a free batch (backpressure) rather than dropping packets.
+.P
+This is the only place the collector applies backpressure. A slow \fIsink\fR
+never reaches here: its queue sheds its oldest bodies instead (see
+\fB--cache-dir\fR and \fBThreads\fR above), so what this depth absorbs is a slow
+\fIdecoder\fR, and beyond it \fB--rcvbuf\fR.
 .RE
 \fB--max-memory\fR \fIsz\fR
 .RS 5

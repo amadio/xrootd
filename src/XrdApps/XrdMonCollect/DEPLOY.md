@@ -195,7 +195,7 @@ Conventions used throughout this guide:
 `xrdmoncollect` is one binary with two roles, selected by configuration:
 
 - **Collector mode** (default): decodes the `xrootd.monitor` UDP streams,
-  correlates opens/closes/transfers into complete OpenTelemetry-shaped JSON
+  correlates opens/closes/I-O into complete OpenTelemetry-shaped JSON
   documents, and delivers them to sinks (OTLP → Alloy, OpenSearch `_bulk`,
   NDJSON file, TCP forward). It also serves aggregated Prometheus metrics.
 - **Shoveler mode** (`shovel = <host:port>` set): does **not** decode.
@@ -258,9 +258,9 @@ What matters and why:
   before switching.
 - `lfn` — adds the file path to open events; without it documents have no
   file names.
-- `xfr 10` — emits in-progress transfer snapshots; **required** for the
-  collector to report bytes for long-running transfers and to notice
-  transfers that never close cleanly.
+- `xfr 10` — emits in-progress I/O snapshots; **required** for the
+  collector to report bytes for long-running operations and to notice
+  operations that never close cleanly.
 - `auth` — enriches the user stream with the authentication method and
   VO/role, which feed the `xrootd.vo` and auth attributes.
 - `ops ssq` — operation counts and sum-of-squares statistics on close.
@@ -274,7 +274,7 @@ What matters and why:
 - **`fbsz` must be set explicitly on servers older than XRootD 6.1**: the
   fstat buffer did not follow `mbuff` and defaulted to 65472 bytes — 44 IP
   fragments per datagram on a 1500-MTU path. The fstat stream is what
-  transfer documents are built from, so this is the single most important
+  file operation documents are built from, so this is the single most important
   tuning knob. From 6.1 on, `fbsz` defaults to the `mbuff` value.
 - `dest ... localhost:9930` — with a shoveler on the node (recommended).
   For the direct-UDP variant, use the collector host instead.
@@ -402,7 +402,7 @@ spans = true
 cache-dir = /var/lib/xrootd/moncollect
 
 # Prometheus self-metrics: decoder health, packet loss, sink health,
-# per-VO/locality transfer aggregates.
+# per-VO/locality I/O aggregates.
 metrics-port = 9932
 
 # Correlation-state persistence across clean restarts (defaults into the
@@ -429,7 +429,7 @@ state-ttl = 15m
 # First capture group becomes the xrootd.dataset attribute (feeds the
 # data-popularity dashboards). Example for a CMS-style /store namespace:
 # dataset = ^/store/[^/]+/[^/]+/([^/]+)/
-# SciTags registry for experiment/activity names on flow-tagged transfers:
+# SciTags registry for experiment/activity names on flow-tagged operations:
 # scitags = https://www.scitags.org/api.json
 # scitags-refresh = 3600
 
@@ -485,7 +485,7 @@ token = @/etc/xrootd/wlcg.token
 # ...or a second OpenSearch cluster, writing a differently named index.
 [opensearch "wlcg"]
 url        = https://es.wlcg.example:9200
-index      = wlcg-transfers
+index      = wlcg-file-ops
 datastream = true
 token      = @/etc/xrootd/wlcg-os.token
 ```
@@ -1010,7 +1010,7 @@ docker compose ps                     # collector healthcheck: healthy
 xrdcp /etc/hostname xroot://localhost:1094//data/smoke-test
 ```
 
-Then follow section 20 (verification) — the transfer document appears in
+Then follow section 20 (verification) — the file operation document appears in
 Grafana → Explore → Loki within one flush interval.
 
 ## 7. Track D — Kubernetes
@@ -2195,7 +2195,7 @@ Add the datasource (Connections → Data sources → OpenSearch):
   `@timestamp`.
 - For Alloy-routed logs: index name `otel-logs-*`, time field `@timestamp`.
 
-Verify end to end with a real transfer (section 20), or re-run the
+Verify end to end with a real file operation (section 20), or re-run the
 `telemetrygen logs` command from section 20.1 and query Lucene `*` over the
 last 15 minutes in Grafana → Explore → OpenSearch.
 
@@ -2243,7 +2243,7 @@ Kubernetes (7) tracks.
 | Service | Path (in container) | Content | If lost | Sizing start point |
 |---------|--------------------|---------|---------|--------------------|
 | Prometheus | `/prometheus` | TSDB | metric history gone | grows with series count × retention; 50 Gi for 90 d on a mid-size site, then measure |
-| Loki | `/var/lib/loki` | chunks + index | document history gone | dominated by transfer volume (~1–2 KiB/document before compression) |
+| Loki | `/var/lib/loki` | chunks + index | document history gone | dominated by document volume (~1–2 KiB/document before compression) |
 | Tempo | `/var/lib/tempo` | WAL + blocks | trace history gone | spans are opt-in; start 20 Gi |
 | Grafana | `/var/lib/grafana` | `grafana.db` (users, manual dashboards), plugins | dashboards/users gone (provisioned ones come back) | 1 Gi |
 | OpenSearch | `/usr/share/opensearch/data` | indices / data streams | document history gone | the largest consumer — plan with the ISM policy below |
@@ -2469,7 +2469,7 @@ xrdcp /etc/hostname xroot://<XROOTD_HOST>:1094//<export>/mon-smoke-test
 xrdcp xroot://<XROOTD_HOST>:1094//<export>/mon-smoke-test /tmp/back
 ```
 
-Follow the transfer through the pipeline:
+Follow the file operation through the pipeline:
 
 1. **Shoveler** (`curl -s <node>:9932/metrics`): the shoveler frame counters
    increase; the spool gauges stay at zero.

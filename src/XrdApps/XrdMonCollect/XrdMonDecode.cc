@@ -317,8 +317,8 @@ std::string sessKey(const std::string& src, int32_t stod, uint32_t userID)
 {
    return src + "|" + std::to_string(stod) + "|" + std::to_string(userID);
 }
-// spanId of a file's transfer span, shared by EmitClose and the trace stream so
-// per-I/O detail records correlate under the same span the transfer emits.
+// spanId of a file's span, shared by EmitClose and the trace stream so
+// per-I/O detail records correlate under the same span the close emits.
 std::string fileSpanId(const std::string& src, int32_t stod, uint32_t fileID)
 {
    return spanIdOf(src + "|" + std::to_string(stod) + "|f"
@@ -990,7 +990,7 @@ void XrdMonDecode::NoteActive(Server& srv, uint32_t userID, double tBeg,
 // The session was demonstrably alive across this record, so it bounds the login
 // from above and the disconnect from below. Tracked over every record naming
 // the session rather than over closes alone: an open is the earliest thing the
-// f stream reports for a file and precedes its close by the whole transfer,
+// f stream reports for a file and precedes its close by the whole operation,
 // while an I/O trace or a redirect can be the only thing a session ever
 // produces.
 //
@@ -1836,10 +1836,10 @@ void XrdMonDecode::MemoryTick(time_t now)
 void XrdMonDecode::ReapServers(time_t now)
 {
 // Expire open-file entries whose close was never seen. Gated per incarnation
-// on sawXfr: with "xfr" reporting a live transfer refreshes its entry every
+// on sawXfr: with "xfr" reporting a live operation refreshes its entry every
 // interval, so an entry untouched for fileTTL seconds is a leaked open (its
-// close packet was lost), not a long-running transfer. Without that gate a
-// long transfer on a server that does not report snapshots would be dropped.
+// close packet was lost), not a long-running operation. Without that gate a
+// long operation on a server that does not report snapshots would be dropped.
 //
    if (fileTTL)
       for (auto& [key, s] : servers)
@@ -1999,7 +1999,7 @@ void XrdMonDecode::DecodeMap(unsigned char code, Server& srv,
       else if (code == XROOTD_MON_MAPINFO)
               {stats.mapInfo++;
                // 'i' (appinfo): "<descriptor>\n<appinfo>". The descriptor matches
-               // the 'u' user descriptor, so key by it to enrich transfers.
+               // the 'u' user descriptor, so key by it to enrich file ops.
                auto nl = text.find('\n');
                if (nl != std::string::npos)
                   {std::string ikey = text.substr(0, nl);
@@ -2013,7 +2013,7 @@ void XrdMonDecode::DecodeMap(unsigned char code, Server& srv,
       else if (code == XROOTD_MON_MAPTOKN)
               {stats.mapTokn++;
                // 'T' (token): CGI "&Uc=<dictid>&s=&n=&o=&r=&g=", keyed by the
-               // same user dictid as the 'u' map so it joins onto transfers.
+               // same user dictid as the 'u' map so it joins onto file ops.
                TokenInfo t;
                t.subject  = cgiVal(text, "s");
                t.username = cgiVal(text, "n");
@@ -2304,9 +2304,9 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
 
                 case XrdXrootdMonFileHdr::isXfr:
                      // In-flight snapshot (interval byte totals for an open
-                     // file). Counted; drives the active-transfer gauge below.
+                     // file). Counted; drives the files_open gauge below.
                      // Also keeps a still-active open warm in the LRU so a long
-                     // but live transfer is not evicted ahead of cold strays.
+                     // but a live operation is not evicted ahead of cold strays.
                      {stats.xfrs++;
                       srv.sawXfr = true;   // xfr reporting on: file TTL is safe
                       uint32_t fileID = rd32(rec + 4);
@@ -2391,7 +2391,7 @@ XrdMonDecode::sessionSpanOf(int32_t stod, const Server& srv, const UserInfo* u,
 // parented by this one, so the window has to reach the last of them however the
 // disconnect was timed. It routinely is not: a record's time is interpolated
 // across its packet's window, and a close in one f-stream packet and the
-// disconnect in the next carry independent estimation error, so a transfer that
+// disconnect in the next carry independent estimation error, so an operation that
 // really did finish first can come out stamped later. Widened before the begin
 // candidates are admitted, since the end is their upper bound -- a late close
 // that pushes the end out also admits a login the old bound would have thrown
@@ -2559,7 +2559,7 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
                              uint32_t fileID, unsigned char recFlag,
                              const unsigned char* rec, int recSize, double tRec)
 {
-// Always-present transfer byte totals (XrdXrootdMonStatXFR after the 8-byte hdr).
+// Always-present I/O byte totals (XrdXrootdMonStatXFR after the 8-byte hdr).
 //
    if (recSize < 8 + 24)
       {Malformed(src, XROOTD_MON_MAPFSTA, "bad_record", &srv); return;}
@@ -2632,7 +2632,7 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
        // consumer any more (see the commit that dropped vo_transfers_total).
        otelIdentity(a, srv, of.user);
 
-       // LAN/WAN heuristic: tag the transfer local when the client and the
+       // LAN/WAN heuristic: tag the operation local when the client and the
        // reporting server share a registered domain. Only decidable when both
        // are resolvable host names (not IP literals); otherwise left unset.
        // client.address is name-first, so it is the client name when one is
@@ -2729,7 +2729,7 @@ void XrdMonDecode::EmitClose(const std::string& src, int32_t stod, Server& srv,
       }
 
 // Terminal status (xrootd.operation.state). A close carrying a trailing
-// XrdXrootdMonStatERR (hasERR) reports an aborted/failed transfer; the error
+// XrdXrootdMonStatERR (hasERR) reports an aborted/failed operation; the error
 // block trails any XrdXrootdMonStatOPS/SSQ blocks. Otherwise the close is the
 // authoritative success report.
 //
@@ -3048,8 +3048,8 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
            }
 
 // Trace context: correlate the record with its client session so tracing
-// backends nest the detail under the transfer/session span. A true I/O op
-// (read/write/readv) becomes its own span, a child of the file's transfer span,
+// backends nest the detail under the file/session span. A true I/O op
+// (read/write/readv) becomes its own span, a child of the file's span,
 // so with --spans the waterfall reads session -> file -> I/O; its log carries
 // that span's id. A file marker (open/close) instead maps onto the file span
 // itself, and a disconnect onto the session span (keyed like EmitClose /
@@ -3113,7 +3113,7 @@ void XrdMonDecode::DecodeTStream(const std::string& src, int32_t stod,
         otelBegin(j, ev, tRec, false);
         const bool sent = emitDoc(j, srv);
 
-// With --spans, an I/O op also appears as a child span under the file's transfer
+// With --spans, an I/O op also appears as a child span under the file's
 // span (emitSpan is a no-op otherwise); ev is "xrootd.io.<op>", so skipping the
 // prefix names the span with the bare operation. I/O entries are instants: the
 // span is zero-length at the record's (clamped) time.

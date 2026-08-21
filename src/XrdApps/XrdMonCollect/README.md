@@ -2,7 +2,7 @@
 
 `xrdmoncollect` reads XRootD detailed-monitoring UDP packets (the
 `xrootd.monitor` streams), correlates the **`f` (file-stats) stream** against
-the user dictionary, and writes **one JSON document per completed transfer**
+the user dictionary, and writes **one JSON document per completed file operation**
 (file close). The output is line-delimited JSON (NDJSON), the OpenSearch
 `_bulk` format, or OTLP/JSON, suitable for ingestion into OpenSearch /
 Elasticsearch, an OpenTelemetry collector, Loki, and so on.
@@ -286,7 +286,7 @@ The order matters, and each step depends on the one before it:
 5. Give every sink 20 s to deliver what it holds. They drain **in parallel**, so
    the wait is the slowest destination and not the sum of them.
 6. Cancel whatever is still in flight — a curl progress callback aborts the
-   transfer, so an endpoint that black-holes packets cannot hold the process for
+   POST, so an endpoint that black-holes packets cannot hold the process for
    its whole retry ladder and then be SIGKILLed part way through. Join.
 7. Join the metrics exporter and SciTags threads.
 
@@ -302,7 +302,7 @@ one host and restarts are separate incarnations. Each incarnation holds the
 `u`/`d`/`i` (user, path, appinfo) dictionaries, the `T`/`U` (token, SciTags)
 maps, and the **open-file table**. A file close is correlated by looking up its
 `fileID` in that table to recover the LFN, open size, user, and open timestamp,
-then joining the user dictionary to produce **one transfer document** per close
+then joining the user dictionary to produce **one file operation document** per close
 (see `XrdMonDecode.{hh,cc}`, the `Server` struct and `ServerFor`).
 
 State is bounded so it cannot grow without limit when a close or disconnect is
@@ -313,7 +313,7 @@ an incarnation):
   of the process**. Once per control tick the collector reads its own RSS and,
   if it is over, lowers the budget the correlation state may occupy;
   **LRU-eviction** takes the cold entries first. Recency protects a genuine
-  long-running transfer: each in-flight `xfr` snapshot and each reference of a
+  long-running operation: each in-flight `xfr` snapshot and each reference of a
   session by a close promotes the entry, so a file left open for a day survives
   while memory allows. When RSS falls back under the cap the budget is restored
   gradually.
@@ -344,8 +344,8 @@ an incarnation):
 - `--file-ttl` (default `0` = off) expires open-file entries untouched for the
   given period, covering leaks whose disconnect was also lost. It only applies
   to servers that report in-flight snapshots (`xfr` on `xrootd.monitor
-  fstat`), where a live transfer refreshes its entry every interval — so a
-  long-running transfer is never mistaken for a leak. Set it to at least 3× the
+  fstat`), where a live operation refreshes its entry every interval — so a
+  long-running operation is never mistaken for a leak. Set it to at least 3× the
   server's xfr reporting period (`xfr count × flush interval`).
 
 The consequences of eviction/loss for the *output* (orphan closes, documents
@@ -608,7 +608,7 @@ detected.
 
 ```sh
 # Collect to a file as NDJSON
-xrdmoncollect -p 9930 -o /var/log/xrootd/transfers.ndjson -v
+xrdmoncollect -p 9930 -o /var/log/xrootd/fileops.ndjson -v
 
 # Post directly to an OpenSearch data stream
 xrdmoncollect -p 9930 --os-url https://opensearch:9200 \
@@ -689,7 +689,7 @@ Several opt-in streams add finer-grained events:
   That guarantee is not free, because no record carries an exact time. A
   record's time is interpolated across the window of the packet carrying it, so
   two records from different packets — and especially from different streams,
-  which window independently — carry independent estimation error. A transfer
+  which window independently — carry independent estimation error. An operation
   that really did finish before the client disconnected can arrive stamped
   after it. The collector therefore tracks the earliest and latest time of any
   record naming a session and widens the resolved window to cover both.
@@ -705,7 +705,7 @@ Several opt-in streams add finer-grained events:
   | :-- | :-- | :-- |
   | `login` | the `t`-stream disconnect's connect duration, subtracted from its time | exact to the second the server reported it in |
   | `connect` | the `u` login record's arrival, translated into the server's clock | true login, within the receive batching interval |
-  | `first_activity` | the earliest record naming the session (open, I/O trace, transfer snapshot, error, close, redirect) | exact, but misses the login and authentication — unless it simply predates the other candidates |
+  | `first_activity` | the earliest record naming the session (open, I/O trace, in-flight snapshot, error, close, redirect) | exact, but misses the login and authentication — unless it simply predates the other candidates |
   | `disconnect` | the disconnect itself | none: the session is reported as an instant |
 
   The **earliest admissible** candidate wins, ties going to the more
@@ -789,8 +789,8 @@ Several opt-in streams add finer-grained events:
   dictionary (`d` stream) to resolve file names. Every record carries the client
   session `traceId`. A true I/O op (`read`/`write`/`readv`) gets its **own**
   `spanId` and, with `--spans`, a companion child span parented on the file's
-  transfer span — so the trace waterfall reads **session → file → I/O**. File
-  markers (`open`/`close`) instead carry the file's transfer `spanId` (they are
+  span — so the trace waterfall reads **session → file → I/O**. File
+  markers (`open`/`close`) instead carry the file's `spanId` (they are
   already represented by that span), and a `disconnect` the session span. The one
   exception is `appid`, which carries no dictionary id and so cannot be
   correlated. The opening user is resolved from the file id, so the file's
@@ -827,7 +827,7 @@ Several opt-in streams add finer-grained events:
 
 The `u` (user), `d` (path) and `i` (appinfo) dictionaries are always consumed:
 they resolve identities and paths for the other streams, and the appinfo (`i`)
-is joined to each transfer document by session descriptor (adds `xrootd.app`
+is joined to each file operation document by session descriptor (adds `xrootd.app`
 when the client set one and it differs from the login `&y=`, which is
 `user_agent.original`).
 
@@ -838,7 +838,7 @@ records are also always consumed:
   (`attributes["event.name"]` = `xrootd.server_ident`) per server incarnation
   (its `resource`: `service.namespace`, `service.name`,
   `service.instance.id`, `service.version`, `server.address`, `server.port`,
-  `process.executable.name`) and that identity is joined into every transfer
+  `process.executable.name`) and that identity is joined into every file operation
   document's `resource`. Re-sent identically each `ident` interval; the
   collector emits the document only when it changes.
 - `T` (`MAPTOKN`) carries the token identity (subject, VO, role, groups). Keyed
@@ -850,7 +850,7 @@ records are also always consumed:
   unix/krb5/pwd/host auth is ignored rather than surfacing fake VO values.
   (For SciTokens the `T` record's own `&o=` is the token *issuer*.)
 - `U` (`MAPUEAC`) carries the SciTags packet-marking flow labels (experiment
-  and activity ids), joined onto transfers as
+  and activity ids), joined onto file operations as
   `scitags.experiment_id`/`scitags.activity_id`.
   With `--scitags <src>` pointing at a SciTags registry (the scitags.org schema:
   a top-level `"experiments"` array of `{expId, expName, activities:[{activityId,
@@ -1010,7 +1010,7 @@ A few consequences worth knowing:
   tagged one passes the label on to its span, so a trace is never left with a
   parentless child.
 * Identity attributes (`user`, `vo`, `authprot`, `client`, …) are attached to
-  the transfer, error, redirect and session documents, but **not** to the
+  the file operation, error, redirect and session documents, but **not** to the
   per-I/O `--traces` records or to `xrootd.gstream` documents, which carry no
   identity. With `--traces` enabled, suppressing a session's I/O records needs a
   second rule keyed on something they do carry, such as `path`/`dir` or
@@ -1030,7 +1030,7 @@ xrdmoncollect: 3 filter rule(s) loaded (1 tag, 1 drop, 1 keep)
 
 ### Output document
 
-The per-transfer document uses the OpenTelemetry-aligned schema described under
+The per-operation document uses the OpenTelemetry-aligned schema described under
 [Serialization](#serialization): a process-level `resource` object and an
 event-level `attributes` object. One object per file close. The example below
 shows a fully-populated successful read (server configured with
@@ -1115,7 +1115,7 @@ shows a fully-populated successful read (server configured with
 }
 ```
 
-A few transfer-document fields cannot appear in this (successful, xroot)
+A few document fields cannot appear in this (successful, xroot)
 example because they are situational: a failed operation replaces
 `"Successful"` with `"Failed"` and adds `error.type` (the server's verbatim
 reason) and `xrootd.error.code`; a session over the HTTP bridge carries
@@ -1175,7 +1175,7 @@ above):
 }
 ```
 
-A **failed transfer** (a terminal read/write error recorded during the
+A **failed operation** (a terminal read/write error recorded during the
 session, or a failed close) is reported on the close record itself, so the
 document keeps the full close shape — partial byte totals, `ops`/`ssq`
 detail, `open_seen`, the byte-derived `read`/`write` direction — and adds
@@ -1353,7 +1353,7 @@ derive the split from the documents.
 
 `xrootd.operation.state` is the authoritative success/failure of the
 operation: a plain close reports `Successful`, while a failed open, a
-mid-transfer read/write error, or a failed close reports `Failed` together
+mid-operation read/write error, or a failed close reports `Failed` together
 with `xrootd.operation.name` (the operation that failed:
 `open`/`read`/`write`/`close`/`auth`; named after semconv's
 `nfs.operation.name`), `xrootd.error.code` (the XRootD error code), and
@@ -1636,7 +1636,7 @@ token = @/etc/xrootd/wlcg.token
 
 [opensearch "site"]
 url   = https://opensearch.example.org:9200
-index = site-transfers
+index = site-file-ops
 ```
 
 Section keys are the long-option names without the `os-`/`otlp-` prefix: `url`
@@ -1821,7 +1821,7 @@ ignored with a warning.
 ### Server configuration
 
 Point the server's file-stats stream at the collector. **The `xfr` option is
-required to get close records** (and therefore transfer documents): without it
+required to get close records** (and therefore file operation documents): without it
 the server registers opens but never emits the per-file `isClose` record
 (`XrdXrootdMonFile.cc` only assigns the monitor entry when I/O stats are kept).
 The `lfn` option adds the path to the open record and `ops`/`ssq` add the
@@ -1832,7 +1832,7 @@ field table above); without it those fields are simply absent.
 The VO path (gsi → VOMS attribute certificate → `XrdSecEntity.vorg` → MAPUSER
 `&o=` → `xrootd.vo`) is exercised end-to-end by the `XRootD::moncollect`
 integration test when the VOMS plug-in is built: it mints a fake VOMS proxy with
-`voms-proxy-fake` and asserts `xrootd.vo` appears on the transfer document.
+`voms-proxy-fake` and asserts `xrootd.vo` appears on the file operation document.
 
 ```
 xrootd.monitor all flush 30 fstat 30 lfn ops ssq xfr 1 auth ident 300 \
@@ -1874,7 +1874,7 @@ Until XRootD 6.1 `fbsz` does **not** follow `mbuff`: a cluster that sets
 `mbuff 1472` (to fit a 1500-byte MTU) but leaves `fbsz` alone still emits
 fstat datagrams of up to 65472 bytes — ~44 IP fragments each, so even a 0.1%
 fragment loss rate kills a few percent of the fstat stream, which is exactly
-the stream the transfer documents are built from. Newer servers default `fbsz`
+the stream the file operation documents are built from. Newer servers default `fbsz`
 to the `mbuff` value when only `mbuff` is given; on older servers set it
 explicitly:
 
@@ -2427,7 +2427,7 @@ per-shoveler pipeline, spool backlog and connectivity, for which you scrape
 the shovelers' own `--metrics-port` with the same Prometheus. Two tables are
 worth knowing about: *Packets by server and stream* gives one row per server
 and one column per stream code, so a server sending traffic but no `f`
-records — whose transfers can therefore never be correlated — shows up as a
+records — whose file operations can therefore never be correlated — shows up as a
 red cell rather than as a quiet absence; and *Server inventory* lists each
 live server's advertised identity, including the XRootD version it runs.
 
@@ -2502,14 +2502,14 @@ Grafana](#loki--grafana) below.
   [shoveler chain](#shoveler-mode-reliable-tcp-transport) confines this to the
   local hop; its own TCP leg is lossless except for the un-acked kernel-buffer
   window when the collector dies abruptly (see the caveat there).
-- Sub-window record times (event times, transfer start/duration, span
+- Sub-window record times (event times, operation start/duration, span
   start/end) are linear interpolation estimates over each record's position in
   its reporting window, not measured values; only the window boundaries are on
-  the wire (with one-second granularity). Durations of transfers much shorter
+  the wire (with one-second granularity). Durations of operations much shorter
   than the flush interval are therefore approximate, but no longer collapse to
   zero.
-- The `f` stream drives the transfer correlation state. The `t` (per-I/O trace)
+- The `f` stream drives the file operation correlation state. The `t` (per-I/O trace)
   records reuse that state read-only to stamp each record with its file's
   `traceId`/`spanId` (see `--traces`), but do not themselves build correlation
   entries; the `g` (plugin) stream is decoded enough to be counted and
-  optionally emitted, but is not joined into the transfer correlation.
+  optionally emitted, but is not joined into the file operation correlation.

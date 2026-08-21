@@ -21,7 +21,7 @@
 
 // xrdmoncollect: read XRootD detailed-monitoring UDP packets (xrootd.monitor),
 // correlate the "f" (file-stats) stream into one document per completed
-// transfer, and write the documents as NDJSON (or OpenSearch _bulk) to stdout
+// file operation, and write the documents as NDJSON (or OpenSearch _bulk) to stdout
 // or a file. See xrootd-new-metrics.md, Phase 5.
 
 #include <arpa/inet.h>
@@ -246,7 +246,7 @@ void usage(const char* prog)
      "                   (a leaked open whose close record was lost; default\n"
      "                   0=off). Only applied to servers reporting in-flight\n"
      "                   snapshots (\"xfr\" on xrootd.monitor fstat), which\n"
-     "                   refresh live transfers every interval; set it to at\n"
+     "                   refresh live operations every interval; set it to at\n"
      "                   least 3x the server's xfr reporting period\n"
      "  --state-file <f> save the correlation state to <f> on shutdown and\n"
      "                   reload it on startup (default: $STATE_DIRECTORY/\n"
@@ -1803,7 +1803,7 @@ int main(int argc, char* argv[])
    XrdMonDecode::RawSink rawSink;
    if (debug) rawSink = [&](const std::string& r){fprintf(out, "%s\n", r.c_str());};
 
-// When a metrics port is given, aggregate transfers into the registry and
+// When a metrics port is given, aggregate file operations into the registry and
 // serve it over HTTP. The decoder-level statistics are exposed too.
 //
    XrdMetrics::Subsystem* subsystem =

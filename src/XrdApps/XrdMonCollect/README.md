@@ -12,6 +12,12 @@ aggregate sink exposes bounded-cardinality Prometheus metrics over the same
 decoded stream (see [Aggregated metrics](#aggregated-metrics-prometheus)); the
 native server-side metrics live in the `XrdMetrics` component.
 
+**See also.** This file explains *why the collector behaves as it does*.
+[`DEPLOY.md`](DEPLOY.md) is the site deployment guide — which config lines to
+write, and how to stand up the backend behind them.
+[`NETWORK_TUNING.md`](NETWORK_TUNING.md) owns host, kernel, NIC and socket
+tuning for minimizing UDP loss. `man 8 xrdmoncollect` is the option reference.
+
 ## Architecture
 
 `xrdmoncollect` has **one blocking boundary and N shedding ones**, and knowing
@@ -459,18 +465,22 @@ in both.
 
 ### Durability and offline caching
 
-When an HTTP receiver is offline or returns errors, the output thread first
+When an HTTP receiver is offline or returns errors, the sink thread first
 **retries in place**: transient failures (a network error, HTTP 429, or any 5xx)
-are retried up to four times with exponential backoff (1s, 2s, 4s, 8s; capped at
-16s). If a body still cannot be delivered:
+are retried up to four times — five attempts in all — each with a 30 s timeout
+and 1 s, 2 s, 4 s, 8 s of backoff between them, so a body that is going to fail
+takes about 165 s to say so. If a body still cannot be delivered:
 
 - With `--cache-dir`, it is **spooled to disk** (`XrdMonDiskCache`): written to a
   `<name>.tmp` file and then atomically renamed to
   `<13-digit-epoch-ms>-<6-digit-seq>.ndjson`. Cached bodies are replayed
   **oldest-first** once the sink recovers, and any files left by a previous run
   are replayed on **startup** (init scans the directory in lexical — i.e.
-  chronological — order and discards stale `.tmp` partials). The cache has no
-  size limit.
+  chronological — order and discards stale `.tmp` partials). The cache has **no
+  size limit** — `--spool-max` bounds the shoveler's frame spool and nothing
+  else — so the filesystem is the bound, and filling it is the failure mode.
+  Size it for the longest backend outage you must survive, and alert on
+  `cache_bytes` against the free space (see `DEPLOY.md` §18.1).
 - Without `--cache-dir`, the body is **dropped and counted**.
 
 Every destination caches **separately** — each recovers on its own schedule —
@@ -492,11 +502,11 @@ nothing:
 └── otlp-wlcg-traces/
 ```
 
-A destination that has a cache does **not** retry a live POST: it fails fast and
-spills to disk, and the replay path carries the retry ladder (whose backoff is
-also what paces it). Holding a body for the length of the ladder — five
-attempts, 30 s timeout each — while the queue behind it overflows is worse than
-writing it to a cache that is working.
+A destination that has a cache does **not** retry a live POST: its retry count
+is set to zero, so it makes one attempt, fails fast and spills to disk. The
+ladder above lives on the replay path only, where its backoff is also what paces
+the drain. Holding a body for the length of that ladder while the queue behind
+it overflows is worse than writing it to a cache that is working.
 
 Health signals to watch (with `--metrics-port`), all labelled by `destination`:
 `xrootd_collector_cache_files`/`_bytes` (current backlog),
@@ -1544,7 +1554,7 @@ fallback when no other sink is configured (`-o` always adds a file too):
   with `--bulk <index>`. Ship it with an external agent (Filebeat) or `curl`.
 - **OpenSearch** (`--os-url`): available when the binary is built with libcurl
   (the build links `CURL::libcurl` if found). Documents are batched and posted
-  via the `_bulk` API on a dedicated output thread; transient failures (network,
+  via the `_bulk` API on that destination's own sink thread; transient failures (network,
   HTTP 429/5xx) are retried with exponential backoff. With `--cache-dir` a body
   that still fails is written to disk and retried later (see
   [Durability and offline caching](#durability-and-offline-caching)). Accepts
@@ -1557,7 +1567,7 @@ fallback when no other sink is configured (`-o` always adds a file too):
   Elasticsearch, Kafka, and so on. The nested `resource`/`attributes` objects are
   re-encoded into the strict OTLP `resourceLogs`/`resourceSpans` envelope with
   typed `KeyValue` attributes (see [Serialization](#serialization)). Batched per
-  flush on a dedicated output thread with retry/backoff. With `--cache-dir` a body
+  flush on that destination's own sink thread with retry/backoff. With `--cache-dir` a body
   that still fails is written to disk and retried later (logs and traces cache
   separately under `otlp-logs`/`otlp-traces` subdirectories, since they replay to
   different endpoints); without it a terminal failure drops the body (counted).
@@ -1659,15 +1669,20 @@ route it through a trusted network or a TLS tunnel if it must cross one.
 
 ### Command-line options
 
+An abbreviated reference. The authoritative list is `xrdmoncollect --help` and
+`man 8 xrdmoncollect`, whose synopsis is complete.
+
 ```
-xrdmoncollect -p <port> [-b <bindaddr>] [-o <file>] [--bulk <index>]
+xrdmoncollect [-c <file>] -p <port> [-b <bindaddr>] [-o <file>] [--bulk <index>]
               [--os-url <url> [--os-index <name>] [--os-user <u>]
                [--os-pass <p>] [--os-token <t>] [--os-insecure] [--os-datastream]]
               [--otlp-url <url> [--otlp-token <t>] [--otlp-insecure]]
-              [--forward <host:port>]
+              [--cache-dir <dir>] [--forward <host:port>]
+              [--metrics-port <p>] [--site <name>]
               [--tcp-port <p> [--tcp-token <t>]]
               [--shovel <host:port> [--shovel-token <t>] [--spool-max <sz>]]
-              [--flush-count <n>] [--flush-secs <n>] [--debug] [-v]
+              [--flush-count <n>] [--flush-secs <n>] [--rcvbuf <sz>]
+              [--queue-depth <n>] [--max-memory <sz>] [--debug] [-v]
 
   -c <file>        load options from an INI config file, plus any
                    [filter "<name>"] document rules and
@@ -1917,6 +1932,36 @@ over long-haul UDP: the same unit file works for a shoveler — its config just
 sets `shovel = <collector-host>:<tcp-port>` (plus `cache-dir`) instead of the
 sink options, and the central host's config sets `tcp-port`.
 
+#### Socket activation
+
+```sh
+systemctl enable --now xrdmoncollect.socket
+```
+
+`xrdmoncollect.socket` hands systemd the listening sockets
+(`ListenDatagram=9930`, and `ListenStream=9931` once uncommented on a central
+collector) and the daemon inherits them through the `LISTEN_FDS` protocol. Two
+independent benefits, and both are worth having:
+
+- **Restarts stop losing packets.** systemd owns the sockets and holds them
+  across the restart, so datagrams queue in the kernel receive buffer and
+  shoveler connections queue in the listen backlog while nothing is running.
+  Anything that fits in the buffer survives a `systemctl restart`, an upgrade or
+  a crash-restart — the same technique HAProxy uses for seamless reloads.
+- **`ReceiveBuffer=16M` actually takes effect.** systemd applies it as root, so
+  it becomes `SO_RCVBUFFORCE` and is **not** capped by `net.core.rmem_max`. The
+  daemon's own `--rcvbuf` tries the same call first, but the shipped unit runs
+  as `xrootd` with an empty `CapabilityBoundingSet`, so it falls back to plain
+  `SO_RCVBUF` and *is* capped. Under the shipped units the socket unit is the
+  only way to exceed that ceiling without also raising `rmem_max` system-wide
+  (see [`NETWORK_TUNING.md`](NETWORK_TUNING.md) §2).
+
+The ports in the socket unit must match `udp-port`/`tcp-port` in the config: on
+a mismatch the daemon simply binds its own sockets and only the zero-loss
+property is lost. Socket activation is **not** available in a container, where
+the host's `net.core.rmem_max` becomes the real ceiling unless the container is
+granted `CAP_NET_ADMIN`.
+
 ### Capacity and tuning
 
 Enable `--metrics-port` and watch the collector's own metrics to size the knobs.
@@ -1931,10 +1976,20 @@ need larger buffers and a bigger memory budget.
 | `memory_floored_total` climbing | — | The cap cannot be met by evicting correlation state: the memory is elsewhere. Look at the OTLP batch (largest non-state consumer when `--otlp-url` is set), the disk cache, and the container's own limit. |
 | `post_failures_total` / `otlp_failures_total`, growing `cache_files` | `--cache-dir` (+ downstream) | Ensure a cache dir is set so failures spool to disk instead of dropping; investigate the sink. Watch `dropped_bulk_total` for actual loss. Both carry a `destination` label -- check whether one endpoint is failing or all of them. |
 | `post_overflow_total` / `otlp_overflow_total` climbing | the destination, or `--cache-dir` | That destination cannot absorb the input rate: its queue filled and dropped its oldest bodies. Distinct from `dropped_*`, which means a POST failed with nowhere to spill. |
+| `post_queue_bytes` / `otlp_queue_bytes` pinned near their cap, but no overflow | `--max-memory`, the destination | The queue is doing its job with no headroom left. Either the endpoint is marginal, or too many destinations are dividing one budget — see the `qBytes` formula under [Flow control and queues](#flow-control-and-queues). |
+| `otlp_batch_bytes` sawtoothing up to the queue's byte cap | `--flush-secs`, the destination | The accumulator is hitting its byte bound before the 2 s coalescing timer, i.e. input is outrunning the sink rather than merely being bursty. |
 
-Backpressure is intentional: if a sink stalls, the POST queue fills, the
-serializer slows, and finally the receiver relies on `--rcvbuf` to ride out the
-gap. Size `--rcvbuf` and `--cache-dir` for the longest sink outage you must
+**Which stall reaches whom.** A stalled *sink* fills its own bounded queue and
+then sheds its oldest bodies. It never slows the serializer and never reaches
+the receiver — that isolation is the whole point, since a dead central collector
+must not be able to cost a site its own monitoring. Backpressure exists only
+between the receiver and the serializer, and what it absorbs there is a slow
+*decoder*, first into `--queue-depth` and then into `--rcvbuf`.
+
+So the two knobs no longer size the same thing: `--rcvbuf` (with
+`ReceiveBuffer=` in the socket unit, see [Running as a
+service](#running-as-a-service)) covers decode stalls and restarts, while
+`--cache-dir` covers sink outages. Size each for the longest one you must
 survive without loss.
 
 ## Consuming the data
@@ -2130,7 +2185,7 @@ includes a `user` destination.
 Collector health:
 
 ```
-xrootd_collector_documents_total{cluster}      (documents emitted, after filtering)
+xrootd_collector_documents_total{cluster}      (reached at least one sink, after filtering)
 xrootd_collector_filtered_documents_total   (documents suppressed by a [filter] rule)
 xrootd_collector_stale_opens_total{cluster,server}  (opens dropped: close lost)
 xrootd_collector_orphan_closes_total{cluster,server} (closes without an open)
@@ -2148,6 +2203,12 @@ xrootd_collector_memory_floored_total       (over the cap with the budget at its
 xrootd_collector_recv_queue_batches         (gauge: receiver->serializer depth)
 xrootd_process_resident_memory_bytes        (gauge: process RSS -- what --max-memory caps)
 ```
+
+`documents_total` is counted once per document inside `emitDoc()`, whichever
+sink consumes it — so an OTLP-only collector, which never serializes a document
+to text at all, counts them exactly as one writing NDJSON does. (It used to
+count arrivals at the *text* sink; the meaning changed when the tree sink was
+introduced, and the value is unchanged for every configuration that has both.)
 
 `xrootd_process_resident_memory_bytes` sits in a `process` subsystem rather than
 `collector`, matching `xrootd_process_cpu_seconds_total` from the server, and is
@@ -2393,10 +2454,12 @@ Grafana](#loki--grafana) below.
   (`xrootd_collector_orphan_closes_total{cluster,server}`); a lost close leaves a
   stale open, reclaimed at that user's disconnect or by `--file-ttl` and
   counted in `xrootd_collector_stale_opens_total{cluster,server}`; a lost dictionary
-  record yields a document without identity/path. The server stamps every
-  datagram to one destination with a single sequence number (header `pseq`), so
-  the collector estimates loss from forward gaps in it —
-  `xrootd_collector_packets_lost_total{cluster,server}` and the `-v` `lost=` count.
+  record yields a document without identity/path. Each stream class carries its
+  own sequence number (header `pseq`) — the `f` stream and each g-stream
+  provider count independently, while the trace, redirect and map streams share
+  one — so the collector estimates loss from forward gaps per class:
+  `xrootd_collector_packets_lost_total{cluster,server,stream}` and the `-v`
+  `lost=` count.
   (Reordering, a small backward step, is not counted as loss. A disconnect
   overtaking its session's final closes can make the sweep drop opens whose
   closes arrive right after, turning them into orphan closes — already their

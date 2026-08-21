@@ -225,8 +225,9 @@ with \fBContent-Type: application/json\fR. This defines the destination named
 \fBMULTIPLE DESTINATIONS\fR).
 The nested \fBresource\fR/\fBattributes\fR
 objects are re-encoded into the strict OTLP \fBresourceLogs\fR/\fBresourceSpans\fR
-envelope with typed \fBKeyValue\fR attributes. Batched per flush on a dedicated
-output thread with retry/backoff; with \fB--cache-dir\fR a body that still fails
+envelope with typed \fBKeyValue\fR attributes. Batched per flush and posted on
+that destination's own sink thread
+with retry/backoff; with \fB--cache-dir\fR a body that still fails
 is written to disk and retried later (see \fB--cache-dir\fR), otherwise it is
 dropped. Requires that \fBxrdmoncollect\fR was built with libcurl.
 Pointing \fIurl\fR at Loki's OTLP endpoint (e.g. \fBhttp://loki:3100/otlp\fR)
@@ -742,7 +743,10 @@ raw \fBattributes.\fIkey\fR / \fBresource.\fIkey\fR path for any other field.
 Filtering applies to the emitted documents only: a dropped document is still
 counted in the I/O, session and error series and still folded into its session
 rollup, so the aggregate view of the cluster remains complete. The exception is
-\fBdocuments_total\fR, which counts what was actually emitted. The number
+\fBdocuments_total\fR, which counts documents that reached at least one sink --
+the tree sink, the text sink, or both -- so it is the same number for an
+OTLP-only collector, which never serializes a document to text, as for one
+writing NDJSON. The number
 suppressed is exported as \fBfiltered_documents_total\fR and reported as
 \fBfiltered=\fR in the \fB-v\fR exit summary.
 .P

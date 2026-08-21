@@ -391,7 +391,7 @@ spans = true
 # Alternative or additional sink: post documents directly to OpenSearch
 # (section 17) — no Data Prepper needed on this path.
 # os-url = https://opensearch.example.org:9200
-# os-index = xrootd-transfers
+# os-index = xrootd-file-ops
 # os-datastream = true
 # os-user = collector
 # os-pass = <password>            # or: os-token = @/etc/xrootd/opensearch.token
@@ -2022,16 +2022,26 @@ curl -ku admin:'<StrongAdminPassword>' https://localhost:9200   # cluster info J
 ### 17.2 XRootD index template + direct posting from the collector
 
 Apply the composable index template shipped next to this guide **before the
-first document arrives** — it declares `xrootd-transfers` a data stream and
+first document arrives** — it declares `xrootd-file-ops` a data stream and
 maps the OpenTelemetry dotted attribute names:
 
 ```bash
 curl -ku admin:'<StrongAdminPassword>' -X PUT \
-  https://localhost:9200/_index_template/xrootd-transfers \
+  https://localhost:9200/_index_template/xrootd-file-ops \
   -H 'Content-Type: application/json' \
   --data-binary @opensearch-template.json
 ```
 
+> **Upgrading an existing deployment: the index was renamed.** The default
+> `--os-index` was `xrootd-transfers` and is now `xrootd-file-ops` — these are
+> file I/O operations against this cluster, and "transfer" is reserved for a
+> file moving between storage elements. Nothing migrates the old data. Either
+> pin the old name explicitly (`os-index = xrootd-transfers`, and apply the
+> template under that name), or take the new one and let the old index age out
+> under its retention policy while queries span `xrootd-transfers*,xrootd-file-ops*`.
+> The shipped saved objects were renamed with it, so re-importing them creates a
+> new index pattern and dashboard rather than updating the old ones.
+>
 > **Upgrading an existing deployment.** The document schema changed. Event
 > names now name the operation (`xrootd.read`/`xrootd.write` for a file close,
 > `xrootd.<category>` for a failed operation, `xrootd.redirect`, and
@@ -2054,26 +2064,26 @@ curl -ku admin:'<StrongAdminPassword>' -X PUT \
 >
 > ```bash
 > curl -ku admin:'<StrongAdminPassword>' -X POST \
->   https://localhost:9200/xrootd-transfers/_rollover
+>   https://localhost:9200/xrootd-file-ops/_rollover
 > ```
 
 Then enable the direct sink in the collector config (section 3.2):
 
 ```ini
 os-url = https://<OPENSEARCH_HOST>:9200
-os-index = xrootd-transfers
+os-index = xrootd-file-ops
 os-datastream = true
 os-user = admin                    # better: a dedicated write-only user
 os-pass = <StrongAdminPassword>
 ```
 
 (For production, create a dedicated OpenSearch user with write access to
-`xrootd-transfers*` only; `os-token = @<file>` sends a bearer token instead
+`xrootd-file-ops*` only; `os-token = @<file>` sends a bearer token instead
 if the security plugin is configured for JWT.) The demo TLS certificates are
 self-signed — add them to the collector host's trust store, or
 `os-insecure = true` for a lab.
 
-Documents appear in the `xrootd-transfers` data stream; steps 17.3–17.4 are
+Documents appear in the `xrootd-file-ops` data stream; steps 17.3–17.4 are
 then only needed if Alloy-routed logs should land in OpenSearch too.
 
 ### 17.3 Install Data Prepper (OTLP → OpenSearch bridge)
@@ -2181,7 +2191,7 @@ Add the datasource (Connections → Data sources → OpenSearch):
 
 - URL `https://localhost:9200`, Basic auth `admin` / password,
   **Skip TLS verify** enabled (demo certs).
-- For collector documents: index name `xrootd-transfers*`, time field
+- For collector documents: index name `xrootd-file-ops*`, time field
   `@timestamp`.
 - For Alloy-routed logs: index name `otel-logs-*`, time field `@timestamp`.
 
@@ -2203,7 +2213,7 @@ sudo systemctl enable --now opensearch-dashboards
 ```
 
 Import the ready-made XRootD dashboards shipped next to this guide
-(`opensearch-dashboards.ndjson` — transfer monitoring;
+(`opensearch-dashboards.ndjson` — file operation monitoring;
 `opensearch-popularity.ndjson` — data popularity):
 
 ```bash
@@ -2317,7 +2327,7 @@ each backend, sized to the volume you provisioned:
 | collector | `spool-max` (shovel spool), `max-memory` (process memory), `server-ttl` (state) | section 3 configs |
 | Grafana | none (config database) | back it up instead (18.5) |
 
-OpenSearch ISM policy — roll the `xrootd-transfers` data stream daily and
+OpenSearch ISM policy — roll the `xrootd-file-ops` data stream daily and
 delete backing indices after 180 days (adjust ages; verify against your
 OpenSearch version's ISM schema):
 
@@ -2326,7 +2336,7 @@ curl -ku admin:'<StrongAdminPassword>' -X PUT \
   https://localhost:9200/_plugins/_ism/policies/xrootd-retention \
   -H 'Content-Type: application/json' -d '{
   "policy": {
-    "description": "xrootd-transfers: daily rollover, delete after 180d",
+    "description": "xrootd-file-ops: daily rollover, delete after 180d",
     "default_state": "hot",
     "states": [
       {
@@ -2343,7 +2353,7 @@ curl -ku admin:'<StrongAdminPassword>' -X PUT \
       }
     ],
     "ism_template": [
-      { "index_patterns": ["xrootd-transfers*", "otel-logs-*"], "priority": 100 }
+      { "index_patterns": ["xrootd-file-ops*", "otel-logs-*"], "priority": 100 }
     ]
   }
 }'
@@ -2473,7 +2483,7 @@ Follow the transfer through the pipeline:
    `{service_namespace="<your cluster>"} |= "mon-smoke-test"` — one
    `xrootd.read` document with the file path, client, byte counts and
    `resource.service.namespace` (OpenSearch path: Lucene
-   `attributes.file.path:*mon-smoke-test*` on `xrootd-transfers*`).
+   `attributes.file.path:*mon-smoke-test*` on `xrootd-file-ops*`).
 4. **Traces** (with `spans = true`): Tempo → Search — a file-operation span
    whose duration matches open→close.
 5. **Server metrics**: Prometheus `xrootd_*` series from the `xrootd` job

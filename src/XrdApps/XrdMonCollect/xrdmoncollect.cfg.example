@@ -42,7 +42,7 @@ port = 9930
 # output = /var/log/xrootd/moncollect.ndjson
 
 # Write the file/stdout sink in OpenSearch _bulk format for this index.
-# bulk = xrootd-transfers
+# bulk = xrootd-file-ops
 
 # Post documents to an OpenSearch cluster's _bulk API. Authenticate with either
 # basic auth (os-user/os-pass) or a bearer token (os-token, sent as
@@ -51,7 +51,7 @@ port = 9930
 # These keys define the destination named "default"; see the [opensearch] and
 # [otlp] sections near the end of this file for additional endpoints.
 # os-url = https://opensearch.example.org:9200
-# os-index = xrootd-transfers
+# os-index = xrootd-file-ops
 # os-user = collector
 # os-pass = secret
 # os-token = @/etc/xrootd/opensearch.token

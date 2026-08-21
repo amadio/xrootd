@@ -210,7 +210,7 @@ void usage(const char* prog)
      "  -o <file>        append output to <file> (default: stdout unless --os-url)\n"
      "  --bulk <index>   write OpenSearch _bulk format to the file/stdout sink\n"
      "  --os-url <url>   POST documents to an OpenSearch cluster's _bulk API\n"
-     "  --os-index <n>   index/data-stream name (default: xrootd-transfers)\n"
+     "  --os-index <n>   index/data-stream name (default: xrootd-file-ops)\n"
      "  --os-user <u>    basic-auth user\n"
      "  --os-pass <p>    basic-auth password\n"
      "  --os-token <t>   bearer token (Authorization: Bearer); wins over basic\n"
@@ -779,7 +779,7 @@ int runShoveler(const char* prog, const ShovelerOpts& o)
 struct OsDest
 {
    std::string name = "default";
-   std::string url, index = "xrootd-transfers", user, pass, token;
+   std::string url, index = "xrootd-file-ops", user, pass, token;
    bool        insecure = false, dataStream = false;
 };
 
@@ -1003,7 +1003,7 @@ int main(int argc, char* argv[])
    std::string stateFile;                   // state snapshot path (off if empty)
    long        stateTtl   = 900;            // max snapshot age to reload (15m)
    std::string osUrl, osUser, osPass, osToken;
-   std::string osIndex = "xrootd-transfers";
+   std::string osIndex = "xrootd-file-ops";
    bool        osInsecure = false;
    bool        osDataStream = false;
    std::string cacheDir;            // disk cache for failed POSTs (off if empty)

@@ -130,6 +130,13 @@ class XrdMonOtlp
 {
 public:
 
+//! How a POST concluded. The caller's recovery differs per case: a Transient
+//! failure (endpoint unreachable, 429, 5xx) is worth caching and replaying,
+//! while a Rejected body (any other 4xx: the receiver understood the request
+//! and refused it, e.g. a Loki validation error) will fail identically forever
+//! and must be taken out of the replay path.
+enum class PostResult : unsigned char {Ok, Transient, Rejected};
+
 //! @param url      base OTLP/HTTP endpoint, e.g. "http://collector:4318". The
 //!                 signal paths /v1/logs and /v1/traces are appended.
 //! @param token    bearer token sent as "Authorization: Bearer <token>"
@@ -141,8 +148,12 @@ XrdMonOtlp(const std::string& url, const std::string& token, bool insecure);
 //! Initialize the libcurl handle. @return true on success, else sets err.
 bool Init(std::string& err);
 
-bool PostLogs(const std::string& body, std::string& err);
-bool PostTraces(const std::string& body, std::string& err);
+//! POST one body. On failure `err` carries the HTTP status and the full
+//! response body (control characters folded to spaces): an OTLP receiver's
+//! error text names the exact validation failure, which is the one thing an
+//! operator needs when documents are being refused.
+PostResult PostLogs(const std::string& body, std::string& err);
+PostResult PostTraces(const std::string& body, std::string& err);
 
 //! Retries applied to a transient failure (curl error, 429, 5xx), with
 //! doubling backoff. Set to 0 for a live body when a disk cache is
@@ -157,7 +168,8 @@ void Cancel() {cancelled = true;}
 
 private:
 
-bool post(const std::string& url, const std::string& body, std::string& err);
+PostResult post(const std::string& url, const std::string& body,
+                std::string& err);
 
 void*       curl;       // CURL* (opaque to avoid leaking the header)
 std::string logsURL;

@@ -59,6 +59,13 @@ class XrdMonOpenSearch
 {
 public:
 
+//! How a POST concluded. The caller's recovery differs per case: a Transient
+//! failure (cluster unreachable, 429, 5xx) is worth caching and replaying,
+//! while a Rejected body (any other 4xx: the cluster understood the request
+//! and refused it, e.g. a malformed action line or a blocked index) will fail
+//! identically forever and must be taken out of the replay path.
+enum class PostResult : unsigned char {Ok, Transient, Rejected};
+
 //! @param url        base cluster URL, e.g. "https://localhost:9200".
 //! @param index      index or data-stream the documents are written to.
 //! @param user       basic-auth user (empty for none).
@@ -83,8 +90,13 @@ bool Init(std::string& err);
 void Add(std::string& batch, const std::string& jsonDoc) const;
 
 //! POST the accumulated bulk body. Retries transient errors with backoff.
-//! @return true on a 2xx response with no per-item errors; else sets err.
-bool Bulk(const std::string& body, std::string& err);
+//! @return Ok on a 2xx response (err carries a warning when the response
+//!         reports per-item failures: the body was partly accepted, so
+//!         re-posting it would duplicate what got through). Otherwise err
+//!         carries the HTTP status and the full response body (control
+//!         characters folded to spaces), which is where the cluster names the
+//!         mapping or index that refused the documents.
+PostResult Bulk(const std::string& body, std::string& err);
 
 //! The index/data-stream name (for the action metadata line).
 const std::string& Index() const {return idx;}

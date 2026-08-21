@@ -36,6 +36,10 @@ METRICS_PORT=8098
 # than the command line: the shape a site uses to keep its own monitoring and
 # feed a central collector at the same time.
 OTLP2_PORT=8099
+# The same mock again, standing in for an OpenSearch cluster: it ignores the
+# path and its "{}" reply carries no "errors":true, which is all _bulk needs.
+OS_PORT=8100
+OS_INDEX=e2e-moncollect
 
 # The site is the one identity the collector supplies itself: it is not on the
 # monitoring wire (all.sitename names the storage cluster, which this test sets
@@ -46,7 +50,14 @@ OTLP_OUT="${PWD}/${NAME}/otlp.captured"
 OTLP_PID="${PWD}/${NAME}/otlp.pid"
 OTLP2_OUT="${PWD}/${NAME}/otlp2.captured"
 OTLP2_PID="${PWD}/${NAME}/otlp2.pid"
+OS_OUT="${PWD}/${NAME}/os.captured"
+OS_PID="${PWD}/${NAME}/os.pid"
 OTLP_CACHE="${PWD}/${NAME}/otlp-cache"
+# While one of these files exists, the corresponding mock refuses its next POST
+# with a 400 (see otlp_mock.py): the e2e uses them to prove that a body a sink
+# permanently refuses is quarantined instead of wedging the export behind it.
+OTLP_REJECT="${PWD}/${NAME}/otlp.reject-next"
+OS_REJECT="${PWD}/${NAME}/os.reject-next"
 
 # Security fragment that moncollect.cfg continues into (see the cfg). Generated
 # at setup time so its contents can depend on whether VOMS is built. The name has
@@ -134,12 +145,16 @@ function setup_moncollect() {
 		setup_moncollect_voms
 	fi
 
-	# When python3 is available, start the mock OTLP receiver and point the
-	# collector at it (the traces export is exercised via --spans below).
+	# When python3 is available, start the mock receivers and point the
+	# collector at them (the traces export is exercised via --spans below).
+	# Only the first OTLP receiver and the OpenSearch one get a control file:
+	# the "central" OTLP destination stays healthy throughout, which is what
+	# shows that one destination refusing a body does not disturb another.
 	OTLP_ARGS=""
 	if command -v python3 >/dev/null 2>&1; then
 		: > "${OTLP_OUT}"
 		python3 "${SOURCE_DIR}/otlp_mock.py" "${OTLP_PORT}" "${OTLP_OUT}" \
+		        "${OTLP_REJECT}" \
 		        > "${PWD}/${NAME}/otlp.log" 2>&1 < /dev/null &
 		echo $! > "${OTLP_PID}"
 		disown 2>/dev/null || true
@@ -148,13 +163,21 @@ function setup_moncollect() {
 		        > "${PWD}/${NAME}/otlp2.log" 2>&1 < /dev/null &
 		echo $! > "${OTLP2_PID}"
 		disown 2>/dev/null || true
+		: > "${OS_OUT}"
+		python3 "${SOURCE_DIR}/otlp_mock.py" "${OS_PORT}" "${OS_OUT}" \
+		        "${OS_REJECT}" \
+		        > "${PWD}/${NAME}/os.log" 2>&1 < /dev/null &
+		echo $! > "${OS_PID}"
+		disown 2>/dev/null || true
 		# --otlp-token exercises the bearer-auth path; the token is read from a
 		# file (@<path>) so the secret is not passed on the command line.
 		printf 'secrettoken123' > "${PWD}/${NAME}/otlp.token"
 		OTLP_ARGS="--otlp-url http://127.0.0.1:${OTLP_PORT} \
 		           --otlp-token @${PWD}/${NAME}/otlp.token \
+		           --os-url http://127.0.0.1:${OS_PORT} \
+		           --os-index ${OS_INDEX} \
 		           --cache-dir ${OTLP_CACHE}"
-		sleep 1   # let it bind before the first export
+		sleep 1   # let them bind before the first export
 	fi
 
 	# Start the collector before the server so the f-stream destination has a
@@ -560,6 +583,59 @@ sys.exit(1 if bad else 0)
 		"post-drop marker document" \
 		"XRD_APPNAME=${APP_TAGGED} xrdcp -f '${HOST}/${TMPDIR}/marker.ref' '${TMPDIR}/marker.dat'"
 	assert_failure grep -q "\"user_agent.name\":\"${APP_DROPPED}\"" "${COLLECTOR_OUT}"
+
+	# 6. A body a sink permanently refuses must not wedge its export. Arm a mock
+	#    to refuse its next POST with a 400 (the shape of a Loki validation
+	#    error, or of an OpenSearch mapping conflict), drive fresh documents at
+	#    it, then assert the refused body was quarantined -- the receiver's own
+	#    error text in the collector log and a .rejected file on disk -- and that
+	#    later exports still arrive. Before this behaviour existed, replay being
+	#    strictly oldest-first meant one refused body blocked every one behind
+	#    it, forever.
+	#
+	#    ${1} the control file, ${2} the receiver's capture file, ${3} where the
+	#    .rejected file is expected, ${4} a label for the messages.
+	assert_rejection_quarantined() {
+		local ctl=$1 out=$2 dir=$3 what=$4 after i
+		touch "${ctl}"
+		for i in $(seq 1 30); do
+			grep -q '^rejected ' "${out}" 2>/dev/null && break
+			xrdcp -f "${HOST}/${TMPDIR}/ok.ref" "${TMPDIR}/reject.dat" \
+				>/dev/null 2>&1 || true
+			sleep 1
+		done
+		assert grep -q '^rejected ' "${out}"
+		assert grep -q "${what}.*rejected by endpoint.*simulated validation error" \
+			"${COLLECTOR_LOG}"
+		assert grep -q 'quarantined rejected body' "${COLLECTOR_LOG}"
+		assert test -n "$(find ${dir} -maxdepth 1 -name '*.rejected' -print -quit)"
+		# The export keeps flowing past the quarantined body.
+		after=$(grep -c '^/' "${out}" || true)
+		for i in $(seq 1 30); do
+			test "$(grep -c '^/' "${out}" || true)" -gt "${after}" && break
+			xrdcp -f "${HOST}/${TMPDIR}/ok.ref" "${TMPDIR}/resumed.dat" \
+				>/dev/null 2>&1 || true
+			sleep 1
+		done
+		assert test "$(grep -c '^/' "${out}" || true)" -gt "${after}"
+		echo "found: rejected ${what} body quarantined, export resumed"
+	}
+
+	if [ -f "${OTLP_PID}" ]; then
+		assert_rejection_quarantined "${OTLP_REJECT}" "${OTLP_OUT}" \
+			"${OTLP_CACHE}/otlp-logs ${OTLP_CACHE}/otlp-traces" OTLP
+	fi
+
+	# 7. The same for the OpenSearch sink, whose "default" destination caches
+	#    directly under --cache-dir rather than in a subdirectory.
+	if [ -f "${OS_PID}" ]; then
+		assert_rejection_quarantined "${OS_REJECT}" "${OS_OUT}" \
+			"${OTLP_CACHE}" OpenSearch
+		# The refusal was this destination's alone: the second OTLP receiver was
+		# never armed and must have kept receiving throughout.
+		assert grep -q '^/v1/logs ' "${OTLP2_OUT}"
+		assert_failure grep -q '^rejected ' "${OTLP2_OUT}"
+	fi
 
 	# The Prometheus exposition, which nothing else in the suite covers. The
 	# server config sets "all.sitename moncollect" and "ident 2s", so by now

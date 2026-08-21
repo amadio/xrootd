@@ -14,34 +14,162 @@ native server-side metrics live in the `XrdMetrics` component.
 
 ## Architecture
 
-`xrdmoncollect` is a bounded, three-stage pipeline. The design goal is that a
-slow or unreachable downstream sink never costs UDP monitoring packets: the
-socket-draining stage is decoupled from decoding, and decoding is decoupled from
-the (blocking) network POSTs by bounded, recycling hand-off queues.
+`xrdmoncollect` has **one blocking boundary and N shedding ones**, and knowing
+which is which is most of the design.
 
+Between the socket and the decoder the hand-off **blocks**: the producer there
+is the kernel, and a monitoring datagram it drops is gone for good. Between the
+decoder and each sink the hand-off **never blocks**: the producer is our own
+decoder and the consumer is somebody else's HTTP endpoint, so a queue that fills
+sheds its oldest bodies and counts them. That asymmetry is what lets a site feed
+a central WLCG collector without the central collector — when it goes down —
+being able to take the site's own monitoring with it.
+
+```mermaid
+flowchart TB
+  classDef thread fill:#e8ecff,stroke:#334
+  classDef queue  fill:#fff5d6,stroke:#886
+  classDef ext    fill:#e8f5e8,stroke:#383
+
+  UDP(["UDP datagrams<br/>--udp-port"]):::ext
+  XSHV(["XSHV frames<br/>--tcp-port"]):::ext
+
+  RX["RECEIVER<br/>the main thread"]:::thread
+  ACC["TCP ACCEPT"]:::thread
+  CONN["TCP CONNECTION<br/>one per shoveler, up to 512"]:::thread
+
+  PIPE[["recvPipe (XrdMonPipe)<br/>--queue-depth batches<br/>recycling, BLOCKS"]]:::queue
+
+  SER["SERIALIZER<br/>sole owner of XrdMonDecode<br/>decode, correlate, emitDoc<br/>file and --forward written inline<br/>ReapServers, MemoryTick, flush"]:::thread
+
+  QA[["SinkQueue<br/>16 bodies AND qBytes<br/>drops oldest"]]:::queue
+  QB[["SinkQueue<br/>16 bodies AND qBytes<br/>drops oldest"]]:::queue
+  QC[["SinkQueue x2<br/>logs, traces"]]:::queue
+
+  SA["SINK THREAD<br/>opensearch 'default'"]:::thread
+  SB["SINK THREAD<br/>opensearch 'central'"]:::thread
+  SC["SINK THREAD<br/>otlp 'default'"]:::thread
+
+  FILE(["file / stdout"]):::ext
+  FWD(["--forward host:port"]):::ext
+  ES1(["OpenSearch _bulk"]):::ext
+  ES2(["OpenSearch _bulk"]):::ext
+  OT(["OTLP /v1/logs<br/>OTLP /v1/traces"]):::ext
+  CACHE(["--cache-dir<br/>one directory per destination"]):::ext
+
+  EXP["METRICS EXPORTER<br/>--metrics-port"]:::thread
+  SCI["SCITAGS REFRESHER<br/>--scitags"]:::thread
+
+  UDP --> RX
+  XSHV --> ACC --> CONN
+  RX ==> PIPE
+  CONN ==> PIPE
+  PIPE ==> SER
+  SER --> FILE
+  SER --> FWD
+  SER --> QA
+  SER --> QB
+  SER --> QC
+  QA --> SA
+  QB --> SB
+  QC --> SC
+  SA --> ES1
+  SB --> ES2
+  SC --> OT
+  SA -. on failure .-> CACHE
+  SB -. on failure .-> CACHE
+  SC -. on failure .-> CACHE
+  SCI -. registry swap .-> SER
+  SER -. counters .-> EXP
 ```
- UDP :port
-    │
-    ▼
-┌────────────────┐  recvPipe   ┌─────────────────────────┐
-│ Receiver       │ ──────────▶ │ Serializer              │
-│ (main thread)  │  (batches)  │ decode + correlate      │
-└────────────────┘             │ (owns XrdMonDecode)     │
-                               └───────────┬─────────────┘
-                                 docSink fan-out
-              ┌──────────────┬──────────────┴───────┬──────────────────┐
-              ▼              ▼                       ▼                  ▼
-        file / stdout   TCP forward           _bulk batch         OTLP batch
-                                                   │ postPipe        │ otlpPipe
-                                                   ▼                 ▼
-                                          ┌──────────────┐   ┌──────────────┐
-                                          │ OS output    │   │ OTLP output  │
-                                          │ thread (POST)│   │ thread (POST)│
-                                          └──────┬───────┘   └──────┬───────┘
-                                            on failure           on failure
-                                                 ▼                    ▼
-                                            --cache-dir  ◀── replay oldest-first
+
+Thick edges block; thin edges shed. The same picture with the details filled in:
+
+```text
+                       xrdmoncollect (collector mode)
+
+ UDP :--udp-port ──┐   recvfrom(), 1 s SO_RCVTIMEO
+                   ▼
+        ┌──────────────────────┐   batch closes on --flush-count packets,
+        │ RECEIVER (main)      │   --flush-secs, or the byte budget
+        └──────────┬───────────┘
+                   ║
+ XSHV :--tcp-port  ║  recvPipe: XrdMonPipe<Batch>, --queue-depth batches
+        ┌──────────╨───────────┐   bounded · recycling · BLOCKS the producer
+        │ TCP ACCEPT           │   (the only backpressure in the process)
+        │ + TCP CONNECTION ×N  │═══════════════════╗
+        │   (up to 512)        │                   ║
+        └──────────────────────┘                   ▼
+                              ┌──────────────────────────────────────────┐
+                              │ SERIALIZER   takeFor(1000 ms)            │
+                              │  sole owner of XrdMonDecode              │
+                              │  · decode + correlate                    │
+                              │  · emitDoc(): filter → documents_total   │
+                              │      → tree sink (OTLP batch)            │
+                              │      → text sink (one XrdMonDump)        │
+                              │  · file/stdout and --forward: INLINE     │──▶ file
+                              │  · on each 1 s idle wake:                │──▶ --forward
+                              │      ReapServers (60 s)                  │
+                              │      MemoryTick  (15 s, RSS loop)        │
+                              │      flush()     (coalescing)            │
+                              └──────────────────┬───────────────────────┘
+                                                 │ XrdMonSinkQueue: 16 bodies
+                                                 │ AND qBytes · never blocks ·
+                                                 │ drops the OLDEST, counted
+                ┌────────────────┬───────────────┴────────┬────────────────┐
+                ▼                ▼                        ▼                ▼
+        ┌───────────────┐┌───────────────┐        ┌───────────────┐┌───────────────┐
+        │ SINK THREAD   ││ SINK THREAD   │        │ SINK THREAD   ││ SINK THREAD   │
+        │ opensearch    ││ opensearch    │        │ otlp          ││ otlp          │
+        │  "default"    ││  "central"    │        │  "default"    ││  "wlcg"       │
+        │ 1 queue       ││ 1 queue       │        │ 2 queues:     ││ 2 queues:     │
+        │ POST /_bulk   ││ POST /_bulk   │        │  logs+traces  ││  logs+traces  │
+        └───────┬───────┘└───────┬───────┘        └───────┬───────┘└───────┬───────┘
+                └────────────────┴──── on failure ────────┴────────────────┘
+                     XrdMonDiskCache (--cache-dir): spill, then replay
+                     oldest-first, at most 64 bodies per wake-up.
+                     One directory per destination; OTLP gets two.
+
+   off the data path, both optional:
+        ┌──────────────────────────┐   ┌──────────────────────────┐
+        │ METRICS EXPORTER         │   │ SCITAGS REFRESHER        │
+        │ --metrics-port           │   │ --scitags <url>          │
+        │ AF_INET only, ignores -b │   │ --scitags-refresh        │
+        │ one connection at a time │   │ (the only decoder mutex) │
+        └──────────────────────────┘   └──────────────────────────┘
 ```
+
+In shoveler mode (`--shovel`) the same receiver feeds a sender thread instead of
+a decoder, and nothing between them is decoded, correlated or serialized:
+
+```text
+ UDP ─▶ RECEIVER (main) ═recvPipe═▶ SENDER ──XSHV/TCP──▶ central --tcp-port
+                                       └─▶ spool under --cache-dir (--spool-max)
+```
+
+### Threads
+
+| Thread | How many | Blocks on | Owns exclusively | Stopped by |
+|---|---|---|---|---|
+| Receiver | 1 — the main thread | `recvfrom` (1 s `SO_RCVTIMEO`), `recvPipe.acquire` | the UDP socket, the batch in progress | `SIGINT`/`SIGTERM` (handlers installed **without** `SA_RESTART`, so `recvfrom` is interrupted) |
+| TCP accept | 0 or 1 (`--tcp-port`) | `accept` (1 s timeout) | the XSHV listening socket | `XrdMonTcpServer::Stop()` |
+| TCP connection | 0…512 | `recv` (1 s timeout) | one shoveler connection | `Stop()`, joined **before** the pipe closes |
+| **Serializer** | exactly 1 | `recvPipe.takeFor(1000)` | **all** of `XrdMonDecode`; the output file; the `--forward` socket; both output accumulators | `recvPipe.close()` |
+| Sink | **1 per destination** | its `XrdMonSinkQueue`, then `curl_easy_perform` | its curl handle, retry state and disk cache(s) | its queue closing, then a 20 s grace and `Cancel()` |
+| Metrics exporter | 0 or 1 (`--metrics-port`) | `accept` (1 s timeout) | the metrics socket | `exporterStop` |
+| SciTags refresher | 0 or 1 (`--scitags <url>`) | `sleep` | nothing | `scitagsStop` |
+
+A collector with one OTLP destination and `--metrics-port` therefore runs
+**four** threads. Note that the unit of parallelism is the *destination*, not
+the sink *kind*: two OpenSearch endpoints get two threads, and a single OTLP
+destination gets one thread draining **two** queues (logs and traces, which
+replay to different endpoints and so must cache apart).
+
+Because the serializer is the sole decoder, correlation state needs no locking.
+The one exception is the SciTags registry, which the refresher thread swaps
+under a mutex while the decoder reads it. Counters the exporter thread reads
+are `XrdMonPublished<T>` — single-writer relaxed atomics, so the decode path
+keeps its plain increments and the scrape never tears a value.
 
 ### Pipeline stages
 
@@ -51,25 +179,114 @@ the (blocking) network POSTs by bounded, recycling hand-off queues.
    16M) and the queue is generously sized (`--queue-depth`, default 64). To
    prioritise *not losing packets* the receiver applies **backpressure** — it
    waits for a free batch rather than dropping — and combined with the large
-   socket buffer it effectively never has to wait.
+   socket buffer it effectively never has to wait. This is the **only** place
+   the collector applies backpressure; everything downstream sheds instead.
+   With `--tcp-port`, the TCP connection threads are additional producers into
+   the same queue: each frame carries the datagram's original source address, so
+   the decoder cannot tell the two transports apart.
 2. **Serializer** — a single thread that owns the `XrdMonDecode` instance
-   exclusively. It decodes and correlates every packet, writes the file and TCP
-   forward sinks inline, and accumulates one OpenSearch `_bulk` body and/or one
-   OTLP batch per flush window (`--flush-count` packets or `--flush-secs`
-   seconds, whichever comes first). Because it is the sole decoder, correlation
-   state needs no locking.
-3. **Output** — one dedicated thread per HTTP sink. Each performs the blocking
-   POST (with retry) so that neither decoding nor reception ever waits on the
-   network.
+   exclusively. It decodes and correlates every packet and then funnels every
+   finished document through `emitDoc()`, which applies the `[filter]` rules,
+   counts `documents_total`, and offers the document to the two sinks: the *tree*
+   sink (the OTLP batch, which re-encodes it) and the *text* sink (one
+   serialization, shared by the file, `--forward` and OpenSearch `_bulk`
+   consumers). The file and `--forward` sinks are written **inline on this
+   thread**, so a wedged forward consumer costs decode time — bounded only by
+   that sink's 2 s send timeout. The thread waits with a **timeout** rather than
+   blocking, so housekeeping runs on the wall clock and not on packet arrival:
+   `ReapServers()` every 60 s, `MemoryTick()` every 15 s, and `flush()` on every
+   wake. A collector whose servers have gone quiet is exactly the one that most
+   needs its idle incarnations reclaimed.
+3. **Sink threads** — one per configured destination. Each takes a body from its
+   own queue and performs the blocking POST, so neither decoding nor reception
+   ever waits on the network. Idle time is spent replaying the disk cache.
 
-Work is handed between stages by `XrdMonPipe<T>` (`XrdMonPipe.hh`), a
-single-producer/single-consumer bounded queue with buffer recycling
-(`acquire`/`submit` on the producer side, `take`/`takeFor` on the consumer side,
-`recycle` to return an emptied buffer). The receive queue holds `--queue-depth`
-packet batches; the two POST queues hold `kPostQueueDepth` (16) bodies each. The
-file and TCP-forward sinks are written synchronously in the serializer, so a
-document they cannot absorb is **dropped and counted** (e.g. `fwd` drops while
-the forward consumer is down); the HTTP sinks instead **cache-or-drop** (below).
+### Flow control and queues
+
+Two different queues, with deliberately opposite policies.
+
+**`XrdMonPipe<T>`** (`XrdMonPipe.hh`) carries packet batches from the receiver
+(and the TCP connection threads) to the serializer: bounded at `--queue-depth`
+batches, buffer-recycling (`acquire`/`submit` on the producer side,
+`take`/`takeFor` on the consumer, `recycle` to return an emptied buffer), and
+**blocking** — a producer with no free batch waits. A batch is submitted when it
+reaches `--flush-count` packets, `--flush-secs` of age, or a byte budget derived
+from `--max-memory`.
+
+**`XrdMonSinkQueue`** (`XrdMonSinkQueue.hh`) carries serialized bodies from the
+serializer to one sink thread. It **never blocks the producer**. It is bounded
+in *bodies* (16) and, unlike its predecessor, also in *bytes* — bodies range
+from a few kilobytes to several megabytes, so a count alone bounds nothing, and
+these bytes are charged to the RSS `--max-memory` caps. When it is full the
+**oldest** body is dropped and counted in
+`xrootd_collector_post_overflow_total{destination}` /
+`otlp_overflow_total{destination}`, kept apart from the sink's own drop counter
+because the two mean different things to an operator: an overflow says the
+destination cannot keep up, a post-failure drop says "configure a disk cache".
+A body larger than the entire byte budget is queued alone rather than dropped.
+
+The byte budget is one budget split evenly, not a per-destination allowance:
+
+```
+nQueues = (OpenSearch destinations) + 2 × (OTLP destinations)
+qBudget = --max-memory / 32          (32 MiB when --max-memory is 0)
+qBytes  = max(4 MiB, qBudget / nQueues)
+```
+
+So **adding a destination divides the budget rather than doubling the
+footprint**. The 4 MiB floor is the exception: past eight queues at the 1G
+default the floor wins and the total does grow, which is the point at which a
+site fanning out very widely should raise `--max-memory` deliberately.
+
+**Coalescing.** The old blocking pipe throttled the serializer, and that had the
+incidental effect of *batching*: a consumer slower than the input received
+fewer, larger bodies. Without it, that consumer would receive a stream of small
+ones of which its queue then drops all but the last few — more POSTs, less data
+delivered. So `flush()` holds the accumulated body until any one of:
+
+- some destination has drained what it already holds (an empty queue **and** a
+  clear `busy` flag — "queue empty" is not "destination idle", because the body
+  it is working on has already been taken);
+- `kCoalesceSecs` (2 s) have passed, so nothing is ever held indefinitely;
+- the accumulator has reached `kCoalesceBytes` (= `qBytes`) — time alone bounds
+  nothing, since a burst can build tens of megabytes inside two seconds, and
+  this is memory in neither the correlation state nor the output queues;
+- the RSS control loop asks for a release (see [Correlation
+  state](#correlation-state)). Giving up an accumulator costs a POST that was
+  going to happen anyway, whereas evicting costs correlation — so this is the
+  first thing tried when the process is over its cap.
+
+A destination that is keeping up always has an empty queue, so nothing is ever
+held on a healthy collector.
+
+The file and TCP-forward sinks are written synchronously in the serializer, so a
+document they cannot absorb is **dropped and counted** (`fwd` drops while the
+forward consumer is down); the HTTP sinks instead **cache-or-drop** (below).
+`--forward` is the one sink with no queue, no thread and no disk cache, and it
+still drops on backpressure with only a rate-limited warning.
+
+### Shutdown
+
+The order matters, and each step depends on the one before it:
+
+1. `STOPPING=1` to systemd.
+2. Stop the TCP server — accept thread joined, every connection socket shut
+   down, every connection thread joined. This must precede the next step,
+   because those threads are producers into the receive pipe.
+3. Close the receive pipe. The serializer drains what is left, does a final
+   forced `flush()`, and closes every sink queue.
+4. Join the serializer. Only now is the correlation state quiescent, so this is
+   where `--state-file` is written.
+5. Give every sink 20 s to deliver what it holds. They drain **in parallel**, so
+   the wait is the slowest destination and not the sum of them.
+6. Cancel whatever is still in flight — a curl progress callback aborts the
+   transfer, so an endpoint that black-holes packets cannot hold the process for
+   its whole retry ladder and then be SIGKILLed part way through. Join.
+7. Join the metrics exporter and SciTags threads.
+
+The bundled unit allows for this with `TimeoutStopSec=45`: the 20 s grace, plus
+margin for the drain and the state snapshot. A SIGKILL here costs the snapshot,
+which is what makes the next start a cold one.
 
 ### Correlation state
 

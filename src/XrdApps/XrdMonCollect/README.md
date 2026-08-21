@@ -2105,8 +2105,8 @@ the OpenSearch dashboard (throughput, VO / auth / locality / state
 breakdowns, error categories, top files/users/sites, sessions). Import it under
 **Grafana → Dashboards → New → Import** and select your Loki data source for the
 `DS_LOKI` input. Two panels are approximations, because LogQL lacks the matching
-aggregation: *Distinct clients* (no native count-distinct) and *Transfer duration
-quantiles* (p50/p90/p99, standing in for OpenSearch's fixed-bucket duration
+aggregation: *Distinct clients* (no native count-distinct) and *Operation
+duration* (p50/p90/p99, standing in for OpenSearch's fixed-bucket duration
 histogram).
 
 ### Data popularity dashboards

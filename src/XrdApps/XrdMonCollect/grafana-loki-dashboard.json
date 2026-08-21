@@ -203,9 +203,9 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "XRootD Transfers (Loki)",
-  "uid": "xrootd-transfers-loki",
-  "description": "Per-transfer detail from the xrdmoncollect OpenTelemetry log records in Loki: who moved what, how fast, and what failed. The cluster-wide rates behind these documents are in the Prometheus dashboards; dataset popularity has its own Loki dashboard.",
+  "title": "XRootD File Operations (Loki)",
+  "uid": "xrootd-file-ops-loki",
+  "description": "Per-operation detail from the xrdmoncollect OpenTelemetry log records in Loki: who read or wrote what, how fast, and what failed. These are file I/O operations against this cluster, not file transfers between storage elements. The cluster-wide rates behind these documents are in the Prometheus dashboards; dataset popularity has its own Loki dashboard.",
   "version": 1,
   "weekStart": "",
   "panels": [
@@ -347,7 +347,7 @@
     {
       "id": 4,
       "type": "stat",
-      "title": "Transfers",
+      "title": "File operations",
       "description": "Concluded file operations.",
       "datasource": {
         "type": "loki",
@@ -474,7 +474,7 @@
       "id": 6,
       "type": "stat",
       "title": "Distinct clients",
-      "description": "Client addresses seen transferring.",
+      "description": "Client addresses seen doing file I/O.",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"
@@ -535,7 +535,7 @@
       "id": 7,
       "type": "stat",
       "title": "Distinct users",
-      "description": "Mapped user names seen transferring.",
+      "description": "Mapped user names seen doing file I/O.",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"
@@ -609,7 +609,7 @@
       "id": 9,
       "type": "timeseries",
       "title": "Throughput (read vs write)",
-      "description": "Bytes per second, attributed to the moment each operation concluded rather than spread over its lifetime -- a long transfer lands entirely in the bucket where it closed.",
+      "description": "Bytes per second, attributed to the moment each operation concluded rather than spread over its lifetime -- a long-running operation lands entirely in the bucket where it closed.",
       "datasource": {
         "type": "loki",
         "uid": "${DS_LOKI}"
@@ -848,7 +848,7 @@
     {
       "id": 13,
       "type": "piechart",
-      "title": "Transfers by VO",
+      "title": "File operations by VO",
       "description": "From the client's credential. Requires the servers to send the u (user) stream.",
       "datasource": {
         "type": "loki",
@@ -1187,7 +1187,7 @@
     {
       "id": 18,
       "type": "table",
-      "title": "Top applications by transfers",
+      "title": "Top applications by file operations",
       "description": "The client executable behind each session, from the login record. Useful for telling framework traffic from interactive use.",
       "datasource": {
         "type": "loki",

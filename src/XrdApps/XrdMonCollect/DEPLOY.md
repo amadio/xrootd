@@ -560,18 +560,22 @@ sudo dnf -y install ~/rpmbuild/RPMS/*/xrootd-server-*.rpm \
 
 The package installs `/usr/bin/xrdmoncollect`, the commented example config as
 `/etc/xrootd/xrdmoncollect.cfg.example`, the `xrdmoncollect.service` +
-`xrdmoncollect.socket` units, and `man 8 xrdmoncollect`. Note the `.example`
-suffix: the daemon reads `/etc/xrootd/xrdmoncollect.cfg`, which the package
-deliberately does not create, so **you must copy it into place**. A collector
-started with neither a config nor options falls back to the file sink and
-writes documents to stdout.
+`xrdmoncollect.socket` units, and `man 8 xrdmoncollect`. The `.deb` and the
+`.rpm` ship the same set.
 
-> **Debian/Ubuntu.** `xrootd-server.deb` currently ships only the binary and the
-> man page — no example config, and **no systemd units**. Every
-> `systemctl enable --now xrdmoncollect.socket` below assumes the units are
-> present, so on those distributions install `systemd/xrdmoncollect.service` and
-> `systemd/xrdmoncollect.socket` from the source tree by hand into
-> `/usr/lib/systemd/system/` first.
+Note the `.example` suffix: the daemon reads
+`/etc/xrootd/xrdmoncollect.cfg`, which **no package creates**, so you must copy
+it into place. That is also what guarantees your configuration survives an
+upgrade — a file neither package owns is a file neither package can touch. (The
+example itself is a conffile on Debian and `%config(noreplace)` on RPM, so local
+edits to *it* are preserved too, arriving as `.dpkg-dist`/`.rpmnew`.)
+
+A collector started with neither a config nor options falls back to the file
+sink and writes documents to stdout, so a missing config is loud rather than
+silent.
+
+Neither package enables or starts the units. The collector needs a port before
+it can run, so enabling is an explicit step (4.2 and 4.3 below).
 
 ### 4.2 Shoveler nodes (every XRootD server)
 

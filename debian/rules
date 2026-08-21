@@ -56,6 +56,14 @@ override_dh_auto_build:
 	dh_auto_build
 	[ "$(BUILD_DOC)" = "FALSE" ] || doxygen Doxyfile
 
+# Install the units without enabling or starting anything, matching what the
+# RPM does. Every other unit here is templated, so dh_installsystemd had
+# nothing to act on until xrdmoncollect.service arrived; left to its defaults
+# it would enable and start a collector that has no /etc/xrootd/xrdmoncollect.cfg
+# yet, and the daemon needs at least a port before it can run.
+override_dh_installsystemd:
+	dh_installsystemd --no-enable --no-start
+
 override_dh_auto_install:
 	dh_auto_install
 	python3 -m pip install --target debian/tmp/usr/lib/python3/dist-packages \
@@ -86,6 +94,8 @@ override_dh_auto_install:
 	install -m 644 systemd/cmsd@.service debian/tmp/lib/systemd/system
 	install -m 644 systemd/frm_xfrd@.service debian/tmp/lib/systemd/system
 	install -m 644 systemd/frm_purged@.service debian/tmp/lib/systemd/system
+	install -m 644 systemd/xrdmoncollect.service debian/tmp/lib/systemd/system
+	install -m 644 systemd/xrdmoncollect.socket debian/tmp/lib/systemd/system
 
 	# Server config
 	mkdir -p debian/tmp/etc/xrootd
@@ -99,6 +109,8 @@ override_dh_auto_install:
 	    debian/tmp/etc/xrootd/xrootd-filecache-standalone.cfg
 	install -m 644 -p config/xrootd-http.cfg \
 	    debian/tmp/etc/xrootd/xrootd-http.cfg
+	install -m 644 -p src/XrdApps/XrdMonCollect/xrdmoncollect.cfg.example \
+	    debian/tmp/etc/xrootd/xrdmoncollect.cfg.example
 
 	# Client config
 	mkdir -p debian/tmp/etc/xrootd/client.plugins.d

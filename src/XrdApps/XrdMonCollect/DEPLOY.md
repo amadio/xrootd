@@ -2032,15 +2032,12 @@ curl -ku admin:'<StrongAdminPassword>' -X PUT \
   --data-binary @opensearch-template.json
 ```
 
-> **Upgrading an existing deployment: the index was renamed.** The default
-> `--os-index` was `xrootd-transfers` and is now `xrootd-file-ops` — these are
-> file I/O operations against this cluster, and "transfer" is reserved for a
-> file moving between storage elements. Nothing migrates the old data. Either
-> pin the old name explicitly (`os-index = xrootd-transfers`, and apply the
-> template under that name), or take the new one and let the old index age out
-> under its retention policy while queries span `xrootd-transfers*,xrootd-file-ops*`.
-> The shipped saved objects were renamed with it, so re-importing them creates a
-> new index pattern and dashboard rather than updating the old ones.
+> **If you tracked this branch before 2026-08-21**, the default `--os-index`
+> was `xrootd-transfers` and the saved objects were named to match; both now say
+> `file-ops`, because these are file I/O operations against this cluster and
+> "transfer" is reserved for a file moving between storage elements. Nothing
+> migrates the old data — `os-index = xrootd-transfers` pins the old name if you
+> want it.
 >
 > **Upgrading an existing deployment.** The document schema changed. Event
 > names now name the operation (`xrootd.read`/`xrootd.write` for a file close,

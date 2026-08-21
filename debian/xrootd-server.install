@@ -28,5 +28,6 @@
 /etc/logrotate.d/xrootd
 /etc/xrootd/config.d
 /etc/xrootd/*.cfg
+/etc/xrootd/*.cfg.example
 /var/log/xrootd
 /var/spool/xrootd

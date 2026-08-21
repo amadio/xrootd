@@ -520,7 +520,7 @@ fi
 %{_sysusersdir}/%{name}.conf
 %config(noreplace) %{_sysconfdir}/logrotate.d/%{name}
 %dir %{_sysconfdir}/%{name}/config.d
-%attr(-,xrootd,xrootd) %{_sysconfdir}/%{name}/*.cfg.example
+%attr(-,xrootd,xrootd) %config(noreplace) %{_sysconfdir}/%{name}/*.cfg.example
 %attr(-,xrootd,xrootd) %config(noreplace) %{_sysconfdir}/%{name}/*.cfg
 %attr(-,xrootd,xrootd) %{_localstatedir}/log/%{name}
 %attr(-,xrootd,xrootd) %{_localstatedir}/spool/%{name}

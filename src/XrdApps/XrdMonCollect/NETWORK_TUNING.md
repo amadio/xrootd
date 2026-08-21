@@ -222,7 +222,7 @@ multiple frames.
 > **The `fbsz` trap.** Before XRootD 6.1, `fbsz` does **not** follow `mbuff`:
 > setting `mbuff 1472` alone still emits fstat datagrams at the `fbsz` default of
 > **65472 bytes** — roughly 44 fragments each, of which losing any one drops the
-> whole datagram. That is precisely the stream the transfer documents are built
+> whole datagram. That is precisely the stream the file operation documents are built
 > from. Set `fbsz` explicitly on such servers.
 
 > **IPv6 pitfall:** buffer sizes chosen against the IPv4 limit — `1472` is a
@@ -418,7 +418,7 @@ ss -tan state time-wait | wc -l
 
 Note the timing: a POST has a 30 s timeout and up to five attempts, so a body
 that is going to fail takes about 165 s to say so. That is why `TimeoutStopSec`
-in the unit is 45 s and why the daemon cancels transfers in flight at shutdown —
+in the unit is 45 s and why the daemon cancels POSTs in flight at shutdown —
 an endpoint that black-holes packets would otherwise hold the process across its
 whole ladder. A destination with `--cache-dir` configured does not run the ladder
 on a live body at all: it fails fast and spills.

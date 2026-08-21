@@ -36,7 +36,7 @@ correlates them into self-contained JSON documents.
 The principal output is one document per file close, joining the
 \fIf\fR-stream close record with the user, path, application-info, token, and
 activity dictionaries into a single record carrying WLCG-aligned identity,
-location, and transfer fields. Documents use an OpenTelemetry-aligned schema: a
+location, and I/O fields. Documents use an OpenTelemetry-aligned schema: a
 process-level \fBresource\fR object and an event-level \fBattributes\fR object
 keyed by dotted semantic-convention names (with XRootD-specific fields under the
 \fBxrootd.*\fR vendor namespace; for example \fBresource.server.address\fR,
@@ -68,15 +68,15 @@ nothing from it. Operations are counted in
 is \fBopen\fR, \fBclose\fR, or -- when the server config includes the \fBops\fR
 block -- \fBread\fR, \fBreadv\fR and \fBwrite\fR per request.
 .P
-A transfer document also carries the terminal status of the operation in
+A file operation document also carries the terminal status of the operation in
 \fBxrootd.operation.state\fR: a normal close reports \fBSuccessful\fR, while a
-failed open, a mid-transfer read/write error, or a failed close reports
+failed open, a mid-operation read/write error, or a failed close reports
 \fBFailed\fR together with \fBxrootd.operation.name\fR
 (\fBopen\fR, \fBread\fR, \fBwrite\fR, \fBclose\fR, or \fBauth\fR),
 \fBxrootd.error.code\fR, and the server's error message in
 \fBerror.type\fR. Failed opens, which
 produce no close record, are reported by the server as a dedicated terminal
-record on the \fIf\fR-stream; mid-transfer and close failures travel with the
+record on the \fIf\fR-stream; mid-operation and close failures travel with the
 close record itself. A redirect (\fIr\fR-stream, with \fB--redirects\fR) is a
 third terminal state, \fBRedirected\fR: from the redirector's point of view the
 operation concluded by sending the client elsewhere, with the destination in the
@@ -101,7 +101,7 @@ close, error or redirect belonging to it falls outside and, with \fB--spans\fR,
 no child span escapes its parent. This needs stating because no record carries
 an exact time: a record's time is interpolated across the window of the packet
 carrying it, and two packets \(em especially from two streams, which window
-independently \(em carry independent estimation error, so a transfer that
+independently \(em carry independent estimation error, so an operation that
 finished before the client disconnected can arrive stamped after it. The
 earliest and latest time of any record naming a session are tracked and the
 resolved window widened to cover both.
@@ -492,7 +492,7 @@ Cap the \fItotal resident memory\fR of the collector process at approximately
 The collector meets the cap by evicting correlation state. Once per control tick
 it reads its own resident set size and, if that is over the cap, lowers the
 budget it allows the per-server dictionaries and the open-file table to occupy;
-the \fIleast-recently-used\fR entries go first, so a long-running transfer kept
+the \fIleast-recently-used\fR entries go first, so a long-running operation kept
 warm by its in-flight \fIf\fR-stream snapshots is retained while cold, stranded
 entries (for example an open whose close was lost to a dropped datagram) are
 dropped. When resident memory falls back below the cap the budget is restored
@@ -540,11 +540,11 @@ seconds (\fB0\fR = off, the default), counting it in
 close record was lost, most often to UDP loss; without a TTL it survives until
 the client's disconnect sweep, or until the memory budget evicts it.
 .sp
-Applied only to servers that report in-flight transfer snapshots
+Applied only to servers that report in-flight I/O snapshots
 (\fBxfr\fR on \fBxrootd.monitor fstat\fR), because only there does a live
-transfer refresh its entry every reporting interval — anything older is
+operation refresh its entry every reporting interval — anything older is
 genuinely stranded. Set it to at least three times that server's \fBxfr\fR
-period, or long-running transfers will be expired out from under their own
+period, or long-running operations will be expired out from under their own
 close records and every one of them will be reported as an orphan close.
 .RE
 \fB--state-file\fR \fIfile\fR
@@ -648,7 +648,7 @@ carry) shows no traces in Tempo/Grafana.
 .RS 5
 Emit a document per \fIt\fR-stream I/O record (read, write, open, close, readv,
 disconnect). This is high volume. With \fB--spans\fR, each read/write/readv also
-becomes a child \fIspan\fR nested under the file's transfer span, so the trace
+becomes a child \fIspan\fR nested under the file's span, so the trace
 waterfall reads session \(-> file \(-> I/O.
 .RE
 \fB--gstream\fR
@@ -676,7 +676,7 @@ Print decoder statistics on exit.
 Print the option summary and exit.
 .RE
 .SH SERVER CONFIGURATION
-The richness of the transfer document depends on the server's
+The richness of the file operation document depends on the server's
 \fBxrootd.monitor\fR directive. File-level fields (\fBfile.path\fR, byte counts,
 operation counts, and squared sums) require \fBfstat\fR with \fBlfn ops ssq
 xfr\fR; identity fields such as \fBxrootd.auth.method\fR and the auth-derived VO
@@ -706,7 +706,7 @@ Keep \fIevery\fR stream buffer at or below the MTU: \fBmbuff\fR (trace),
 and \fBgbuff\fR (g-stream, default 32K) — 1472 for a 1500-byte IPv4 path, 1452
 for IPv6. Note that before XRootD 6.1 \fBfbsz\fR does \fInot\fR follow
 \fBmbuff\fR: setting \fBmbuff 1472\fR alone still emits ~64K fstat datagrams
-(~44 fragments each), which is the stream the transfer documents are built
+(~44 fragments each), which is the stream the file operation documents are built
 from — set \fBfbsz\fR explicitly on such servers. Do not go far below the MTU
 either: a single fstat record (a close with a long LFN and an error message)
 must fit the buffer or the server drops it.
@@ -777,7 +777,7 @@ token = @/etc/xrootd/wlcg.token
 
 [opensearch "site"]
 url = https://opensearch.example.org:9200
-index = site-transfers
+index = site-file-ops
 .fi
 .RE
 .P

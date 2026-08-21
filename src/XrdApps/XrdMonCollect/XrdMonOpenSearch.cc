@@ -35,7 +35,7 @@ size_t writeCB(char* ptr, size_t sz, size_t nm, void* userp)
    return sz * nm;
 }
 
-// A non-zero return aborts the transfer. curl calls this at least once a
+// A non-zero return aborts the POST. curl calls this at least once a
 // second even while a connection is hanging, which is what lets Cancel()
 // interrupt a POST into a black hole rather than waiting out its timeout.
 int abortCB(void* flag, curl_off_t, curl_off_t, curl_off_t, curl_off_t)

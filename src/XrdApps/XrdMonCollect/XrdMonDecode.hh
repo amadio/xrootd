@@ -45,10 +45,10 @@ class XrdMonFilter;
 //-----------------------------------------------------------------------------
 //! XrdMonDecode decodes XRootD detailed-monitoring UDP packets
 //! (xrootd.monitor) and correlates the "f" (file-stats) stream against the
-//! user dictionary into one document per completed transfer (file close).
+//! user dictionary into one document per completed file operation (file close).
 //!
 //! It is deliberately transport-agnostic: feed it datagrams via Process() and
-//! receive finished transfer documents (and, optionally, raw per-record dumps)
+//! receive finished file operation documents (and, optionally, raw per-record dumps)
 //! through callbacks. All multi-byte fields in the wire format are network
 //! byte order; see src/XrdXrootd/XrdXrootdMonData.hh for the layouts.
 //-----------------------------------------------------------------------------
@@ -57,7 +57,7 @@ class XrdMonDecode
 {
 public:
 
-//! Called with one finished transfer document, serialized as a single JSON
+//! Called with one finished file operation document, serialized as a single JSON
 //! object (no trailing newline). The caller frames it for its sink. May be
 //! empty, in which case no document is ever serialized — see TreeSink.
 using DocSink = std::function<void(const std::string& jsonDoc)>;
@@ -92,9 +92,9 @@ struct Stats
    Count mapUeac;            // 'U' user experiment/activity records
    Count opens;              // 'f' open records
    Count closes;             // 'f' close records
-   Count xfrs;               // 'f' in-flight transfer snapshot records
+   Count xfrs;               // 'f' in-flight I/O snapshot records
    Count discs;              // 'f' session disconnect records
-   Count docs;               // transfer documents emitted
+   Count docs;               // file operation documents emitted
    Count filtered;           // documents of any type suppressed by a filter
                              // rule before reaching the sink
    Count failed;             // 'f' failed/aborted operation records (isError +
@@ -152,7 +152,7 @@ std::size_t StateEntries() const {return lruCount;}
 //! Bound the resident correlation state (per-server dictionaries plus the
 //! open-file table) to approximately `n` bytes (0 = unbounded). When exceeded,
 //! the least-recently-used entries are evicted first, so a still-active
-//! transfer kept warm by its in-flight ('f' xfr) snapshots survives even when
+//! file kept warm by its in-flight ('f' xfr) snapshots survives even when
 //! it has been open a long time; only cold, stranded entries (e.g. an open
 //! whose close was lost) are dropped. A dropped entry merely yields a document
 //! missing that field, or an orphan close.
@@ -211,10 +211,10 @@ bool TakeMemoryRelease() {bool r = memRelease; memRelease = false; return r;}
 void SetServerTTL(long secs) {serverTTL = secs;}
 
 //! Expire open-file entries untouched for `secs` seconds (0 = off). Only
-//! applied to servers that report in-flight transfer snapshots ("xfr"
-//! configured on xrootd.monitor fstat), where a live transfer refreshes its
+//! applied to servers that report in-flight I/O snapshots ("xfr"
+//! configured on xrootd.monitor fstat), where a live operation refreshes its
 //! entry every interval — so anything older than the TTL is a leaked open
-//! whose close was lost, not a long-running transfer.
+//! whose close was lost, not a long-running operation.
 void SetFileTTL(long secs) {fileTTL = secs;}
 
 //! Drop server incarnations idle past the server TTL (see SetServerTTL). Cheap
@@ -241,7 +241,7 @@ void SetSite(const std::string& s) {site = s;}
 //! (identity plus aggregated file activity) is emitted on disconnect. When off,
 //! no rollup is accumulated and no session document is produced — saving the
 //! per-session memory and the receive-thread work for deployments that only
-//! consume the per-transfer/access documents.
+//! consume the per-operation/access documents.
 void SetEmitSessions(bool v) {emitSessions = v;}
 
 //! Emit companion OpenTelemetry span documents alongside the log records (off
@@ -283,7 +283,7 @@ bool LoadScitagsJson(const std::string& text);
 //! @param emitTraces   emit a document per 't'-stream record (I/O, open,
 //!                     close, disconnect) — high volume, off by default.
 //! @param emitGstream  emit a document per 'g'-stream (plugin) record.
-//! @param subsystem  optional metrics registry; when set, completed transfers are
+//! @param subsystem  optional metrics registry; when set, completed operations are
 //!             aggregated into bounded-cardinality Prometheus series.
          XrdMonDecode(DocSink docSink, RawSink rawSink = nullptr,
                       bool emitRaw = false, bool emitTraces = false,
@@ -409,7 +409,7 @@ struct UserInfo
                               // from the trace stream's disconnect record
                               // (its time less the connect duration it carries)
    // The session's observed activity, in the server's clock: the earliest and
-   // latest time of any record naming it (open, I/O trace, transfer snapshot,
+   // latest time of any record naming it (open, I/O trace, in-flight snapshot,
    // close, error or redirect). Every such record also produces a document, and
    // with --spans a span parented by the session's, so these two are what the
    // reported window has to enclose -- see sessionSpanOf. Fractional, because
@@ -626,7 +626,7 @@ void     EmitDisc(const std::string& src, int32_t stod, Server& srv,
 //! Drop a disconnecting user's leftover open-file entries (their closes were
 //! lost): the server reports a session's closes before its disconnect, so the
 //! open-file table must not keep carrying them (they would inflate the
-//! active_transfers gauge forever). Bumps stats.staleOpens and
+//! files_open gauge forever). Bumps stats.staleOpens and
 //! stale_opens_total{server}.
 void     DropUserFiles(const std::string& src, Server& srv, uint32_t userID);
 void     EmitError(const std::string& src, int32_t stod, Server& srv,

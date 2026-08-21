@@ -134,6 +134,11 @@ producing a wrong or missing one. The counter
 \fBxrootd_collector_session_starts_total{cluster,server,source}\fR shows the mix: mostly
 \fBdisconnect\fR means \fBu\fR records are being lost, or the server's
 \fBxrootd.monitor\fR destination lacks the \fBuser\fR flag.
+When the disconnect carries no usable time either, the end is \fIestimated\fR
+through that same offset and doubles as the document's record timestamp. An
+estimate landing more than five minutes ahead of the collector's clock falls
+back to the collector's own time: a strict OTLP receiver refuses a far-future
+timestamp outright. Server-\fIstamped\fR times are never clamped.
 .P
 Documents are emitted as newline-delimited JSON (NDJSON) to a file or standard
 output, posted directly to an OpenSearch cluster, exported as OTLP/JSON to an

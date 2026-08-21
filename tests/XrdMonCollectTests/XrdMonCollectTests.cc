@@ -3155,6 +3155,38 @@ TEST(XrdMonCollect, SessionWithoutTodStillTimestamped)
   ASSERT_TRUE(sessionSpan(docs).contains("startTimeUnixNano"));
 }
 
+// When the session end has to be *estimated* (no record time, no folded close),
+// the translation runs through the clock-offset estimate, which a server
+// emitting bogus window times can poison arbitrarily far ahead. The estimate --
+// and with it the document's record timestamp -- must never land beyond
+// ordinary skew in the future: an OTLP receiver like Loki refuses such a
+// timestamp outright and the session document is lost. Server-*stamped* times
+// are not clamped (see SessionClockSkewTranslatesLoginTime).
+TEST(XrdMonCollect, SessionEstimatedEndNeverFarFuture)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetEmitSessions(true);
+
+  const time_t now = time(nullptr);
+  dec.SetClock([&]{ return now; });
+
+  feedUserN(dec, "h:1", 7);
+  // A window end two hours ahead poisons the offset estimate.
+  feedF(dec, "h:1", (int32_t)now + 7200, {});
+  // The disconnect arrives in a packet whose TOD was lost, so its end must be
+  // estimated -- through the poisoned offset.
+  { auto payload = discRec(7);
+    auto pkt = packet('f', kStod, payload);
+    dec.Process("h:1", (const char*)pkt.data(), pkt.size()); }
+
+  json j = sessionDoc(docs);
+  ASSERT_FALSE(j.is_null());
+  const json& a = j["attributes"];
+  EXPECT_EQ(a["xrootd.session.end_time"], isoOf(now));   // not now + 7200
+  EXPECT_EQ(j["timeUnixNano"], std::to_string((uint64_t)now * 1000000000ull));
+}
+
 namespace {
 // A 't' packet: a WINDOW mark closing at `win`, then a DISC for `user` whose
 // connect duration is `csec` seconds.

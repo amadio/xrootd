@@ -102,7 +102,7 @@ port = 9930
 # Expire an open-file entry untouched for this many seconds: a leaked open
 # whose close record was lost, e.g. to UDP packet loss (0 = off). Only applied
 # to servers reporting in-flight snapshots ("xfr" on xrootd.monitor fstat),
-# which refresh live transfers every interval; set it to at least 3x the
+# which refresh live operations every interval; set it to at least 3x the
 # server's xfr reporting period (xfr count x flush interval).
 # file-ttl = 7200
 
@@ -187,7 +187,7 @@ port = 9930
 #
 # [opensearch "central"]
 # url = https://es.wlcg.example:9200
-# index = wlcg-transfers
+# index = wlcg-file-ops
 # datastream = true
 
 # Document filtering. Each [filter "<name>"] section is one rule, matched

@@ -17,6 +17,13 @@ at a site all the way to the dashboards:
 All hops between components authenticate with **bearer tokens** (section 0.3);
 the one hop that cannot (UDP) is kept on localhost.
 
+**Companion documents.** This guide says *what to configure*.
+[`NETWORK_TUNING.md`](NETWORK_TUNING.md) covers host, kernel, NIC and socket
+tuning for minimizing UDP loss — read it alongside sections 2 and 4.
+[`README.md`](README.md) explains why the collector behaves as it does (threads,
+queues, memory budget, document schema), and `man 8 xrdmoncollect` is the option
+reference.
+
 The backend part consolidates a working deployment, including corrections
 found during rollout:
 
@@ -94,6 +101,16 @@ each XRootD node                central collector host           monitoring host
   `/metrics` (`--metrics-port`) and each XRootD server's `/metrics`
   (XrdHttpMetricsExporter, bearer-token protected).
 
+This picture is host-level. Inside the collector process the work is split
+across a receiver thread, a **single serializer** that owns all correlation
+state, and **one thread per configured sink destination** — see
+[`README.md`](README.md) § *Threads* for the full model. The part that matters
+when planning a deployment: a destination that is slow or down fills its own
+bounded queue and then sheds its oldest bodies. It cannot slow the collector,
+and it cannot affect the other destinations — which is what makes "site
+monitoring plus a central WLCG collector from one process" (section 3.3) a safe
+arrangement rather than a shared fate.
+
 **Direct-UDP variant** (single host, or servers and collector on the same
 switched LAN): point `xrootd.monitor ... dest ... <collector>:9930` straight
 at the collector and skip the shovelers. Do **not** use this across routed
@@ -114,7 +131,7 @@ tolerates WAN outages.
 | xrootd           | 1094 (xroot), 8443 (https)   | data access; `/metrics` scrape endpoint on the http(s) port |
 | xrdmoncollect (shoveler) | 9930/udp (localhost)  | receives `xrootd.monitor` datagrams |
 | xrdmoncollect (collector) | 9930/udp, 9931/tcp   | 9930: direct UDP; 9931: shoveled streams (XSHV + token) |
-| xrdmoncollect (both modes) | 9932               | Prometheus self-metrics (`--metrics-port`) |
+| xrdmoncollect (both modes) | 9932/tcp           | Prometheus self-metrics (`--metrics-port`); **IPv4 only**, ignores `bind`, no auth |
 | Alloy            | 4317 (OTLP gRPC), 4318 (OTLP HTTP), 12345 (UI) | telemetry ingest point |
 | Prometheus       | 9090                         | metrics store (scrape + OTLP + remote-write) |
 | Loki             | 3100                         | log store (default) |
@@ -128,6 +145,12 @@ tolerates WAN outages.
 Tempo's OTLP receiver deliberately uses **4319/4320** because Alloy owns
 4317/4318 on the same host. This guide uses **9932** for the collector's
 self-metrics so it never collides with the shovel TCP port (9931).
+
+The self-metrics listener is the one endpoint here with no authentication, and
+it binds IPv4 `INADDR_ANY` regardless of the `bind` setting — so it is
+unreachable on an IPv6-only host and must be firewalled to the Prometheus host
+(section 15). It also serves one connection at a time and re-serializes the
+whole registry per request, so scrape it at 15–60 s rather than every second.
 
 ### 0.3 Bearer-token matrix
 
@@ -189,7 +212,8 @@ Rules of thumb:
   tokens and disk buffering.
 - **Direct UDP is acceptable** for a single-node site or when servers and
   collector share a switched LAN — after applying the buffer tuning in
-  section 2.1.
+  section 2.1. Across anything routed, no amount of host tuning helps and the
+  shoveler is the answer; see [`NETWORK_TUNING.md`](NETWORK_TUNING.md) §7.
 - `shovel` and `tcp-port` are **mutually exclusive** — shovelers cannot be
   chained; they always talk directly to the collector.
 - Run **one collector instance** per document stream: correlation state
@@ -259,6 +283,9 @@ With shovelers deployed, servers with different MTUs or older versions still
 work — the collector tracks per-server, per-stream sequence gaps
 (`xrootd_collector_packets_lost_total`), so misconfigured servers are visible
 in the metrics rather than silently absent (section 20).
+
+See [`NETWORK_TUNING.md`](NETWORK_TUNING.md) §4 for the fragmentation mechanics
+behind these rules, and §9 for reading the loss counters they show up in.
 
 ### 2.2 Summary stream (`xrd.report`) — do not point it at the collector
 
@@ -383,12 +410,19 @@ metrics-port = 9932
 state-file = /var/lib/xrootd/xrdmoncollect-state.json
 state-ttl = 15m
 
-# --- Tuning (defaults shown; see the capacity table in the README) -------
+# --- Tuning (defaults shown; capacity table: README.md#capacity-and-tuning) --
 # flush-count = 500        # packets per batch (one batch -> one POST)
 # flush-secs = 5           # max age of a partial batch
-# rcvbuf = 16M             # kernel UDP receive buffer
-# queue-depth = 64         # receiver -> serializer batches in flight
-# max-memory = 1G          # total process memory cap (LRU eviction above)
+# rcvbuf = 16M             # kernel UDP receive buffer. Capped by rmem_max
+#                          # unless the socket unit sets it (4.2); see
+#                          # NETWORK_TUNING.md section 2.
+# queue-depth = 64         # receiver -> serializer batches in flight. This is
+#                          # the sole backpressure point: sinks never block
+#                          # the decoder, they shed.
+# max-memory = 1G          # total process memory cap (LRU eviction above).
+#                          # Also divides the sink queue budget: max-memory/32
+#                          # split across (N_opensearch + 2*N_otlp) queues,
+#                          # with a 4M floor per queue.
 # server-ttl = 86400       # reap idle server incarnations after this many s
 
 # --- Enrichment (optional) ------------------------------------------------
@@ -524,15 +558,27 @@ sudo dnf -y install ~/rpmbuild/RPMS/*/xrootd-server-*.rpm \
                     ~/rpmbuild/RPMS/*/xrootd-server-libs-*.rpm
 ```
 
-The package installs `/usr/bin/xrdmoncollect`, the commented example config
-as `/etc/xrootd/xrdmoncollect.cfg`, the `xrdmoncollect.service` +
-`xrdmoncollect.socket` units, and `man 8 xrdmoncollect`.
+The package installs `/usr/bin/xrdmoncollect`, the commented example config as
+`/etc/xrootd/xrdmoncollect.cfg.example`, the `xrdmoncollect.service` +
+`xrdmoncollect.socket` units, and `man 8 xrdmoncollect`. Note the `.example`
+suffix: the daemon reads `/etc/xrootd/xrdmoncollect.cfg`, which the package
+deliberately does not create, so **you must copy it into place**. A collector
+started with neither a config nor options falls back to the file sink and
+writes documents to stdout.
+
+> **Debian/Ubuntu.** `xrootd-server.deb` currently ships only the binary and the
+> man page — no example config, and **no systemd units**. Every
+> `systemctl enable --now xrdmoncollect.socket` below assumes the units are
+> present, so on those distributions install `systemd/xrdmoncollect.service` and
+> `systemd/xrdmoncollect.socket` from the source tree by hand into
+> `/usr/lib/systemd/system/` first.
 
 ### 4.2 Shoveler nodes (every XRootD server)
 
 1. Add the section 2 directives to the xrootd config and restart xrootd.
-2. Install `/etc/xrootd/shovel.token` (section 0.3) and replace
-   `/etc/xrootd/xrdmoncollect.cfg` with the shoveler config from 3.1.
+2. Install `/etc/xrootd/shovel.token` (section 0.3), then copy
+   `/etc/xrootd/xrdmoncollect.cfg.example` to `/etc/xrootd/xrdmoncollect.cfg`
+   and replace its contents with the shoveler config from 3.1.
 3. Enable socket + service:
 
 ```bash
@@ -548,10 +594,22 @@ crash-restarts drop nothing that fits in the buffer. The port in the socket
 unit must match `port` in the config; on mismatch the daemon binds its own
 socket and only the zero-loss-restart property is lost.
 
+There is a second reason, independent of restarts: systemd creates the socket
+**as root**, so `ReceiveBuffer=` is applied with `SO_RCVBUFFORCE` and is *not*
+capped by `net.core.rmem_max`. The daemon's own `rcvbuf` cannot do that — the
+unit runs unprivileged with an empty `CapabilityBoundingSet=` — so under the
+shipped units this is the only way past that ceiling without raising it
+system-wide. See [`NETWORK_TUNING.md`](NETWORK_TUNING.md) §2 for the mechanism
+and §11 for the sysctl baseline.
+
 No firewall changes are needed: UDP 9930 stays on loopback and the shoveler
 makes an *outbound* TCP connection to the collector.
 
 ### 4.3 Central collector host
+
+Apply the kernel baseline from [`NETWORK_TUNING.md`](NETWORK_TUNING.md) §11.1 to
+this host first — it is the one machine in the deployment where UDP loss is
+likely, and the defaults are not sized for it.
 
 1. Install `xrootd-server` the same way; no xrootd configuration is needed
    on a dedicated collector host.
@@ -631,7 +689,8 @@ RUN --mount=type=bind,from=build,source=/root/rpmbuild/RPMS,target=/rpms \
  && dnf clean all
 
 # The xrootd-server RPM creates the xrootd user and the config/log/state
-# directory layout, and installs the example /etc/xrootd/xrdmoncollect.cfg.
+# directory layout, and installs /etc/xrootd/xrdmoncollect.cfg.example.
+# The real xrdmoncollect.cfg is mounted in at run time (5.2).
 USER xrootd
 ```
 
@@ -736,6 +795,14 @@ and drop the `otlp.token` volume.
 > down and replay on reconnect. In the direct-UDP variant, datagrams sent
 > during a container restart are lost; prefer Track A (native packages, with
 > the socket unit) for a collector that receives direct UDP.
+>
+> **The same absence caps the receive buffer.** Without the socket unit the
+> daemon requests `rcvbuf` itself, and that request is bounded by the
+> **host's** `net.core.rmem_max` unless the container is granted
+> `CAP_NET_ADMIN` — so `rcvbuf = 16M` on an untuned host is silently truncated
+> to a couple of hundred kilobytes. Apply the sysctl baseline from
+> [`NETWORK_TUNING.md`](NETWORK_TUNING.md) §11.1 to the container host, not to
+> the image, and verify with `ss -uanmp` inside the container.
 
 ## 6. Track C — docker compose (full stack on one host)
 
@@ -2166,7 +2233,7 @@ Kubernetes (7) tracks.
 | Tempo | `/var/lib/tempo` | WAL + blocks | trace history gone | spans are opt-in; start 20 Gi |
 | Grafana | `/var/lib/grafana` | `grafana.db` (users, manual dashboards), plugins | dashboards/users gone (provisioned ones come back) | 1 Gi |
 | OpenSearch | `/usr/share/opensearch/data` | indices / data streams | document history gone | the largest consumer — plan with the ISM policy below |
-| collector | `/var/lib/xrootd` | on-failure spool (`cache-dir`) + correlation state (`state-file`) | buffered unsent documents dropped; blind window after restart while dictionaries repopulate | ≥ 10 Gi (spool must cover your longest tolerated backend outage) |
+| collector | `/var/lib/xrootd` | on-failure spool (`cache-dir`) + correlation state (`state-file`) | buffered unsent documents dropped; blind window after restart while dictionaries repopulate | ≥ 10 Gi. **The collector does not cap this** — `spool-max` bounds the shoveler spool only — so the filesystem is the bound and filling it is the failure mode. Size it for your longest tolerated backend outage and alert on it (19.3) |
 | shoveler | `/var/lib/xrootd` | relay spool (`<cache-dir>/shovel`) | datagrams buffered during collector outage dropped | `spool-max` (default 1 G) + margin |
 
 Configs and token files are *inputs*, not state — keep them on the host (or
@@ -2344,6 +2411,8 @@ All from the `moncollect` Prometheus job (section 9):
 | sink failing | `sum by (destination) (rate(xrootd_collector_post_failures_total[10m])) > 0` or the `otlp_*` failure counters | that backend is unreachable — spool is absorbing |
 | sink shedding | `rate(xrootd_collector_post_overflow_total[10m]) > 0` or `otlp_overflow_total` | that destination cannot keep up with the input; its queue filled and dropped its oldest bodies. Data loss, distinct from `dropped_*` (a failed POST with nowhere to spill) |
 | spool backlog | `xrootd_collector_cache_files` growing for >1 h | backend outage outlasting the buffer |
+| spool filling the disk | `sum by (destination) (xrootd_collector_cache_bytes) > 0.8 * <filesystem size>` | nothing in the collector caps this cache (18.1), so the filesystem is the bound and the next thing to fail is every write on it |
+| decoder saturated | `xrootd_collector_recv_queue_batches >= <queue-depth>` for >5 m | the collector is CPU-bound, not burst-limited: the receiver is waiting and `UdpRcvbufErrors` will follow. Turn off document streams or split the load |
 | shovel spool dropping | `rate(xrootd_shoveler_spool_dropped_total[10m]) > 0` | outage exceeded `spool-max` — data loss |
 | state pressure | `xrootd_collector_evicted_total` climbing | raise `max-memory` or lower `server-ttl` |
 | cap unmeetable | `xrootd_collector_memory_floored_total` climbing | the memory is not in the correlation state: check the OTLP batch, the disk cache, and the container limit |

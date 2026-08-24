@@ -1,32 +1,49 @@
 # XrdMetrics
 
-`XrdMetrics` is XRootD's native instrumentation library: a small, lock-free,
-Prometheus- and OpenTelemetry-aware metrics system built into `XrdUtils` and
-therefore linked by every component and plugin. Subsystems declare counters,
-gauges, histograms and summaries against a process-wide registry; the
-`XrdHttpMetricsExporter` plugin serves or pushes them as Prometheus text or
-OTLP/JSON.
+`XrdMetrics` is a new XRootD component that adds native instrumentation support.
+It's a small, lock-free, Prometheus- and OpenTelemetry-aware metrics system
+built into the common `XrdUtils` library. Therefore, it may be linked by any
+component and/or plugin. This means that it makes it possible to add monitoring
+features both to the server and the client sides using the same library, as well
+as into external applications linking against XRootD (e.g. EOS, and ROOT).
 
-This document is developer-focused: how to instrument code, how the configuration
-directives interact with the classes, and the lifetime rules you must respect.
+The library exposes an `XrdMetrics::Collector` instance by default, and allows
+additional instances to be registered and scraped. From a collector instance,
+developers can declare subsystems, which are collections of related metrics,
+and within a subsystem metric families can be defined such as counters, gauges,
+histograms, and summaries. The process-wide registry keeps track of the whole
+hierarchy of objects, starting at the collector instances.
+
+Metrics are exposed on the server-side by a new `XrdHttpMetricsExporter` plugin
+that serves them via HTTP under a configurable endpoint, or pushes them
+periodically to a configurable endpoint in Prometheus text exposition format, or
+OTLP/JSON.
 
 ## Object model
 
+The object structure is as shown below, with a unique, process-wide
+`CollectorRegistry` owning all top-level `Collector` instances. When scraping,
+the `CollectorRegistry` iterates through each `Collector`, its `Subsystems`,
+and metric families and serializes everything into a buffer that can be served
+or written out to a file (for example, at the end of a batch job in the case of
+the client).
+
 ```
-CollectorRegistry   process-wide directory of Collectors (one scrape/push)
-  └─ Collector      a name prefix + frozen global labels + its Subsystems
-       └─ Subsystem a named group ("sched", "cms", "http", ...) that makes families
-            └─ Family     one metric name; owns its label-keyed series
+CollectorRegistry          # process-wide directory of Collectors (one scrape/push)
+  └─ Collector             # a named prefix + frozen global labels + subsystems
+       └─ Subsystem        # a group of metric families ("sched", "cms", "http", ...)
+            └─ Family      # a metric name, family formed by the sets of labels
                  └─ Series/Instrument   Counter / Gauge / Histogram / Summary
 ```
 
 Lifetime is **strictly nested**: a `Collector` outlives its `Subsystem`s, which
 outlive their families, which outlive their series. Back-pointers rely on this, so
-you never heap-allocate a `Collector` that outlives the code using it — use the
-process-wide default:
+you should never heap-allocate a `Collector` that may outlive the code using it.
+Make sure any collector other than the default is initialized as early as
+possible, before any metric family is registered, or use the process-wide default:
 
 ```cpp
-XrdMetrics::Collector& c = XrdMetrics::Default();   // prefix "xrootd", auto-registered
+XrdMetrics::Collector& c = XrdMetrics::Default(); // prefix "xrootd", auto-registered
 ```
 
 `Default()` returns the singleton `Collector` with prefix `xrootd`; it joins the
@@ -36,9 +53,14 @@ All examples below use `namespace XrdMetrics`.
 
 ## Quick start
 
-A subsystem author grabs a `Subsystem`, creates instruments once (they are returned
-by reference and cached — hold the reference, do not re-look-up on the hot path),
-then updates them:
+A subsystem author grabs a `Subsystem`, then creates instruments once.
+Instruments are returned by reference, and can be cached. One should hold on to
+the reference to avoid having to perform lookups on the hot path. After metrics
+are all registered, which should happen during the initialization phase,
+updating is usually a simple increment or assignment, as the instruments are all
+handled internally with relaxed atomics, and the operator expose only the
+operations necessary for each of them to function. For example, a simple metric
+to count file open events can be declared as shown below:
 
 ```cpp
 #include "XrdMetrics/XrdMetricsInstrument.hh"   // Counter, Gauge, Histogram, Summary
@@ -46,27 +68,32 @@ then updates them:
 
 XrdMetrics::Subsystem& ofs = XrdMetrics::Default().subsystem("ofs");
 
-m_Opens = &ofs.counter<std::uint64_t>("opens_total", "file opens");
+auto m_Opens = ofs.counter<std::uint64_t>("opens_total", "file opens");
 
 // ... later, on the hot path (lock-free):
-++*m_Opens;
+++m_Opens;
 ```
 
-When the tally must stay in a pre-existing field for ABI reasons (installed
-headers are a binary-compatibility contract), keep the field as the source of
-truth and register an *observed* counter that reads it at scrape time instead
-(see `src/Xrd/XrdScheduler.cc`).
+The full metric names are then of the form `<prefix>_<subsystem>_<name>`, e.g.
+`xrootd_ofs_file_ops_total`. Metric and label names are validated at creation
+(`[a-zA-Z_:][a-zA-Z0-9_:]*` / `[a-zA-Z_][a-zA-Z0-9_]*`); an invalid name throws
+`std::invalid_argument`.
 
-The full metric name is `<prefix>_<subsystem>_<name>`, e.g. `xrootd_sched_jobs_total`.
-Metric and label names are validated at creation (`[a-zA-Z_:][a-zA-Z0-9_:]*` /
-`[a-zA-Z_][a-zA-Z0-9_]*`); an invalid name throws `std::invalid_argument`.
+When the metric to be exposed is the value of an existing variable that is used
+in delicate control logic, `XrdMetrics` can use an *observed* counter or gauge,
+which captures a reference to a variable to read its value only at scrape time,
+without having to change pre-existing code. For example, the number of threads
+in `XrdScheduler` is exposed as a metric by an observed gauge.
+
+All instruments update through relaxed atomics, without locks on the update
+path, so they are safe to increment concurrently from many threads.
 
 ## Metric types (instruments)
 
-All instruments update through relaxed atomics — no locks on the update path — and
-are safe to increment concurrently from many threads.
-
 ### Counter — monotonic (`uint64_t` or `double`)
+
+Counters are templated on their underlying type. The examples below show two
+examples for an integer and a floating point counter.
 
 ```cpp
 Counter<std::uint64_t>& c = collector.subsystem("ops").counter<std::uint64_t>("requests_total");
@@ -79,9 +106,16 @@ Counter<double>& cpu = collector.subsystem("proc").counter<double>("cpu_seconds_
 cpu += 1.5;  // accumulates fractional amounts
 ```
 
-A counter has no `=`, `-=` or reset — monotonicity is enforced by the type.
+A `Counter` as shown above only exposes a `operator()++` to increment its value,
+resetting and setting to a specific value are not allowed operations on it.
+Monotonicity is enforced by the type itself. This ensure that mistakes in usage
+can become compile-time errors rather than silent bugs.
 
 ### Gauge — up/down (`int64_t` or `double`)
+
+`Gauges`, on the other hand, support more operators, so their value can be set
+at will. This type of metric is what you'd use to keep track of memory usage,
+for example, by setting it to the current number of bytes in use.
 
 ```cpp
 Gauge<std::int64_t>& g = collector.subsystem("sched").gauge<std::int64_t>("threads");

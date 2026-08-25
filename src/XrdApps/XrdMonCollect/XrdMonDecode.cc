@@ -804,15 +804,19 @@ bool XrdMonDecode::emitDoc(json& j, const Server& srv)
 /*                         o t e l I d e n t i t y                            */
 /******************************************************************************/
 
-std::string XrdMonDecode::otelIdentity(json& a, const Server& srv,
+std::string XrdMonDecode::otelIdentity(json& a, Server& srv,
                                        uint32_t userID)
 {
    std::string vo;
 
    auto uit = srv.users.find(userID);
    if (uit != srv.users.end())
-      {const UserInfo& u = uit->second;
-       Touch(u.lru);   // a referenced session is active: keep it warm
+      {UserInfo& u = uit->second;
+       // A referenced session is active: keep it warm, and restamp the clock
+       // the idle TTL measures. srv.lastSeen is this packet's arrival, stamped
+       // once in ServerFor, so this costs no clock read per document.
+       Touch(u.lru);
+       u.lastSeen = srv.lastSeen;
        if (!u.user.empty())       a["user.name"]            = u.user;
        // The '&n=' login distinguished name is the authenticated subject:
        // semconv user.id. A 'T' token subject (below) is preferred and
@@ -966,6 +970,7 @@ void XrdMonDecode::foldSession(Server& srv, uint32_t userID,
 //
    Recharge(u.lru, bytesOf(u));
    Touch(u.lru);
+   u.lastSeen = srv.lastSeen;
 }
 
 /******************************************************************************/
@@ -1125,7 +1130,7 @@ constexpr int kStateVersion = 3;
    X(mapIdnt) X(mapTokn) X(mapUeac) X(opens) X(closes) X(xfrs) X(discs)   \
    X(docs) X(failed) X(orphanCls) X(staleOpens) X(traces) X(gevents)      \
    X(redirs) X(spans) X(frmEvents) X(lost) X(evicted) X(reaped)            \
-   X(memFloored) X(unknown) X(badUtf8)
+   X(expiredUsers) X(memFloored) X(unknown) X(badUtf8)
 }
 
 bool XrdMonDecode::SaveState(const std::string& path) const
@@ -1160,7 +1165,18 @@ bool XrdMonDecode::SaveState(const std::string& path) const
 
        json& ju = o["users"] = json::object();
        for (const auto& [id, u] : s.users)
-          {json e = {{"raw",  u.raw},       {"user",   u.user},
+          {
+           // A spent session is never worth carrying across a restart, and
+           // skipping it is safe by proof rather than by judgement: the
+           // disconnect ran DropUserFiles, which erased every fileID in
+           // u.openFiles from s.files, so a disc user owns no persisted
+           // open-file entry and dropping it cannot orphan a close in the
+           // snapshot. The straggling close the grace exists for cannot arrive
+           // during a restart either. This is most of what a long-running
+           // collector was writing out and reading back.
+           if (u.disc) continue;
+
+           json e = {{"raw",  u.raw},       {"user",   u.user},
                      {"prot", u.prot},      {"host",   u.host},
                      {"addr", u.addr},      {"ahost",  u.authHost},
                      {"dn",   u.dn},        {"auth",   u.authMethod},
@@ -1169,6 +1185,7 @@ bool XrdMonDecode::SaveState(const std::string& path) const
                      {"app",  u.appName},   {"info",   u.appInfo},
                      {"site", u.site},      {"ipv",    u.ipVersion},
                      {"conn", (int64_t)u.connT},
+                     {"ls",   (int64_t)u.lastSeen},
                      {"disc", u.disc}};
            // A session that has opened but not yet closed anything still knows
            // when it began, and that is exactly the session whose start used to
@@ -1250,7 +1267,11 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
             + "); starting fresh";
        return false;}
 
-   int64_t age = (int64_t)time(nullptr) - j.value("saved", (int64_t)0);
+   // Also the fallback age for an entry written before it carried its own
+   // last-seen stamp: the snapshot cannot be newer than when it was written.
+   const time_t saved = (time_t)j.value("saved", (int64_t)0);
+
+   int64_t age = (int64_t)time(nullptr) - (int64_t)saved;
    if (age < 0 || age > maxAgeSec)
       {note = "state snapshot is " + std::to_string(age) + "s old (limit "
             + std::to_string(maxAgeSec) + "s); starting fresh";
@@ -1328,6 +1349,18 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
                   // live, which the next disconnect or eviction corrects.
                   u.disc       = e.value("disc",  false);
                   if (!u.disc) srv.sessions++;
+
+                  // Verbatim, not Now(). A session's idle clock is a fact
+                  // about a client that a restart does not change, so the TTL
+                  // continues rather than granting everything a fresh full
+                  // age -- which is what let a restored population survive
+                  // indefinitely across restarts. This is deliberately the
+                  // opposite of the open-file path below, where lastSeen *is*
+                  // reset: a file's TTL detects a lost close by the absence of
+                  // xfr refreshes, and the restart is itself what interrupts
+                  // them. A snapshot predating this key falls back to the
+                  // snapshot's own timestamp, the best available upper bound.
+                  u.lastSeen   = (time_t)e.value("ls", (int64_t)saved);
                   if (auto sn = e.find("session"); sn != e.end())
                      {u.sFiles      = sn->value("files", 0u);
                       u.sReads      = sn->value("rds",   0u);
@@ -1738,6 +1771,13 @@ constexpr std::size_t kStateFloorBytes = 8u << 20;
 // How long to stay quiet between warnings about being stuck at the floor.
 constexpr long kFloorWarnSecs = 300;
 
+// Most user entries one ReapServers pass may expire. The sweep runs on the
+// serializer thread, between batches of packet decoding, so a first pass with
+// a day's worth of spent sessions to erase would stall decode for as long as
+// it took. The remainder goes on the next pass a minute later.
+//
+constexpr uint64_t kUserSweepMax = 100000;
+
 // Top of the target band, as a shift of the cap: the loop climbs below
 // maxRss - maxRss/8 and holds between there and the cap. The old deadband was
 // maxRss/16, which left the process content at 94% of a limit it samples only
@@ -1914,6 +1954,65 @@ void XrdMonDecode::ReapServers(time_t now)
            LiveGauges(s);
           }
 
+// Expire user entries. Two expiries, because the two ways a session goes stale
+// have opposite safety properties. A session whose disconnect was reported is
+// spent, and is kept only long enough for a straggling close to resolve its
+// identity against it; a server reports a session's closes before its isDisc,
+// so anything later is already an anomaly. One whose disconnect was never seen
+// is indistinguishable from a legitimately idle connected client, so it is
+// governed separately, with a much longer age, and never taken while it still
+// holds open files -- an entry mid-operation is demonstrably alive. That last
+// condition also composes with the file TTL above, which sweeps a genuinely
+// leaked open first and thereby makes its owner eligible here.
+//
+   if (userTTL || userIdleTTL)
+      for (auto& [key, s] : servers)
+          {uint64_t nDisc = 0, nIdle = 0;
+           for (auto uit = s.users.begin(); uit != s.users.end(); )
+               {const UserInfo& u = uit->second;
+                bool spent = userTTL && u.disc && u.discT
+                          && now - u.discT > userTTL;
+                bool idle  = userIdleTTL && !u.disc && u.lastSeen
+                          && now - u.lastSeen > userIdleTTL
+                          && u.openFiles.empty();
+                if (!spent && !idle) {++uit; continue;}
+
+                // Mirror EvictFront: only a session that never reported its
+                // disconnect is still counted in sessions_open.
+                if (!u.disc && s.sessions) s.sessions--;
+                LruDrop(u.lru);
+                uit = s.users.erase(uit);
+                (spent ? nDisc : nIdle)++;
+
+                // Bound one pass. The first sweep on a collector that has been
+                // accumulating spent sessions for a day has hundreds of
+                // thousands to erase, each with its strings, and this runs on
+                // the thread that decodes packets. Two ordinary minutes beat
+                // one long stall.
+                if (nDisc + nIdle >= kUserSweepMax) break;
+               }
+           if (!nDisc && !nIdle) continue;
+           stats.expiredUsers += nDisc + nIdle;
+           if (metrics)
+              {static const char* const help =
+                  "user entries expired by the post-disconnect grace "
+                  "(--user-ttl) or the idle user TTL (--user-idle-ttl)";
+               // Two-valued, so the cardinality is free, and the split is what
+               // an operator needs: "disconnected" climbing is the mechanism
+               // working, "idle" climbing means live sessions are being taken
+               // and --user-idle-ttl is too low.
+               if (nDisc)
+                  metrics->counterSeries("expired_users_total", help,
+                            {{"cluster", s.mtrCluster}, {"server", s.mtrServer},
+                             {"reason", "disconnected"}}) += nDisc;
+               if (nIdle)
+                  metrics->counterSeries("expired_users_total", help,
+                            {{"cluster", s.mtrCluster}, {"server", s.mtrServer},
+                             {"reason", "idle"}}) += nIdle;
+              }
+           LiveGauges(s);
+          }
+
    if (!serverTTL) return;
 
    bool reaped = false;
@@ -2040,6 +2139,7 @@ void XrdMonDecode::DecodeMap(unsigned char code, Server& srv,
            u.adopt(std::move(old->second));
           }
        if (fresh) srv.sessions++;
+       u.lastSeen = srv.lastSeen;   // this map record names the session
        std::size_t w = bytesOf(u);
        lruPut(&srv, Dict::Users, srv.users, dictid, dictid, std::string(),
               std::move(u), w);
@@ -2526,7 +2626,8 @@ void XrdMonDecode::EmitDisc(const std::string& src, int32_t stod, Server& srv,
 //
    auto uit = srv.users.find(userID);
    if (uit != srv.users.end() && !uit->second.disc)
-      {uit->second.disc = true;
+      {uit->second.disc  = true;
+       uit->second.discT = srv.lastSeen;  // starts the post-disconnect grace
        if (srv.sessions) srv.sessions--;
       }
 

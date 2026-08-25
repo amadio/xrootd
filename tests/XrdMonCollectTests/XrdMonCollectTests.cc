@@ -3982,6 +3982,168 @@ TEST(XrdMonCollect, DisconnectDemotesTheSessionInTheLru)
   EXPECT_EQ(j["attributes"].value("user.name", std::string()), "u8");
 }
 
+// A session whose disconnect was reported is spent, and is kept only long
+// enough for a straggling close to resolve its identity against it. Without
+// this the only thing that ever reclaims one is memory pressure or the server
+// TTL a day later -- which is how a collector comes to hold hundreds of
+// thousands of finished sessions against a few thousand open files.
+TEST(XrdMonCollect, DisconnectedUserExpiresAfterTheGrace)
+{
+  const time_t t0 = 1700000000;
+  XrdMonDecode dec([](const std::string&){});
+  dec.SetClock([&]{return t0;});
+  dec.SetUserTTL(300);
+
+  feedUserN(dec, "h:1", 7);
+  feedDisc(dec, "h:1", 7);
+  ASSERT_EQ(dec.StateEntries(), 1u);
+
+  dec.ReapServers(t0 + 299);                  // inside the grace
+  EXPECT_EQ(dec.StateEntries(), 1u);
+  EXPECT_EQ(dec.GetStats().expiredUsers, 0u);
+
+  dec.ReapServers(t0 + 301);                  // past it
+  EXPECT_EQ(dec.StateEntries(), 0u);
+  EXPECT_EQ(dec.GetStats().expiredUsers, 1u);
+}
+
+// A connected session is never touched by the grace, however long it sits.
+// This is the property that makes --user-ttl safe to have on by default.
+TEST(XrdMonCollect, ConnectedUserSurvivesTheGrace)
+{
+  const time_t t0 = 1700000000;
+  XrdMonDecode dec([](const std::string&){});
+  dec.SetClock([&]{return t0;});
+  dec.SetUserTTL(300);                        // idle TTL deliberately off
+
+  feedUserN(dec, "h:1", 7);
+  dec.ReapServers(t0 + 86400);
+
+  EXPECT_EQ(dec.StateEntries(), 1u);
+  EXPECT_EQ(dec.GetStats().expiredUsers, 0u);
+}
+
+// What the grace buys: a close arriving after the disconnect still resolves
+// its identity. The window runs from the disconnect and is not extended by the
+// stragglers it exists to serve -- so --user-ttl is a bounded, predictable
+// lifetime after the session ends rather than one a repeated reference could
+// stretch indefinitely.
+TEST(XrdMonCollect, AStragglingCloseInsideTheGraceStillResolves)
+{
+  time_t now = 1700000000;
+  const time_t t0 = now;
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetClock([&]{return now;});
+  dec.SetUserTTL(300);
+
+  feedUserN(dec, "h:1", 7);
+  feedDisc(dec, "h:1", 7);
+
+  now = t0 + 200;                             // inside the grace
+  docs.clear();
+  openClose(dec, "h:1", 1, 7, 1000, 1000, 0, "/a.root");
+  ASSERT_FALSE(docs.empty());
+  json j = json::parse(docs.back());
+  EXPECT_EQ(j["attributes"].value("user.name", std::string()), "u7")
+      << "the grace exists so this close can still be attributed";
+
+  // The window still closes on schedule, measured from the disconnect.
+  dec.ReapServers(t0 + 301);
+  EXPECT_EQ(dec.GetStats().expiredUsers, 1u);
+}
+
+// The backstop for a disconnect record that was never sent. It is a guess, so
+// it never takes an entry that still holds an open file: such a session is
+// demonstrably mid-operation, whatever its dictid has been named by lately.
+TEST(XrdMonCollect, IdleUserExpiresOnlyWithNoOpenFiles)
+{
+  time_t now = 1700000000;
+  const time_t t0 = now;
+  XrdMonDecode dec([](const std::string&){});
+  dec.SetClock([&]{return now;});
+  dec.SetUserIdleTTL(3600);
+
+  feedUserN(dec, "h:1", 7);
+  // An open with no close: the user holds it in openFiles.
+  { W body; body.u32(1); body.u64(1000); body.u32(7);
+    std::string lfn = "/b.root"; body.raw(lfn); body.u8(0);
+    auto payload = todRec(kOpenT, 42);
+    auto r = rec(1 /*isOpen*/, 0x03, body.b);
+    payload.insert(payload.end(), r.begin(), r.end());
+    auto pkt = packet('f', kStod, payload);
+    dec.Process("h:1", (const char*)pkt.data(), pkt.size()); }
+
+  dec.ReapServers(t0 + 7200);
+  EXPECT_EQ(dec.GetStats().expiredUsers, 0u) << "expired a session mid-operation";
+
+  // Close it, and the session becomes eligible.
+  feedCloseId(dec, "h:1", 1);
+  dec.ReapServers(t0 + 7200);
+  EXPECT_EQ(dec.GetStats().expiredUsers, 1u);
+}
+
+// sessions_open counts live sessions, so expiring one that never reported a
+// disconnect has to decrement it -- and expiring one that did must not, since
+// its disconnect already did. Mirrors the same guard in EvictFront.
+TEST(XrdMonCollect, ExpiryKeepsSessionsOpenConsistent)
+{
+  const time_t t0 = 1700000000;
+  XrdMetrics::Collector collector("xrootd");
+  XrdMonDecode dec([](const std::string&){}, nullptr, false, false, false,
+                   false, &collector.subsystem("collector"));
+  dec.SetClock([&]{return t0;});
+  dec.SetUserTTL(300);
+  dec.SetUserIdleTTL(3600);
+
+  auto gauge = [&]{
+      std::string out; XrdMetrics::PrometheusTextSerializer ser(out);
+      collector.serialize(ser);
+      auto at = out.find("xrootd_collector_sessions_open"
+                         "{cluster=\"unknown\",server=\"h\"} ");
+      EXPECT_NE(at, std::string::npos) << out;
+      return out.substr(at, out.find('\n', at) - at); };
+
+  feedUserN(dec, "h:1", 7);                   // will disconnect properly
+  feedUserN(dec, "h:1", 8);                   // will be expired as idle
+  ASSERT_EQ(gauge().back(), '2');
+  feedDisc(dec, "h:1", 7);
+  ASSERT_EQ(gauge().back(), '1');
+
+  dec.ReapServers(t0 + 7200);                 // takes both
+  EXPECT_EQ(dec.GetStats().expiredUsers, 2u);
+  EXPECT_EQ(gauge().back(), '0') << "the spent session was decremented twice";
+}
+
+// Both reasons are reported, and separately: "disconnected" climbing is the
+// mechanism working as intended, "idle" climbing means live sessions are being
+// taken and --user-idle-ttl is too low. An operator cannot tell those apart
+// from one number.
+TEST(XrdMonCollect, ExpiredUsersCountedByReason)
+{
+  const time_t t0 = 1700000000;
+  XrdMetrics::Collector collector("xrootd");
+  XrdMonDecode dec([](const std::string&){}, nullptr, false, false, false,
+                   false, &collector.subsystem("collector"));
+  dec.SetClock([&]{return t0;});
+  dec.SetUserTTL(300);
+  dec.SetUserIdleTTL(3600);
+
+  feedUserN(dec, "h:1", 7);
+  feedDisc(dec, "h:1", 7);
+  feedUserN(dec, "h:1", 8);
+  dec.ReapServers(t0 + 7200);
+
+  std::string out; XrdMetrics::PrometheusTextSerializer ser(out);
+  collector.serialize(ser);
+  EXPECT_NE(out.find("xrootd_collector_expired_users_total{cluster=\"unknown\","
+                     "server=\"h\",reason=\"disconnected\"} 1"),
+            std::string::npos) << out;
+  EXPECT_NE(out.find("xrootd_collector_expired_users_total{cluster=\"unknown\","
+                     "server=\"h\",reason=\"idle\"} 1"),
+            std::string::npos) << out;
+}
+
 // The recent-file list is capped while the running totals cover every file.
 TEST(XrdMonCollect, SessionRecentFilesCapped)
 {
@@ -4375,6 +4537,49 @@ TEST_F(StateFile, CloseCorrelatesAfterReload)
 // abort there too -- after the partial write, so the .tmp file would be left
 // behind as well. Scrubbing on the way in means the snapshot only ever holds
 // what it can encode.
+// A spent session is not worth carrying across a restart, and skipping it is
+// safe: its disconnect ran DropUserFiles, so it owns no persisted open-file
+// entry and dropping it cannot orphan a close. This is most of what a
+// long-running collector was writing out and reading back -- a restart used to
+// round-trip every finished session the incarnation had ever seen.
+TEST_F(StateFile, SnapshotOmitsSpentSessions)
+{
+  feedUserMap();
+  feedDisc(dec, "10.0.0.1:9930", 7);
+  ASSERT_TRUE(dec.SaveState(path));
+
+  XrdMonDecode dec2([](const std::string&){});
+  std::string note;
+  ASSERT_TRUE(dec2.LoadState(path, 900, note));
+  EXPECT_NE(note.find("0 user(s)"), std::string::npos) << note;
+  EXPECT_EQ(dec2.StateEntries(), 0u);
+}
+
+// A live session's idle clock is restored verbatim rather than restarted. A
+// restart does not make a client active again, and granting every restored
+// entry a fresh full age is what would let a population survive indefinitely
+// across restarts -- the opposite of the open-file path, whose TTL detects a
+// lost close by absent xfr refreshes that the restart itself interrupts.
+TEST_F(StateFile, RestoredUserKeepsItsIdleClock)
+{
+  const time_t real = time(nullptr);
+  dec.SetClock([&]{return real - 3600;});      // the login is an hour old
+  feedUserMap();
+  ASSERT_TRUE(dec.SaveState(path));
+
+  XrdMonDecode dec2([](const std::string&){});
+  std::string note;
+  ASSERT_TRUE(dec2.LoadState(path, 900, note));
+  ASSERT_EQ(dec2.StateEntries(), 1u);
+
+  // Half an hour: passed long ago in the session's own clock, but not at all
+  // if the reload had restamped it.
+  dec2.SetUserIdleTTL(1800);
+  dec2.ReapServers(real);
+  EXPECT_EQ(dec2.GetStats().expiredUsers, 1u)
+      << "the reload restarted the idle clock";
+}
+
 TEST_F(StateFile, PoisonedStringsSurviveTheSnapshot)
 {
   feedUserMap();

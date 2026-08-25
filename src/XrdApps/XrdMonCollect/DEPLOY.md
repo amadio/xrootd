@@ -365,6 +365,31 @@ metrics-port = 9932
 
 ### 3.2 Central collector
 
+> **⚠ Upgrading an existing deployment: check your memory limit first.**
+>
+> The collector now uses the memory allowance it is given. Until recently its
+> state budget was pinned at a fixed eighth of `max-memory` and the process
+> never came near the rest, so a container or unit whose limit *equalled*
+> `max-memory` survived only by accident. It will now settle near seven eighths
+> of the cap and be OOM-killed against a limit set at it.
+>
+> **Set the cgroup limit above `max-memory` — 1.5× is the usual figure — before
+> deploying.** That means `MemoryMax=` in a systemd unit, `--memory` for
+> podman/docker, or `resources.limits.memory` in Kubernetes. The collector reads
+> its own cgroup limit at start-up and warns when it finds one at or below its
+> cap:
+>
+> ```
+> xrdmoncollect: warning: the cgroup memory limit (1024M) is at or below
+> --max-memory (1024M). The collector now uses the allowance it is given, so it
+> will be killed rather than shed state; raise the cgroup limit above
+> --max-memory (1.5x is the usual figure) or lower --max-memory
+> ```
+>
+> Expect resident memory to rise on upgrade. That is the fix, not a leak — the
+> collector was previously unable to use roughly half of what it was allowed,
+> and evicted correlation state to stay inside a limit nobody had set.
+
 Both HTTP sinks accept any number of destinations. The `otlp-*`/`os-*` keys
 below define the one named `default`; the section after this one shows how to
 add a second — the case this exists for is a site keeping its own monitoring
@@ -419,11 +444,18 @@ state-ttl = 15m
 # queue-depth = 64         # receiver -> serializer batches in flight. This is
 #                          # the sole backpressure point: sinks never block
 #                          # the decoder, they shed.
-# max-memory = 1G          # total process memory cap (LRU eviction above).
+# max-memory = 1G          # total process memory cap. The collector steers
+#                          # itself into the top eighth of this and holds the
+#                          # rest in reserve, so it settles CLOSE to whatever
+#                          # is set here -- put the cgroup limit ABOVE it.
 #                          # Also divides the sink queue budget: max-memory/32
 #                          # split across (N_opensearch + 2*N_otlp) queues,
 #                          # with a 4M floor per queue.
 # server-ttl = 86400       # reap idle server incarnations after this many s
+# user-ttl = 300           # drop a session this long after its disconnect
+# user-idle-ttl = 21600    # drop a connected-but-idle session holding no open
+#                          # files. A guess, unlike user-ttl: too low and live
+#                          # sessions lose their identity (see the README).
 
 # --- Enrichment (optional) ------------------------------------------------
 # First capture group becomes the xrootd.dataset attribute (feeds the
@@ -2425,9 +2457,11 @@ All from the `moncollect` Prometheus job (section 9):
 | spool filling the disk | `sum by (destination) (xrootd_collector_cache_bytes) > 0.8 * <filesystem size>` | nothing in the collector caps this cache (18.1), so the filesystem is the bound and the next thing to fail is every write on it |
 | decoder saturated | `xrootd_collector_recv_queue_batches >= <queue-depth>` for >5 m | the collector is CPU-bound, not burst-limited: the receiver is waiting and `UdpRcvbufErrors` will follow. Turn off document streams or split the load |
 | shovel spool dropping | `rate(xrootd_shoveler_spool_dropped_total[10m]) > 0` | outage exceeded `spool-max` — data loss |
-| state pressure | `xrootd_collector_evicted_total` climbing | raise `max-memory` or lower `server-ttl` |
+| state pressure | `xrootd_collector_state_budget_used_ratio == 1` and `rate(xrootd_collector_evicted_total[10m]) > 0` | the budget is binding. If `xrootd_process_resident_memory_bytes` is well under `xrootd_collector_memory_cap_bytes` at the same time, correlation is being dropped with the allowance unspent — check `state_entries{kind}` before raising `max-memory` |
+| sessions accumulating | `xrootd_collector_state_entries{kind="users"} > 20 * xrootd_collector_state_entries{kind="files"}` | finished sessions are piling up rather than a working set being held: `user-ttl` is off or far too long |
+| live sessions being expired | `rate(xrootd_collector_expired_users_total{reason="idle"}[1h]) > 0` | `user-idle-ttl` is taking sessions that are still connected. Their duration is being reported as zero — cross-check `session_starts_total{source="disconnect"}` and raise it, or set it to 0 |
 | cap unmeetable | `xrootd_collector_memory_floored_total` climbing | the memory is not in the correlation state: check the OTLP batch, the disk cache, and the container limit |
-| over cap | `xrootd_process_resident_memory_bytes > 1.25 * <max-memory>` | the loop is losing; raise the cap or find the real consumer |
+| over cap | `xrootd_process_resident_memory_bytes > 1.25 * xrootd_collector_memory_cap_bytes` | the loop is losing; raise the cap or find the real consumer |
 | servers gone quiet | `xrootd_collector_servers{cluster="..."} < N` | nodes stopped reporting — check their `xrootd.monitor dest` |
 | unattributed servers | `xrootd_collector_servers{cluster="unknown"} > 0` for >1 h | a server has no `all.sitename`, or its `ident` interval is longer than the alert window |
 

@@ -310,13 +310,27 @@ lost (dropped datagram, crash, restart — the server never reuses a dictid with
 an incarnation):
 
 - `--max-memory` (default 1G; `0` = unbounded) caps the **total resident memory
-  of the process**. Once per control tick the collector reads its own RSS and,
-  if it is over, lowers the budget the correlation state may occupy;
-  **LRU-eviction** takes the cold entries first. Recency protects a genuine
-  long-running operation: each in-flight `xfr` snapshot and each reference of a
-  session by a close promotes the entry, so a file left open for a day survives
-  while memory allows. When RSS falls back under the cap the budget is restored
-  gradually.
+  of the process**. Once per control tick the collector reads its own RSS and
+  steers the budget the correlation state may occupy: it grants more while there
+  is measured headroom, holds station in the top eighth of the cap, and lowers
+  the budget above it, where **LRU-eviction** takes the cold entries first.
+  Recency protects a genuine long-running operation: each in-flight `xfr`
+  snapshot and each reference of a session by a close promotes the entry, so a
+  file left open for a day survives while memory allows.
+
+  So a healthy collector settles at roughly **seven eighths of the cap**, and
+  the remaining eighth is deliberate slack — the loop samples every 15 seconds,
+  and a burst can add a great deal between two samples. **Set `--max-memory`
+  *to* the memory you are willing to give the collector**, not below it: the
+  reserve is already built in, and budgeting for it twice is what leaves memory
+  unused.
+
+  Nothing in the loop assumes how much real memory a charged byte costs. It
+  grants a conservative fraction of the headroom it can see and lets the next
+  sample correct it, so it converges on the same place whether this workload's
+  entries are cheap or expensive. The budget also only rises while the state is
+  actually pressed against it — an allowance far above what is held is not a
+  constraint, and building one is how a burst fills it between two samples.
 
   This is **best-effort, not a guarantee**. Only the correlation state can be
   evicted — the receive queue, the pending output bodies and memory the
@@ -326,9 +340,17 @@ an incarnation):
   pursued until no state is left. The only hard cap is a cgroup limit
   (`MemoryMax=`).
 
-  > **Upgrading:** this knob used to bound an *estimate of the correlation state
-  > alone*, and that estimate ran 4-8x below the memory actually used, with a
-  > 256M default. A value carried over from then caps far less than intended.
+  > **⚠ Upgrading:** the collector now *uses* the allowance it is given. Before,
+  > the budget was pinned at a fixed eighth of `--max-memory` and the process
+  > never came near the rest, so a deployment whose cgroup `MemoryMax=` equalled
+  > (or undercut) `--max-memory` survived only by accident. **Raise the cgroup
+  > limit above `--max-memory` — 1.5× is the usual figure — before deploying
+  > this.** The collector warns at start-up when it can read a limit at or below
+  > its own cap. Expect resident memory to rise on upgrade; that is the fix.
+  >
+  > This knob also once bounded an *estimate of the correlation state alone*,
+  > and that estimate ran 4-8x below the memory actually used, with a 256M
+  > default. A value carried over from then caps far less than intended.
 - `--max-entries` adds an optional hard entry-count backstop (off by default).
   It bounds a count rather than a quantity of memory, so it is independent of
   `--max-memory` and applies whether or not the memory cap is in use.
@@ -341,6 +363,36 @@ an incarnation):
   never seen (the server reports a session's closes before its `isDisc`, so a
   leftover entry means the close record was lost). Swept entries are counted
   in `xrootd_collector_stale_opens_total{cluster,server}`.
+- `--user-ttl` (default 300s; `0` = never) drops a user entry that long after
+  its disconnect was reported. The entry outlives the disconnect only so a
+  straggling close can still resolve its identity against it; past that it is
+  dead weight. The window runs from the disconnect and stragglers do not extend
+  it, so the lifetime is predictable.
+
+  It is **on by default because it is safe by construction**: a server reports a
+  session's closes before its `isDisc`, so a record naming a session after its
+  disconnect is already an anomaly. Without it, the only things that ever
+  reclaim a finished session are memory pressure and `--server-ttl` a day later
+  — which is how a collector comes to hold hundreds of thousands of spent
+  sessions against a few thousand open files. Watch the split in
+  `state_entries{kind}`: `users` far above `files` is that shape.
+- `--user-idle-ttl` (default 21600s = 6h; `0` = off) drops a *still-connected*
+  user entry untouched for that long and holding no open files. It covers the
+  session whose disconnect record was lost entirely — what `--file-ttl` does on
+  the file side.
+
+  Unlike the grace above, **this one is a guess**, which is why it is long and
+  why it never takes an entry mid-operation: an idle-but-connected client is
+  legitimate and looks identical to a leaked one. Set too low it is destructive
+  rather than merely lossy — a live session whose entry is gone reaches its
+  disconnect with no identity to resolve against, and is reported as an *instant*
+  with `xrootd.session.start_time_source` = `disconnect` and a zero-second
+  observation in `session_duration_seconds`. The two series that say so are
+  `expired_users_total{reason="idle"}` and
+  `session_starts_total{source="disconnect"}`; read them together.
+
+  Both TTLs count in `xrootd_collector_expired_users_total{cluster,server,reason}`,
+  where `reason` is `disconnected` or `idle`.
 - `--file-ttl` (default `0` = off) expires open-file entries untouched for the
   given period, covering leaks whose disconnect was also lost. It only applies
   to servers that report in-flight snapshots (`xfr` on `xrootd.monitor
@@ -1768,6 +1820,17 @@ xrdmoncollect [-c <file>] -p <port> [-b <bindaddr>] [-o <file>] [--bulk <index>]
                      Only applied to servers reporting in-flight snapshots
                      ("xfr" on xrootd.monitor fstat); set it to at least 3x
                      the server's xfr reporting period
+  --user-ttl <s>     drop a user entry <s> seconds after its disconnect was
+                     reported (default 300; 0=never). The entry outlives the
+                     disconnect only so a straggling close can still resolve
+                     its identity against it
+  --user-idle-ttl <s> drop a still-connected user entry idle for >s seconds
+                     and holding no open files (default 21600; 0=off).
+                     Covers a lost disconnect record, but an idle client is
+                     legitimate: set too low, a live session loses its
+                     identity and is reported as an instant. Watch
+                     session_starts_total{source="disconnect"} and
+                     expired_users_total{reason="idle"} together
   --state-file <f>   save the correlation state on shutdown and reload it on
                      startup (default: $STATE_DIRECTORY/xrdmoncollect-state.json
                      under systemd, else off; an empty value disables)
@@ -1808,6 +1871,7 @@ os-index = xrootd-file-ops
 forward = logstash.example.org:5044
 metrics-port = 9931
 max-memory = 1G
+user-ttl = 300
 ```
 
 The file may additionally carry `[opensearch "<name>"]` and `[otlp "<name>"]`
@@ -2002,7 +2066,10 @@ need larger buffers and a bigger memory budget.
 | :-- | :-- | :-- |
 | `recv_queue_batches` rides at `--queue-depth`; `packets_lost_total` climbs | `--rcvbuf`, `--queue-depth` | Enlarge the kernel socket buffer and/or the in-flight batch queue so bursts are absorbed instead of dropped. |
 | Too many small POSTs, or POST latency too high | `--flush-count`, `--flush-secs` | Larger/longer flush windows trade freshness for fewer, bigger requests; smaller windows lower end-to-end latency. |
-| `state_budget_bytes` falling away from its ceiling; `evicted_total` climbing | `--max-memory`, `--max-entries`, `--server-ttl` | The cap is being enforced. Raise it to cover the working set (≈ concurrent open files × incarnations); shorten the TTL to reclaim dead incarnations sooner. |
+| `state_budget_used_ratio` pinned at 1; `evicted_total` climbing, but `process_resident_memory_bytes` well below `memory_cap_bytes` | `--max-memory` | The state budget is binding before memory is: correlation is being dropped with the allowance unspent. Check `state_entries{kind}` for a runaway dictionary before raising the cap. |
+| `state_entries{kind="users"}` far above `{kind="files"}` | `--user-ttl`, `--user-idle-ttl`, `--server-ttl` | Finished sessions are accumulating rather than a working set being held. The grace should keep `users` within a few minutes' worth of logins; if it is off, that is why. |
+| `expired_users_total{reason="idle"}` climbing, or `session_starts_total{source="disconnect"}` rising with it | `--user-idle-ttl` | The idle backstop is taking *live* sessions: their identity is gone by the time they disconnect, and their duration is reported as zero. Raise it, or set it to 0. |
+| `process_resident_memory_bytes` riding just under `memory_cap_bytes` | — | Normal. The loop steers into the top eighth of the cap on purpose; the reserve is for what a 15 s sample cannot see. |
 | `memory_floored_total` climbing | — | The cap cannot be met by evicting correlation state: the memory is elsewhere. Look at the OTLP batch (largest non-state consumer when `--otlp-url` is set), the disk cache, and the container's own limit. |
 | `post_failures_total` / `otlp_failures_total`, growing `cache_files` | `--cache-dir` (+ downstream) | Ensure a cache dir is set so failures spool to disk instead of dropping; investigate the sink. Watch `dropped_bulk_total` for actual loss. Both carry a `destination` label -- check whether one endpoint is failing or all of them. |
 | `post_overflow_total` / `otlp_overflow_total` climbing | the destination, or `--cache-dir` | That destination cannot absorb the input rate: its queue filled and dropped its oldest bodies. Distinct from `dropped_*`, which means a POST failed with nowhere to spill. |
@@ -2227,8 +2294,15 @@ xrootd_collector_invalid_utf8_total         (wire strings repaired: bytes were n
 xrootd_collector_disconnects_total          (f-stream session disconnect records)
 xrootd_collector_evicted_total              (entries evicted by the memory budget)
 xrootd_collector_reaped_servers_total       (incarnations reclaimed by --server-ttl)
-xrootd_collector_state_entries              (gauge: correlation entries held)
+xrootd_collector_expired_users_total{cluster,server,reason}
+                                            (user entries expired: reason is
+                                             disconnected (--user-ttl) or idle
+                                             (--user-idle-ttl))
+xrootd_collector_state_entries{kind}        (gauge: entries held, by dictionary:
+                                             users/files/paths/infos/tokens/activity)
 xrootd_collector_state_budget_bytes         (gauge: setpoint the memory cap enforces)
+xrootd_collector_state_budget_used_ratio    (gauge: how full that budget is, 0-1)
+xrootd_collector_memory_cap_bytes           (gauge: the --max-memory cap in force)
 xrootd_collector_memory_floored_total       (over the cap with the budget at its floor)
 xrootd_collector_recv_queue_batches         (gauge: receiver->serializer depth)
 xrootd_process_resident_memory_bytes        (gauge: process RSS -- what --max-memory caps)
@@ -2449,21 +2523,31 @@ Grafana](#loki--grafana) below.
 ## Limitations
 
 - Process memory is bounded by `--max-memory`, and correlation state
-  additionally by `--max-entries` (see
+  additionally by `--max-entries` and the TTLs (see
   [Correlation state](#correlation-state)). A dropped entry merely yields a
-  document missing that field, or an orphan close. Evictions are counted in
-  `xrootd_collector_evicted_total`, the live setpoint is
-  `xrootd_collector_state_budget_bytes` against
-  `xrootd_process_resident_memory_bytes`, and reclaimed incarnations are counted
-  in `xrootd_collector_reaped_servers_total`.
-- The memory cap is best-effort. Only the correlation state can be *evicted*,
-  but a control tick that finds the process over its cap also asks the output
+  document missing that field, or an orphan close. Read
+  `xrootd_process_resident_memory_bytes` against
+  `xrootd_collector_memory_cap_bytes` for the process, and
+  `xrootd_collector_state_budget_used_ratio` for whether the state budget is
+  the binding constraint; evictions are counted in
+  `xrootd_collector_evicted_total`, expired sessions in
+  `xrootd_collector_expired_users_total{reason}` and reclaimed incarnations in
+  `xrootd_collector_reaped_servers_total`.
+
+  The two are read together: a utilisation pinned at 1 with evictions climbing
+  *while resident memory sits well below its cap* means the budget is binding
+  before memory is, and correlation is being thrown away with the allowance
+  unspent.
+- The memory cap is best-effort, and the collector aims just under it rather
+  than at it — the loop holds the top eighth of the cap in reserve for what a
+  15s sample cannot see. Only the correlation state can be *evicted*, but a
+  control tick that finds the process over its cap also asks the output
   accumulators to release what they hold — they ship immediately instead of
   waiting to coalesce, at most once per 15s tick. What remains over the cap
   after that is memory the collector does not own at all, and it reports
   `xrootd_collector_memory_floored_total` rather than evicting correlation
   state it still needs. Use a cgroup limit (`MemoryMax=`) if you need a hard
-  bound.
+  bound — set **above** `--max-memory`, not equal to it.
 - A destination that cannot keep up loses data rather than slowing the collector
   down. Its queue is bounded in bytes, and a full queue drops its oldest body
   (`xrootd_collector_post_overflow_total` /

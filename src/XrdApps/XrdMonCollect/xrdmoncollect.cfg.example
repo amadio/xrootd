@@ -91,13 +91,34 @@ port = 9930
 
 # Cap TOTAL process memory at ~this many bytes (K/M/G/T suffix; 0 = unbounded),
 # met by evicting least-recently-used correlation state. Best-effort: only the
-# correlation state can be evicted, so use a cgroup MemoryMax= for a hard bound.
-# Note this used to bound an estimate of the correlation state alone, which ran
-# 4-8x below real usage -- review a value carried over from then.
+# correlation state can be evicted, so use a cgroup MemoryMax= for a hard bound
+# -- set ABOVE this value, never equal to it. The collector steers itself into
+# the top eighth of the cap and holds the rest in reserve for what a 15s sample
+# cannot see, so it will settle close to whatever is set here. A deployment that
+# matched MemoryMax= to max-memory survived only because the budget used to be
+# pinned at a fixed eighth of the cap; it no longer is.
+# Note this also used to bound an estimate of the correlation state alone, which
+# ran 4-8x below real usage -- review a value carried over from then.
 # Alongside it, an optional hard entry cap and an idle-incarnation reap age.
 # max-memory = 1G
 # max-entries = 0
 # server-ttl = 86400
+
+# Drop a user entry this many seconds after its disconnect was reported
+# (0 = never). The entry outlives the disconnect only so a straggling close can
+# still resolve its identity against it; past that it is dead weight, and
+# without this the only things that ever reclaim a finished session are memory
+# pressure and server-ttl a day later.
+# user-ttl = 300
+
+# Drop a still-connected user entry idle this long and holding no open files
+# (0 = off). Covers a disconnect record that was lost entirely. Unlike the grace
+# above this is a guess -- an idle client is legitimate and looks identical --
+# so it is long, and setting it low is destructive rather than merely lossy: a
+# live session whose entry is gone is reported as an instant with
+# xrootd.session.start_time_source="disconnect" and a zero duration. Watch
+# expired_users_total{reason="idle"} and session_starts_total{source="disconnect"}.
+# user-idle-ttl = 21600
 
 # Expire an open-file entry untouched for this many seconds: a leaked open
 # whose close record was lost, e.g. to UDP packet loss (0 = off). Only applied

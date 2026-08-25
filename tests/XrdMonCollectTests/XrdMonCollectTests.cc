@@ -2913,10 +2913,15 @@ TEST(XrdMonCollect, SessionsOpenTracksLiveSessionsOnly)
   // A duplicated disconnect datagram must not decrement twice.
   disconnect(7);
   EXPECT_EQ(gauge().back(), '1');
-  // The same dictid reappearing after its disconnect is a new session.
+  // Nor may a duplicated 'u' map resurrect the session it already reported as
+  // gone. The server never reuses a dictid within an incarnation -- every
+  // MAPUSER emission path takes a fresh id from the monotonic
+  // XrdXrootdMonitor::GetDictID, and a restart makes a new incarnation -- so a
+  // repeat is a duplicated datagram, not a new client. Counting it as one
+  // added a session that had already left and could never leave again, because
+  // its real disconnect was behind it.
   userMap(7, "carol");
-  EXPECT_EQ(gauge().back(), '2');
-  disconnect(7);
+  EXPECT_EQ(gauge().back(), '1');
   disconnect(8);
   EXPECT_EQ(gauge().back(), '0');
 }
@@ -3872,6 +3877,109 @@ TEST(XrdMonCollect, RepeatedUserMapKeepsSessionState)
   EXPECT_NE(out.find("xrootd_collector_stale_opens_total{cluster=\"unknown\",server=\"h\"} 1"),
             std::string::npos) << out;
   EXPECT_EQ(dec.GetStats().staleOpens, 1u);
+}
+
+// A 'u' map duplicated *after* the disconnect must not graft the spent
+// session's rollup onto what follows, nor un-report the disconnect. The old
+// code read the repeat as a new session reusing the dictid, which cleared the
+// disc mark on lruPut's wholesale replacement while still calling adopt(), so
+// the "new" session inherited the old one's file counts and byte totals and no
+// longer had a disconnect ahead of it to end it.
+TEST(XrdMonCollect, DuplicateUserMapAfterDiscDoesNotResurrectTheSession)
+{
+  XrdMetrics::Collector collector("xrootd");
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); }, nullptr,
+                   false, false, false, false, &collector.subsystem("collector"));
+  dec.SetEmitSessions(true);
+
+  auto gauge = [&]{
+      std::string out; XrdMetrics::PrometheusTextSerializer ser(out);
+      collector.serialize(ser);
+      auto at = out.find("xrootd_collector_sessions_open"
+                         "{cluster=\"unknown\",server=\"h\"} ");
+      EXPECT_NE(at, std::string::npos) << out;
+      return out.substr(at, out.find('\n', at) - at); };
+
+  feedUserN(dec, "h:1", 7);
+  openClose(dec, "h:1", 1, 7, 1000, 1000, 0, "/a.root");
+  feedDisc(dec, "h:1", 7);
+  ASSERT_EQ(gauge().back(), '0');
+
+  feedUserN(dec, "h:1", 7);               // the duplicated datagram
+
+  // The client had already left, so it must not be counted back in.
+  EXPECT_EQ(gauge().back(), '0');
+
+  // And the rollup is carried, not reset: this is still the same session, so
+  // its one closed file is still its one closed file. (A repeated disconnect
+  // re-emits the document -- only the gauge decrement is guarded -- which is
+  // what makes it a usable probe here.)
+  docs.clear();
+  feedDisc(dec, "h:1", 7);
+  json j = sessionDoc(docs);
+  ASSERT_FALSE(j.is_null());
+  EXPECT_EQ(j["attributes"].value("user.name", std::string()), "u7");
+  EXPECT_EQ(j["attributes"]["xrootd.session.files"], 1);
+  EXPECT_EQ(gauge().back(), '0');
+}
+
+// sessions_open must fall on disconnect whether or not session *documents* are
+// enabled. The mark used to sit behind EmitDisc's !emitSessions return, so in
+// the default configuration nothing ever set it: the gauge counted every dictid
+// the incarnation had ever seen and only ever rose.
+TEST(XrdMonCollect, DisconnectMarksWithSessionsOff)
+{
+  XrdMetrics::Collector collector("xrootd");
+  XrdMonDecode dec([](const std::string&){}, nullptr, false, false, false,
+                   false, &collector.subsystem("collector"));
+  // Deliberately no SetEmitSessions: this is the default configuration.
+
+  feedUserN(dec, "h:1", 7);
+  feedUserN(dec, "h:1", 8);
+  auto gauge = [&]{
+      std::string out; XrdMetrics::PrometheusTextSerializer ser(out);
+      collector.serialize(ser);
+      auto at = out.find("xrootd_collector_sessions_open"
+                         "{cluster=\"unknown\",server=\"h\"} ");
+      EXPECT_NE(at, std::string::npos) << out;
+      return out.substr(at, out.find('\n', at) - at); };
+
+  EXPECT_EQ(gauge().back(), '2');
+  feedDisc(dec, "h:1", 7);
+  EXPECT_EQ(gauge().back(), '1');
+  feedDisc(dec, "h:1", 8);
+  EXPECT_EQ(gauge().back(), '0');
+}
+
+// otelIdentity() promotes a user entry while building the disconnect's own
+// document, so without an explicit demotion a session is most-recently-used at
+// the very moment it becomes dead weight -- and then has to age past the whole
+// index before eviction can reach it. Here the spent session must be taken
+// ahead of the live one, whatever order they arrived in.
+TEST(XrdMonCollect, DisconnectDemotesTheSessionInTheLru)
+{
+  std::vector<std::string> docs;
+  XrdMonDecode dec([&](const std::string& d){ docs.push_back(d); });
+  dec.SetEmitSessions(true);
+
+  feedUserN(dec, "h:1", 7);              // logs in first, disconnects first
+  feedUserN(dec, "h:1", 8);              // logs in second, stays live
+  feedDisc(dec, "h:1", 7);               // spent -- but EmitDisc touches it
+
+  // Without the demotion the order here is [8, 7]: EmitDisc's own document
+  // promoted 7 past the live session. Room for two entries then evicts 8, the
+  // one still in use. With it the order is [7, 8] and the spent entry goes.
+  dec.SetMaxEntries(2);
+  feedUserN(dec, "h:1", 9);
+  ASSERT_EQ(dec.GetStats().evicted, 1u);
+
+  // 8's identity survived, which is only true if 7 was the entry taken.
+  docs.clear();
+  feedDisc(dec, "h:1", 8);
+  json j = sessionDoc(docs);
+  ASSERT_FALSE(j.is_null()) << "no session document for the surviving user";
+  EXPECT_EQ(j["attributes"].value("user.name", std::string()), "u8");
 }
 
 // The recent-file list is capped while the running totals cover every file.

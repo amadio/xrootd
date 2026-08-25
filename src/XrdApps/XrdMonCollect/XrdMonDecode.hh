@@ -183,6 +183,12 @@ void SetMemoryHooks(MemoryHooks h) {memHooks = std::move(h);}
 //! object's control, so the loop responds to an overage by lowering the state
 //! budget and reports memFloored once it has nothing left to give. Sets the
 //! initial state budget, so call it before SetMaxBytes() if both are used.
+//!
+//! The loop steers the process into a band whose top is n - n/8, holds station
+//! between there and n, and sheds above n. So a healthy collector settles near
+//! seven eighths of the cap rather than at it, and the top eighth is the slack
+//! the 15s control period needs: a burst can add a great deal between two
+//! samples. Size a cgroup MemoryMax= at or above this value, never below it.
 void SetMaxRss(std::size_t n);
 
 //! One step of the RSS control loop; see MemoryTick's definition for the rule.
@@ -192,6 +198,23 @@ void MemoryTick(time_t now);
 
 //! The state budget the loop is currently enforcing, in charged bytes.
 std::size_t MaxBytes() const {return maxBytes;}
+
+//! The process RSS cap in force (--max-memory; 0 = unbounded). Published so a
+//! dashboard can draw the cap alongside the RSS it bounds: without it,
+//! "resident memory over its cap" -- the question an operator actually has --
+//! is not expressible from the exposition at all.
+std::size_t MaxRss() const {return maxRss;}
+
+//! How full the charged-state budget is, in [0,1]; 0 when unbounded.
+//!
+//! Deliberately a ratio and not a byte count. The charged total itself was once
+//! exported as xrootd_collector_state_bytes and had to be withdrawn because
+//! operators sized containers from it and under-provisioned 4-8x (see
+//! StateWeight()); a unitless quantity with a hard upper bound of 1 cannot be
+//! read that way. It answers the one question the budget and the RSS cannot
+//! answer between them: is the budget the thing that is binding?
+double StateUtilization() const
+      {std::size_t b = maxBytes; return b ? (double)lruBytes / (double)b : 0.0;}
 
 //! Take the pending request to release memory this object does not own.
 //!
@@ -834,6 +857,8 @@ std::size_t maxEntries = 0;        // optional entry-count backstop (0 = off)
 MemoryHooks memHooks;
 std::size_t maxRss     = 0;        // process RSS cap (0 = loop disabled)
 std::size_t rssCeil    = 0;        // largest state budget the loop will set
+std::size_t rssBand    = 0;        // top of the target band: climb below this,
+                                   // hold between it and maxRss, shrink above
 std::size_t rssFloor   = 0;        // smallest, below which correlation breaks
 time_t      lastMemTick  = 0;
 time_t      lastFloorWarn = 0;

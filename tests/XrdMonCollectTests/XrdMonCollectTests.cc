@@ -2242,6 +2242,16 @@ struct MemLoop : ::testing::Test
       {feedUser7(dec, "h:1");
        std::string lfn = "/store/data/" + std::string(lfnLen, 'x') + ".root";
        for (uint32_t id = 1; id <= n; id++) feedOpenId(dec, "h:1", id, lfn);}
+
+   // Like fill(), but with fresh dictids every call, so repeated use actually
+   // grows the charged state. fill() restarts its ids at 1, which takes
+   // lruPut's update branch and leaves lruBytes flat -- fine for reaching a
+   // holding once, useless for driving demand across a series of ticks.
+   uint32_t nextId = 1;
+   void grow(uint32_t n, std::size_t lfnLen = 4096)
+      {feedUser7(dec, "h:1");
+       std::string lfn = "/store/data/" + std::string(lfnLen, 'x') + ".root";
+       for (uint32_t i = 0; i < n; i++) feedOpenId(dec, "h:1", nextId++, lfn);}
 };
 }
 
@@ -2259,8 +2269,12 @@ TEST_F(MemLoop, InertWithoutHooks)
   EXPECT_EQ(bare.GetStats().evicted, 0u);
 }
 
-// Start optimistic: the loop only ever descends from the ceiling.
-TEST_F(MemLoop, StartsAtCeiling)
+// Start where the old fixed ceiling was: maxRss/8 is the conservative guess at
+// the charged-to-real ratio, and starting there costs at most a minute of
+// under-use where starting at the sanity bound would let the state run to the
+// cap before the first sample ever looked. It is a starting point now, not a
+// ceiling -- ClimbsIntoHeadroom is the other half of that statement.
+TEST_F(MemLoop, StartsConservatively)
 {
   EXPECT_EQ(dec.MaxBytes(), kCap / 8);
 }
@@ -2353,9 +2367,13 @@ TEST_F(MemLoop, FlooredOnlyWhenEvictionCannotHelp)
   EXPECT_GT(dec.GetStats().memFloored, 0u);
 }
 
-// Recovery is additive and bounded: back to the ceiling, never past it, and
-// never downwards on the way.
-TEST_F(MemLoop, RecoversToCeiling)
+// Recovery is additive, monotone and bounded by the sanity ceiling -- but it
+// tracks demand rather than proceeding on its own. The budget climbs from what
+// the state actually holds, so feeding it is what lets it rise; a decoder left
+// idle after a shrink keeps the budget one step above its holding and stops
+// there. That is the anti-windup property (DoesNotClimbWhileNotBinding states
+// it directly); here it means the filler has to run *during* the climb.
+TEST_F(MemLoop, RecoversAsDemandReturns)
 {
   fill();
   fakeRss = 4ull << 30;
@@ -2365,12 +2383,75 @@ TEST_F(MemLoop, RecoversToCeiling)
   fakeRss = kCap / 2;
   std::size_t prev = dec.MaxBytes();
   for (int i = 0; i < 40; i++)
-     {tick();
+     {grow(3000);                                 // ~12 MiB of demand per tick
+      tick();
       EXPECT_GE(dec.MaxBytes(), prev);             // monotonically non-decreasing
-      EXPECT_LE(dec.MaxBytes(), kCap / 8);         // never past the ceiling
+      EXPECT_LE(dec.MaxBytes(), kCap);             // never past the sanity bound
       prev = dec.MaxBytes();}
 
-  EXPECT_EQ(dec.MaxBytes(), kCap / 8);
+  // Past the old fixed ceiling, which is the whole point: a 1 GiB cap with RSS
+  // steady at half of it has headroom the loop must be willing to use.
+  EXPECT_GT(dec.MaxBytes(), kCap / 8);
+}
+
+// The other half of the recovery statement: with the state far below its
+// budget, the budget is not the binding constraint, and raising it would only
+// build an allowance the next burst could fill between two 15s samples. So it
+// holds station however much RSS headroom there is.
+TEST_F(MemLoop, DoesNotClimbWhileNotBinding)
+{
+  fill(20, 64);                                    // a few KiB against a 128 MiB
+  std::size_t was = dec.MaxBytes();                // budget: nowhere near binding
+  fakeRss = kCap / 4;                              // and plenty of headroom
+
+  tick(10);
+
+  EXPECT_EQ(dec.MaxBytes(), was);
+  EXPECT_EQ(releases, 0);
+}
+
+// The reported bug: a budget pinned at maxRss/8 while RSS sits far below the
+// cap, evicting against a limit the operator never asked for. With demand
+// pressing and headroom available the budget must rise past that eighth.
+TEST_F(MemLoop, ClimbsIntoHeadroom)
+{
+  fakeRss = kCap / 4;
+  for (int i = 0; i < 20; i++) {grow(3000); tick();}
+
+  EXPECT_GT(dec.MaxBytes(), kCap / 8);
+  EXPECT_LE(dec.MaxBytes(), kCap);
+  EXPECT_EQ(releases, 0);                          // never over the cap
+}
+
+// Inside the band the loop does nothing in either direction. Distinct from
+// DeadbandHoldsStation, which enters the band from above after a shrink; this
+// one never leaves the starting budget.
+TEST_F(MemLoop, HoldsStationInsideTheBand)
+{
+  fill();
+  std::size_t was = dec.MaxBytes();
+  fakeRss = kCap - (kCap / 16);                    // 93.75%: inside [band, cap]
+
+  tick(10);
+
+  EXPECT_EQ(dec.MaxBytes(), was);
+  EXPECT_EQ(releases, 0);
+  EXPECT_EQ(dec.GetStats().evicted, 0u);
+}
+
+// The safety property behind the head/8 grant, stated executably rather than
+// argued in a comment: model RSS at the worst assumed charged-to-real ratio and
+// let the state follow the budget wherever it goes. One grant turns into at
+// most the remaining headroom, so the approach is geometric and the cap holds.
+TEST_F(MemLoop, GrantCannotOvershootTheCap)
+{
+  const std::size_t base = 64u << 20;              // memory the loop cannot evict
+  dec.SetMemoryHooks({[this, base]{return base + 8 * dec.StateWeight();},
+                      [this]{releases++;}});
+
+  for (int i = 0; i < 60; i++) {grow(400); tick();}
+
+  EXPECT_LE(base + 8 * dec.StateWeight(), kCap);
 }
 
 // Without a deadband the budget hunts across the cap forever. The budget has

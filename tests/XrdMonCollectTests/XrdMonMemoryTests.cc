@@ -58,6 +58,29 @@ TEST(XrdMonMemory, ProcessRssGrowsWithAllocation)
                                            "allocation (page size units?)";
 }
 
+// The reader feeds a start-up warning, so its failure mode is a warning that
+// never fires (or fires against nonsense) on a containerised host -- silent
+// either way. There is no limit to assert against on an arbitrary test machine,
+// so pin the contract instead: 0 means "none", and anything else is a byte
+// count rather than a raw v1 sentinel or a page/kB unit slip.
+//
+TEST(XrdMonMemory, CgroupLimitIsAbsentOrPlausible)
+{
+   std::size_t lim = XrdMonCgroupLimit();
+   if (!lim) GTEST_SKIP() << "no cgroup memory limit on this host";
+
+   EXPECT_GT(lim, 1 * kMiB);              // below this nothing could run
+   EXPECT_LT(lim, 1ull << 62);            // the v1 "unlimited" sentinel is 0
+}
+
+// Called once at start-up and again from the config path, and it must not cache
+// a stale answer across them.
+//
+TEST(XrdMonMemory, CgroupLimitIsRepeatable)
+{
+   EXPECT_EQ(XrdMonCgroupLimit(), XrdMonCgroupLimit());
+}
+
 // Both are called on paths that run repeatedly (the control tick) or twice
 // across the two daemon modes, so neither may be one-shot or fragile.
 //

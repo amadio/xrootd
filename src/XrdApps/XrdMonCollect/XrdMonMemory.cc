@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <string>
 #include <unistd.h>
 
 #ifdef __GLIBC__
@@ -95,6 +96,120 @@ std::size_t XrdMonProcessRss()
 #else
    return 0;
 #endif
+}
+
+/******************************************************************************/
+/*                   X r d M o n C g r o u p L i m i t                        */
+/******************************************************************************/
+
+#if defined(__linux__)
+namespace
+{
+// Read a single-value cgroup file. Returns 0 for absent, unreadable, "max", or
+// a v1 "unlimited" sentinel (a number so close to SIZE_MAX that no operator
+// typed it).
+//
+std::size_t readLimitFile(const std::string& path)
+{
+   char buff[64];
+   int  fd = open(path.c_str(), O_RDONLY);
+   if (fd < 0) return 0;
+   ssize_t n = read(fd, buff, sizeof(buff)-1);
+   close(fd);
+   if (n <= 0) return 0;
+   buff[n] = 0;
+   if (!strncmp(buff, "max", 3)) return 0;
+
+   unsigned long long v = strtoull(buff, nullptr, 10);
+   if (!v || v >= (1ull << 62)) return 0;
+   return (std::size_t)v;
+}
+
+// This process's path within a controller's hierarchy, from /proc/self/cgroup.
+// For v2 that is the line beginning "0::"; for v1 it is the line whose
+// comma-separated controller list contains "memory". Empty when absent.
+//
+std::string cgroupPath(bool v2)
+{
+   int fd = open("/proc/self/cgroup", O_RDONLY);
+   if (fd < 0) return std::string();
+   std::string text;
+   char  buff[1024];
+   ssize_t n;
+   while ((n = read(fd, buff, sizeof(buff))) > 0) text.append(buff, (size_t)n);
+   close(fd);
+
+   size_t pos = 0;
+   while (pos < text.size())
+        {size_t eol  = text.find('\n', pos);
+         if (eol == std::string::npos) eol = text.size();
+         std::string line = text.substr(pos, eol - pos);
+         pos = eol + 1;
+
+         // "<hierarchy-id>:<controllers>:<path>"
+         size_t c1 = line.find(':');
+         if (c1 == std::string::npos) continue;
+         size_t c2 = line.find(':', c1 + 1);
+         if (c2 == std::string::npos) continue;
+         std::string ctl  = line.substr(c1 + 1, c2 - c1 - 1);
+         std::string path = line.substr(c2 + 1);
+
+         if (v2) {if (ctl.empty() && line.compare(0, 2, "0:") == 0) return path;}
+            else {size_t at = ctl.find("memory");
+                  if (at != std::string::npos
+                  && (at == 0 || ctl[at-1] == ',')
+                  && (at + 6 == ctl.size() || ctl[at+6] == ',')) return path;
+                 }
+        }
+   return std::string();
+}
+
+// Walk from this process's own cgroup up to the hierarchy root, returning the
+// smallest limit found. A limit set on an ancestor slice bounds this process
+// just as effectively as one on its own leaf, and systemd routinely does both.
+//
+std::size_t walkUp(const std::string& root, const std::string& rel,
+                   const char* file)
+{
+   std::size_t best = 0;
+   std::string cur  = rel;
+   for (;;)
+       {std::size_t v = readLimitFile(root + cur + "/" + file);
+        if (v && (!best || v < best)) best = v;
+        if (cur.empty() || cur == "/") break;
+        size_t slash = cur.rfind('/');
+        if (slash == std::string::npos) break;
+        cur.erase(slash);
+       }
+   return best;
+}
+}
+#endif
+
+std::size_t XrdMonCgroupLimit()
+{
+#if defined(__linux__)
+// Unlike XrdMonProcessRss() this runs once, at start-up, so it may allocate
+// and use std::string freely -- it is not on the control tick.
+//
+// The limit is NOT at the root of the hierarchy: under cgroup v2 a unified root
+// has no memory.max at all, and systemd's MemoryMax= lands on the service's own
+// scope. Reading /sys/fs/cgroup/memory.max would therefore have found nothing
+// on precisely the deployments this warning exists for.
+//
+   {std::string rel = cgroupPath(true);
+    if (!rel.empty())
+       {std::size_t v = walkUp("/sys/fs/cgroup", rel, "memory.max");
+        if (v) return v;
+       }
+   }
+
+   {std::string rel = cgroupPath(false);
+    std::size_t v = walkUp("/sys/fs/cgroup/memory", rel, "memory.limit_in_bytes");
+    if (v) return v;
+   }
+#endif
+   return 0;
 }
 
 /******************************************************************************/

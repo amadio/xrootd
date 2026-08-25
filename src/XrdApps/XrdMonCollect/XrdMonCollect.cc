@@ -2022,10 +2022,40 @@ int main(int argc, char* argv[])
        OBS("ident_records_total",
            "=-stream server-identity records decoded", mapIdnt);
 #undef OBS
-       subsystem->observeGauge<std::int64_t>("state_entries", "correlation entries held (dictionaries, tokens, activity, open files)")
-          .add({}, [&]{return (int64_t)decoder.StateEntries();});
+       // Labelled by kind rather than a bare total: a collector holding a
+       // working set and one holding a day of finished sessions differ by two
+       // orders of magnitude in users{} and not at all in the sum. Registered
+       // only here, through the observed path -- putting the same family name
+       // through the decoder's labelled path too would emit two families of one
+       // name, which strict OpenMetrics parsers reject (see the note above).
+      {static const std::vector<std::string> kKind{"kind"};
+       auto& se = subsystem->observeGauge<std::int64_t>("state_entries",
+                     "correlation entries held, by dictionary kind", {}, kKind);
+       for (unsigned i = 0; i < XrdMonDecode::kDictKinds; i++)
+          {auto d = (XrdMonDecode::Dict)i;
+           se.add({XrdMonDecode::DictName(d)},
+                  [&decoder, d]{return (int64_t)decoder.StateEntries(d);});
+          }
+      }
        subsystem->observeGauge<std::int64_t>("state_budget_bytes", "charged-byte budget the memory cap is currently enforcing")
           .add({}, [&]{return (int64_t)decoder.MaxBytes();});
+       // How full that budget is, as a ratio. Deliberately not the charged
+       // total in bytes: that gauge existed once and had to be withdrawn
+       // because operators sized containers from a figure running 4-8x below
+       // real usage. A unitless quantity bounded at 1 cannot be read that way,
+       // and it answers what neither the budget nor the RSS can on its own --
+       // whether the budget is the thing that is binding.
+       subsystem->observeGauge<double>("state_budget_used_ratio",
+                     "how full the charged-state budget is (0-1); 1 with "
+                     "evictions climbing and resident memory far below the cap "
+                     "means the budget binds before memory does")
+          .add({}, [&]{return decoder.StateUtilization();});
+       // Without the cap as a series, "resident memory against what it is
+       // allowed" is not expressible in PromQL at all, and no dashboard can
+       // draw the band the control loop steers into.
+       subsystem->observeGauge<std::int64_t>("memory_cap_bytes",
+                     "the --max-memory process cap in force (0 = unbounded)")
+          .add({}, [&]{return (int64_t)decoder.MaxRss();});
        subsystem->observeGauge<std::int64_t>("recv_queue_batches", "packet batches queued from the receiver to the serializer")
           .add({}, [&]{return (int64_t)recvPipe.readyDepth();});
        if (tcpSrv)

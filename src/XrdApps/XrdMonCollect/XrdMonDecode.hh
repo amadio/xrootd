@@ -142,6 +142,32 @@ const Stats& GetStats() const {return stats;}
 //! xrootd_process_resident_memory_bytes reports.
 std::size_t StateWeight() const {return lruBytes;}
 
+//! The kinds of correlation entry the LRU index holds. Public because the
+//! entry count is published per kind: a total cannot distinguish a collector
+//! holding a working set from one holding a day of finished sessions, which is
+//! a difference of two orders of magnitude in practice.
+enum class Dict : uint8_t {Users, Files, Paths, Infos, Tokens, Activity};
+
+//! Number of Dict values, for iterating the per-kind counts.
+static constexpr unsigned kDictKinds = 6;
+
+//! The metric label for a Dict value. Stable: it is a series label.
+static const char* DictName(Dict d)
+      {switch(d)
+             {case Dict::Users:    return "users";
+              case Dict::Files:    return "files";
+              case Dict::Paths:    return "paths";
+              case Dict::Infos:    return "infos";
+              case Dict::Tokens:   return "tokens";
+              case Dict::Activity: return "activity";
+             }
+       return "unknown";
+      }
+
+//! Entries held of one kind. Like StateEntries(), a published mirror read by
+//! the exporter thread.
+std::size_t StateEntries(Dict d) const {return kindCount[(unsigned)d];}
+
 //! Number of correlation entries held across every incarnation. Exact, unlike
 //! StateWeight().
 //!
@@ -390,7 +416,6 @@ struct Server;   // per-incarnation state; defined below
 // Which per-server map an LRU entry lives in, so the least-recently-used
 // victim can be erased from the right table.
 //
-enum class Dict : uint8_t {Users, Files, Paths, Infos, Tokens, Activity};
 
 // One node of the process-wide LRU index. Every evictable correlation entry
 // owns one (and stores an iterator back to it), letting eviction find the
@@ -738,6 +763,7 @@ void lruPut(Server* owner, Dict dict, Map& m, const Key& key, uint32_t ikey,
                                    LruNode{owner, dict, ikey, skey, bytes});
        lruBytes += bytes;
        ++lruCount;
+       ++kindCount[(unsigned)dict];
       }
       else
       {LruIt node = it->second.lru;          // preserve across the assignment
@@ -758,7 +784,8 @@ void     Touch(LruIt node) {lru.splice(lru.end(), lru, node);}
 // spent sessions of a busy collector outlive the live entries they crowd out.
 void     Demote(LruIt node) {lru.splice(lru.begin(), lru, node);}
 void     LruDrop(LruIt node)
-            {lruBytes -= node->bytes; lru.erase(node); --lruCount;}
+            {lruBytes -= node->bytes; --kindCount[(unsigned)node->dict];
+             lru.erase(node); --lruCount;}
 // Re-charge an existing entry whose held size changed (e.g. its session rollup
 // grew), keeping lruBytes and the node weight in step.
 void     Recharge(LruIt node, std::size_t bytes)
@@ -890,13 +917,17 @@ const XrdMonFilter*    filter = nullptr;  // document filter (see SetFilter)
 // reaps whole incarnations. lruBytes tracks the charged total.
 //
 // The list itself belongs to the decode thread, and is mutated only through
-// lruPut/Touch/LruDrop/EvictFront so that lruCount -- the published mirror of
-// its length, which is what any other thread may read -- has exactly three
-// places to be maintained.
+// lruPut/Touch/Demote/LruDrop/EvictFront so that lruCount -- the published
+// mirror of its length, which is what any other thread may read -- has few
+// places to be maintained: lruPut's insert branch, LruDrop, EvictFront (which
+// pops directly rather than going through LruDrop) and LoadState's catch
+// block, which resets the index wholesale on a malformed snapshot. kindCount
+// is maintained in the same four.
 //
 using Size = XrdMonPublished<std::size_t>;
 std::list<LruNode> lru;            // front = least-recently-used, back = MRU
 Size        lruCount;              // published mirror of lru.size()
+Size        kindCount[kDictKinds]; // ...and of its length per Dict kind
 Size        maxBytes;              // byte budget (0 = unbounded)
 Size        lruBytes;              // currently charged bytes
 std::size_t maxEntries = 0;        // optional entry-count backstop (0 = off)

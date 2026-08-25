@@ -37,6 +37,15 @@ if(TARGET xrdmoncollect)
   set_tests_properties(XrdMonCollect::IdleReap
     PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 200)
 
+  # A finished session leaves the state on its own. Drives a real login and
+  # isDisc over the wire, then waits out --user-ttl and the sweep. Slow for the
+  # same reason as IdleReap, and slow in parallel with it.
+  add_test(NAME XrdMonCollect::UserTTL
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/user_ttl_test.sh
+            $<TARGET_FILE:xrdmoncollect>)
+  set_tests_properties(XrdMonCollect::UserTTL
+    PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 200)
+
   # Systemd socket activation (LISTEN_FDS): the harness plays PID 1, holds the
   # UDP socket across a collector restart, and asserts that packets sent while
   # no collector was running come out fully correlated afterwards. Only

@@ -263,6 +263,10 @@ constexpr const char* kSessionsOpenHelp =
    "dictionary, so zero unless the server's monitor config includes a "
    "\"user\" destination)";
 
+constexpr const char* kExpiredUsersHelp =
+   "user entries expired by the post-disconnect grace (--user-ttl) or the "
+   "idle user TTL (--user-idle-ttl)";
+
 // Cap on the per-session recent-file list (UserInfo::sRecent). The running
 // session totals always cover every closed file; only this most-recent detail
 // list is bounded, keeping a long-lived session's memory in check.
@@ -1478,6 +1482,7 @@ bool XrdMonDecode::LoadState(const std::string& path, long maxAgeSec,
        lru.clear();
        lruCount = 0;
        lruBytes = 0;
+       for (auto& k : kindCount) k = 0;
        stats = Stats{};
        note = std::string("state file could not be decoded (") + e.what()
             + "); starting fresh";
@@ -1733,6 +1738,7 @@ void XrdMonDecode::EvictFront()
          }
    lru.pop_front();
    --lruCount;
+   --kindCount[(unsigned)n.dict];
    stats.evicted++;
 }
 
@@ -1993,20 +1999,17 @@ void XrdMonDecode::ReapServers(time_t now)
                }
            if (!nDisc && !nIdle) continue;
            stats.expiredUsers += nDisc + nIdle;
+           // Two-valued, so the cardinality is free, and the split is what an
+           // operator needs: "disconnected" climbing is the mechanism working,
+           // "idle" climbing means live sessions are being taken and
+           // --user-idle-ttl is too low.
            if (metrics)
-              {static const char* const help =
-                  "user entries expired by the post-disconnect grace "
-                  "(--user-ttl) or the idle user TTL (--user-idle-ttl)";
-               // Two-valued, so the cardinality is free, and the split is what
-               // an operator needs: "disconnected" climbing is the mechanism
-               // working, "idle" climbing means live sessions are being taken
-               // and --user-idle-ttl is too low.
-               if (nDisc)
-                  metrics->counterSeries("expired_users_total", help,
+              {if (nDisc)
+                  metrics->counterSeries("expired_users_total", kExpiredUsersHelp,
                             {{"cluster", s.mtrCluster}, {"server", s.mtrServer},
                              {"reason", "disconnected"}}) += nDisc;
                if (nIdle)
-                  metrics->counterSeries("expired_users_total", help,
+                  metrics->counterSeries("expired_users_total", kExpiredUsersHelp,
                             {{"cluster", s.mtrCluster}, {"server", s.mtrServer},
                              {"reason", "idle"}}) += nIdle;
               }

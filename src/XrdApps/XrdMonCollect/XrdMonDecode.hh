@@ -111,6 +111,8 @@ struct Stats
    Count lost;               // estimated lost packets (pseq gaps)
    Count evicted;            // dictionary/open-file entries evicted (budget/cap)
    Count reaped;             // idle server incarnations reclaimed (server TTL)
+   Count expiredUsers;       // user entries expired by the post-disconnect
+                             // grace or the idle user TTL
    Count memFloored;         // control ticks spent over the RSS cap with the
                              // state budget already at its floor (the memory
                              // is not in the correlation state)
@@ -239,6 +241,33 @@ void SetServerTTL(long secs) {serverTTL = secs;}
 //! entry every interval — so anything older than the TTL is a leaked open
 //! whose close was lost, not a long-running operation.
 void SetFileTTL(long secs) {fileTTL = secs;}
+
+//! Drop a user entry `secs` seconds after its disconnect was reported
+//! (0 = never). The entry outlives the disconnect only so a straggling close
+//! can still resolve its identity against it; past that it is dead weight.
+//!
+//! Safe by construction, which is why it is on by default: the server reports a
+//! session's closes before its isDisc, so a record naming a session after its
+//! disconnect is already an anomaly. Without it the only thing that ever
+//! reclaims a spent session is memory pressure or the server TTL a day later,
+//! which is how a collector comes to hold hundreds of thousands of finished
+//! sessions against a few thousand open files.
+void SetUserTTL(long secs) {userTTL = secs;}
+
+//! Expire a *connected* user entry untouched for `secs` seconds (0 = off).
+//!
+//! Unlike SetUserTTL this is a guess, so it is long by default: an
+//! idle-but-connected client is legitimate and indistinguishable from one whose
+//! disconnect record was lost. It only applies to entries holding no open
+//! files, which is what keeps it off a session that is mid-operation.
+//!
+//! Setting it too low is silently destructive rather than merely lossy: a live
+//! session whose entry is gone reaches EmitDisc with no UserInfo, and
+//! sessionSpanOf then reports the session as an instant with
+//! start_time_source="disconnect" and a zero-second duration observation. Watch
+//! session_starts_total{source="disconnect"} and the expired_users_total
+//! {reason="idle"} series together.
+void SetUserIdleTTL(long secs) {userIdleTTL = secs;}
 
 //! Drop server incarnations idle past the server TTL (see SetServerTTL). Cheap
 //! (scans only the small per-incarnation table); call it periodically, e.g.
@@ -448,6 +477,15 @@ struct UserInfo
    // is what separates a live session from a spent one for Server::sessions.
    bool     disc        = false;
 
+   // Collector wall clock, for the two user TTLs (see SetUserTTL /
+   // SetUserIdleTTL). discT is when the disconnect was reported, 0 while the
+   // session is live; lastSeen is when any record last named this dictid, and
+   // is what the idle TTL measures. Both are in the collector's own clock
+   // rather than the server's, because they are compared against the sweep's
+   // `now` -- sFirst/sLast are the server's and cannot serve here.
+   time_t   discT       = 0;
+   time_t   lastSeen    = 0;
+
    // fileIDs of this user's open files still awaiting their close. The server
    // closes a session's files before reporting its disconnect, so anything
    // still here at the isDisc is a leaked open (its close record was lost)
@@ -466,6 +504,8 @@ struct UserInfo
    //
    void adopt(UserInfo&& p)
         {if (p.connT > 0 && (connT <= 0 || p.connT < connT)) connT = p.connT;
+         discT       = p.discT;   // when the session ended, if it has
+
          sLogin      = p.sLogin;
          sFiles      = p.sFiles;
          sReads      = p.sReads;
@@ -772,7 +812,10 @@ bool     emitDoc(nlohmann::json& j, const Server& srv);
 //! event `attributes` object from the user dictionary entry (and the token and
 //! activity streams keyed by the same dictid). Returns the resolved VO (token
 //! preferred, else the auth CGI of a VO-bearing method) for metric labels.
-std::string otelIdentity(nlohmann::json& attrs, const Server& srv,
+//! Takes a non-const Server because it does not only read: naming a session is
+//! a reference to it, so this promotes the entry in the LRU and restamps the
+//! clock the idle user TTL measures.
+std::string otelIdentity(nlohmann::json& attrs, Server& srv,
                          uint32_t userID);
 //! Fold one finished file close into the user's session rollup (counters and a
 //! capped recent-file list), keeping the entry's LRU weight in step. No-op when
@@ -872,6 +915,8 @@ time_t      lastFloorWarn = 0;
 bool        memRelease  = false;   // pending request; see TakeMemoryRelease
 long        serverTTL  = 0;        // idle-incarnation reap age, secs (0 = off)
 long        fileTTL    = 0;        // stale open-file entry age, secs (0 = off)
+long        userTTL    = 0;        // post-disconnect grace, secs (0 = off)
+long        userIdleTTL = 0;       // idle connected-user age, secs (0 = off)
 bool     resolveHosts = true;
 bool     emitSessions = false;   // per-session rollup + session documents
 bool     emitSpans    = false;   // companion OTLP span documents (--spans)

@@ -180,7 +180,8 @@ void usage(const char* prog)
      "          [--shovel <host:port> [--shovel-token <t>] [--spool-max <sz>]]\n"
      "          [--flush-count <n>] [--flush-secs <n>] [--rcvbuf <sz>]\n"
      "          [--queue-depth <n>] [--max-memory <sz>] [--max-entries <n>]\n"
-     "          [--server-ttl <s>] [--file-ttl <s>]\n"
+     "          [--server-ttl <s>] [--file-ttl <s>] [--user-ttl <s>]\n"
+     "          [--user-idle-ttl <s>]\n"
      "          [--state-file <file>] [--state-ttl <dur>]\n"
      "          [--scitags <src> [--scitags-refresh <s>]] [--dataset <re>]\n"
      "          [--no-resolve]\n"
@@ -248,6 +249,17 @@ void usage(const char* prog)
      "                   snapshots (\"xfr\" on xrootd.monitor fstat), which\n"
      "                   refresh live operations every interval; set it to at\n"
      "                   least 3x the server's xfr reporting period\n"
+     "  --user-ttl <s>   drop a user entry <s> seconds after its disconnect\n"
+     "                   was reported (default 300; 0 = never). The entry\n"
+     "                   outlives the disconnect only so a straggling close\n"
+     "                   can still resolve its identity against it\n"
+     "  --user-idle-ttl <s> drop a still-connected user entry idle for <s>\n"
+     "                   seconds and holding no open files (default 21600;\n"
+     "                   0 = off). Covers a lost disconnect record, but an\n"
+     "                   idle client is legitimate: set too low, a live\n"
+     "                   session loses its identity and is reported as an\n"
+     "                   instant, and expired_users_total{reason=\"idle\"}\n"
+     "                   climbs alongside it\n"
      "  --state-file <f> save the correlation state to <f> on shutdown and\n"
      "                   reload it on startup (default: $STATE_DIRECTORY/\n"
      "                   xrdmoncollect-state.json under systemd, else off;\n"
@@ -1000,6 +1012,13 @@ int main(int argc, char* argv[])
    long        serverTtl  = 86400;          // reap incarnations idle > 24h
    long        fileTtl    = 0;              // expire stale open-file entries
                                             // (0 = off; needs "xfr" reporting)
+   long        userTtl    = 300;            // drop a user entry this long after
+                                            // its disconnect was reported
+   long        userIdleTtl = 21600;         // drop a *connected* user entry idle
+                                            // this long and holding no open
+                                            // files (0 = off). Long on purpose:
+                                            // this one is a guess, where the
+                                            // grace above is not
    std::string stateFile;                   // state snapshot path (off if empty)
    long        stateTtl   = 900;            // max snapshot age to reload (15m)
    std::string osUrl, osUser, osPass, osToken;
@@ -1122,6 +1141,8 @@ int main(int argc, char* argv[])
        maxEntries  = (size_t)cfg.GetInteger(sec, "max-entries", (long)maxEntries);
        serverTtl   = cfg.GetInteger(sec, "server-ttl", serverTtl);
        fileTtl     = cfg.GetInteger(sec, "file-ttl", fileTtl);
+       userTtl     = cfg.GetInteger(sec, "user-ttl", userTtl);
+       userIdleTtl = cfg.GetInteger(sec, "user-idle-ttl", userIdleTtl);
        stateFile   = cfg.Get(sec, "state-file", stateFile);
        std::string sttl = cfg.Get(sec, "state-ttl", "");
        if (!sttl.empty()) stateTtl = parseDuration(sttl.c_str());
@@ -1248,7 +1269,8 @@ int main(int argc, char* argv[])
       OPT_FLUSH_COUNT,
       OPT_FLUSH_SECS, OPT_RCVBUF, OPT_QUEUE_DEPTH,
       OPT_METRICS_PORT, OPT_MAX_MEMORY, OPT_MAX_ENTRIES,
-      OPT_SERVER_TTL, OPT_FILE_TTL, OPT_STATE_FILE, OPT_STATE_TTL,
+      OPT_SERVER_TTL, OPT_FILE_TTL, OPT_USER_TTL, OPT_USER_IDLE_TTL,
+      OPT_STATE_FILE, OPT_STATE_TTL,
       OPT_SCITAGS, OPT_SCITAGS_REFRESH, OPT_DATASET, OPT_SITE,
       OPT_NO_RESOLVE,
       OPT_SESSIONS, OPT_SPANS, OPT_TRACES, OPT_GSTREAM, OPT_REDIRECTS, OPT_DEBUG
@@ -1283,6 +1305,8 @@ int main(int argc, char* argv[])
       {"max-entries",     required_argument, nullptr, OPT_MAX_ENTRIES},
       {"server-ttl",      required_argument, nullptr, OPT_SERVER_TTL},
       {"file-ttl",        required_argument, nullptr, OPT_FILE_TTL},
+      {"user-ttl",        required_argument, nullptr, OPT_USER_TTL},
+      {"user-idle-ttl",   required_argument, nullptr, OPT_USER_IDLE_TTL},
       {"state-file",      required_argument, nullptr, OPT_STATE_FILE},
       {"state-ttl",       required_argument, nullptr, OPT_STATE_TTL},
       {"scitags",         required_argument, nullptr, OPT_SCITAGS},
@@ -1354,6 +1378,8 @@ int main(int argc, char* argv[])
          case OPT_MAX_ENTRIES:   maxEntries   = (size_t)atol(optarg); break;
          case OPT_SERVER_TTL:    serverTtl    = atol(optarg);         break;
          case OPT_FILE_TTL:      fileTtl      = atol(optarg);         break;
+         case OPT_USER_TTL:      userTtl      = atol(optarg);         break;
+         case OPT_USER_IDLE_TTL: userIdleTtl  = atol(optarg);         break;
          case OPT_STATE_FILE:    stateFile    = optarg;               break;
          case OPT_STATE_TTL:     stateTtl     = parseDuration(optarg); break;
          case OPT_SCITAGS:       scitags      = optarg;               break;
@@ -1883,6 +1909,8 @@ int main(int argc, char* argv[])
    decoder.SetMaxEntries(maxEntries);
    decoder.SetServerTTL(serverTtl);
    decoder.SetFileTTL(fileTtl);
+   decoder.SetUserTTL(userTtl);
+   decoder.SetUserIdleTTL(userIdleTtl);
    decoder.SetResolveHosts(resolve);
    decoder.SetSite(site);
    decoder.SetEmitSessions(sessions);

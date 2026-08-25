@@ -3662,6 +3662,51 @@ TEST(XrdMonCollect, FileTTLSkipsServersWithoutXfr)
   EXPECT_EQ(dec.GetStats().staleOpens, 0u);
 }
 
+// The per-kind counts are what a bare total cannot give: a collector holding a
+// working set and one holding a day of finished sessions look identical in the
+// sum and differ by orders of magnitude in users{}. They are maintained in four
+// places (lruPut's insert branch, LruDrop, EvictFront and LoadState's reset),
+// so exercise insert, close, expiry and eviction, and check the parts still add
+// up to the whole each time.
+TEST(XrdMonCollect, EntryCountsByKindTrackTheLru)
+{
+  const time_t t0 = 1700000000;
+  XrdMonDecode dec([](const std::string&){});
+  dec.SetClock([&]{return t0;});
+  using D = XrdMonDecode::Dict;
+
+  auto total = [&]{
+      std::size_t n = 0;
+      for (unsigned i = 0; i < XrdMonDecode::kDictKinds; i++)
+         n += dec.StateEntries((D)i);
+      return n; };
+
+  feedUserN(dec, "h:1", 7);
+  EXPECT_EQ(dec.StateEntries(D::Users), 1u);
+  EXPECT_EQ(dec.StateEntries(D::Files), 0u);
+
+  feedOpenId(dec, "h:1", 1, "/store/data/a.root");
+  feedOpenId(dec, "h:1", 2, "/store/data/b.root");
+  EXPECT_EQ(dec.StateEntries(D::Users), 1u);
+  EXPECT_EQ(dec.StateEntries(D::Files), 2u);
+  EXPECT_EQ(total(), dec.StateEntries());
+
+  feedCloseId(dec, "h:1", 1);                 // a close releases its file
+  EXPECT_EQ(dec.StateEntries(D::Files), 1u);
+  EXPECT_EQ(total(), dec.StateEntries());
+
+  dec.SetMaxEntries(1);                       // force eviction
+  feedOpenId(dec, "h:1", 3, "/store/data/c.root");
+  EXPECT_GT(dec.GetStats().evicted, 0u);
+  EXPECT_EQ(total(), dec.StateEntries());
+
+  dec.SetMaxEntries(0);
+  dec.SetServerTTL(60);
+  dec.ReapServers(t0 + 3600);                 // reap takes the whole incarnation
+  EXPECT_EQ(total(), 0u);
+  EXPECT_EQ(dec.StateEntries(), 0u);
+}
+
 // Reaping the last incarnation of a sender parks its files_open gauge
 // at zero, so a restarted (or retired) server does not strand a nonzero
 // series in the metrics output forever.

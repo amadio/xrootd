@@ -677,11 +677,24 @@ sys.exit(1 if bad else 0)
 		# aggregates that carry no other label at all.
 		assert grep -Eq "^xrootd_collector_evicted_total\{site=\"${SITE}\"\}" \
 			"${metrics}"
-		assert grep -Eq "^xrootd_collector_state_entries\{site=\"${SITE}\"\} [1-9]" \
+		# Entries are broken out per dictionary kind: a bare total cannot tell
+		# a working set from an accumulation of finished sessions. The client
+		# above logged in, so the users series is the one that must be there.
+		assert grep -Eq "^xrootd_collector_state_entries\{site=\"${SITE}\",kind=\"users\"\} [1-9]" \
+			"${metrics}"
+		assert grep -Eq "^xrootd_collector_state_entries\{site=\"${SITE}\",kind=\"files\"\}" \
 			"${metrics}"
 		# The memory cap's setpoint. Non-zero because --max-memory defaults on;
 		# without it the control loop would be silently inert.
 		assert grep -Eq "^xrootd_collector_state_budget_bytes\{site=\"${SITE}\"\} [1-9]" \
+			"${metrics}"
+		# ...and the cap it is steering towards, without which "resident memory
+		# against what it is allowed" cannot be expressed from the exposition.
+		assert grep -Eq "^xrootd_collector_memory_cap_bytes\{site=\"${SITE}\"\} [1-9]" \
+			"${metrics}"
+		# How full the budget is. A ratio in [0,1], so 0 is a legitimate value
+		# here and only its presence can be asserted.
+		assert grep -Eq "^xrootd_collector_state_budget_used_ratio\{site=\"${SITE}\"\} [0-9]" \
 			"${metrics}"
 		# The "process" subsystem: a second subsystem on the same registry, so
 		# this also proves the global site label reaches beyond "collector".

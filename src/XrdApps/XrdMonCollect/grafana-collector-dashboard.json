@@ -1603,8 +1603,8 @@
     {
       "id": 21,
       "type": "timeseries",
-      "title": "Process memory vs state budget",
-      "description": "Resident set size of the collector process -- what --max-memory caps -- against the charged state budget the loop is enforcing. The budget falling away from its ceiling is the cap doing its work.",
+      "title": "Process memory vs its cap",
+      "description": "Resident set size of the collector against --max-memory. The control loop steers RSS into a band whose top is seven eighths of the cap and holds the rest in reserve for what a 15s sample cannot see, so RSS riding just under the cap is healthy. RSS parked far below it means something other than memory is limiting the collector -- see State budget headroom. The charged state budget is deliberately not plotted here: it is not the same kind of byte, and showing it on this axis invites sizing a container from a number that runs several times below real usage.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -1633,7 +1633,37 @@
             "mode": "palette-classic"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "--max-memory"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -1664,8 +1694,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(xrootd_collector_state_budget_bytes{site=~\"$site\",instance=~\"$collector\"})",
-          "legendFormat": "state budget",
+          "expr": "sum(xrootd_collector_memory_cap_bytes{site=~\"$site\",instance=~\"$collector\"})",
+          "legendFormat": "--max-memory",
           "refId": "B",
           "range": true
         }
@@ -1675,7 +1705,7 @@
       "id": 22,
       "type": "timeseries",
       "title": "Evictions & reaps",
-      "description": "State turnover. Evictions mean the memory budget is being hit and correlations are being lost; reaps are idle server incarnations released by --server-ttl and are normal. \"floored\" non-zero means the cap cannot be met by evicting correlation state -- the memory is elsewhere.",
+      "description": "State turnover. Evictions mean the memory budget is being hit and correlations are being lost; reaps are idle server incarnations released by --server-ttl and are normal. \"floored\" non-zero means the cap cannot be met by evicting correlation state -- the memory is elsewhere. expired users{reason=\"disconnected\"} is the post-disconnect grace doing its work; {reason=\"idle\"} climbing means --user-idle-ttl is taking live sessions and is set too low.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -1749,6 +1779,17 @@
           "expr": "sum(rate(xrootd_collector_memory_floored_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
           "legendFormat": "floored",
           "refId": "C",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (reason) (rate(xrootd_collector_expired_users_total{site=~\"$site\",instance=~\"$collector\"}[$__rate_interval]))",
+          "legendFormat": "expired users ({{reason}})",
+          "refId": "D",
           "range": true
         }
       ]
@@ -1885,6 +1926,158 @@
       ]
     },
     {
+      "id": 41,
+      "type": "timeseries",
+      "title": "State budget headroom",
+      "description": "The charged-state budget the control loop is enforcing, and how full it is. Utilisation pinned at 1 while resident memory sits far below its cap is the controller failing to grant headroom: the budget is binding before memory is, and correlation is being evicted for no reason -- check Evictions & reaps alongside. The budget is on its own axis because charged bytes are not the same kind of byte as resident bytes; they run several times below real usage and must never be used to size a container.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 49
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisCenteredZero": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "percentunit",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "state budget"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max(xrootd_collector_state_budget_used_ratio{site=~\"$site\",instance=~\"$collector\"})",
+          "legendFormat": "budget used",
+          "refId": "A",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(xrootd_collector_state_budget_bytes{site=~\"$site\",instance=~\"$collector\"})",
+          "legendFormat": "state budget",
+          "refId": "B",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Correlation entries by kind",
+      "description": "Entries held, split by dictionary. The split is the diagnosis a total cannot give: users far above files means finished sessions are accumulating rather than a working set being held, which is what --user-ttl and --user-idle-ttl bound.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 49
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 25,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisCenteredZero": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (kind) (xrootd_collector_state_entries{site=~\"$site\",instance=~\"$collector\"})",
+          "legendFormat": "{{kind}}",
+          "refId": "A",
+          "range": true
+        }
+      ]
+    },
+    {
       "id": 25,
       "type": "row",
       "title": "Sink health (OpenSearch / OTLP)",
@@ -1893,7 +2086,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 49
+        "y": 56
       },
       "panels": []
     },
@@ -1910,7 +2103,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 50
+        "y": 57
       },
       "fieldConfig": {
         "defaults": {
@@ -1981,7 +2174,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 50
+        "y": 57
       },
       "fieldConfig": {
         "defaults": {
@@ -2074,7 +2267,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 50
+        "y": 57
       },
       "fieldConfig": {
         "defaults": {
@@ -2145,7 +2338,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 57
+        "y": 64
       },
       "fieldConfig": {
         "defaults": {
@@ -2216,7 +2409,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 57
+        "y": 64
       },
       "fieldConfig": {
         "defaults": {
@@ -2320,7 +2513,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 57
+        "y": 64
       },
       "fieldConfig": {
         "defaults": {
@@ -2431,7 +2624,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 64
+        "y": 71
       },
       "panels": []
     },
@@ -2448,7 +2641,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 65
+        "y": 72
       },
       "fieldConfig": {
         "defaults": {
@@ -2541,7 +2734,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 65
+        "y": 72
       },
       "fieldConfig": {
         "defaults": {
@@ -2612,7 +2805,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 65
+        "y": 72
       },
       "fieldConfig": {
         "defaults": {
@@ -2672,7 +2865,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 72
+        "y": 79
       },
       "fieldConfig": {
         "defaults": {
@@ -2765,7 +2958,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 72
+        "y": 79
       },
       "fieldConfig": {
         "defaults": {
@@ -2825,7 +3018,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 72
+        "y": 79
       },
       "fieldConfig": {
         "defaults": {
@@ -2907,7 +3100,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 79
+        "y": 86
       },
       "fieldConfig": {
         "defaults": {
@@ -2978,7 +3171,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 79
+        "y": 86
       },
       "fieldConfig": {
         "defaults": {

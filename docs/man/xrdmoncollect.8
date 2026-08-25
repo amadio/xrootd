@@ -16,6 +16,7 @@ xrdmoncollect - collect and correlate XRootD detailed monitoring streams
               [\fB--rcvbuf\fR \fIsz\fR] [\fB--queue-depth\fR \fIn\fR]
               [\fB--max-memory\fR \fIsz\fR] [\fB--max-entries\fR \fIn\fR]
               [\fB--server-ttl\fR \fIs\fR] [\fB--file-ttl\fR \fIs\fR]
+              [\fB--user-ttl\fR \fIs\fR] [\fB--user-idle-ttl\fR \fIs\fR]
               [\fB--state-file\fR \fIfile\fR] [\fB--state-ttl\fR \fIdur\fR]
               [\fB--scitags\fR \fIsrc\fR [\fB--scitags-refresh\fR \fIs\fR]] [\fB--dataset\fR \fIre\fR]
               [\fB--no-resolve\fR]
@@ -489,14 +490,27 @@ Cap the \fItotal resident memory\fR of the collector process at approximately
 \fIsz\fR bytes, accepting a \fBK\fR/\fBM\fR/\fBG\fR suffix (default \fB1G\fR;
 \fB0\fR = unbounded).
 .P
-The collector meets the cap by evicting correlation state. Once per control tick
-it reads its own resident set size and, if that is over the cap, lowers the
-budget it allows the per-server dictionaries and the open-file table to occupy;
-the \fIleast-recently-used\fR entries go first, so a long-running operation kept
-warm by its in-flight \fIf\fR-stream snapshots is retained while cold, stranded
-entries (for example an open whose close was lost to a dropped datagram) are
-dropped. When resident memory falls back below the cap the budget is restored
-gradually.
+Once per control tick the collector reads its own resident set size and steers
+the budget it allows the per-server dictionaries and the open-file table to
+occupy: it grants more while there is measured headroom, holds station in the
+top eighth of the cap, and lowers the budget above it, where the
+\fIleast-recently-used\fR entries go first. A long-running operation kept warm
+by its in-flight \fIf\fR-stream snapshots is therefore retained while cold,
+stranded entries (for example an open whose close was lost to a dropped
+datagram) are dropped.
+.P
+A healthy collector settles at roughly \fIseven eighths\fR of the cap. The
+remaining eighth is deliberate slack: the loop samples every fifteen seconds and
+a burst can add a great deal between two samples. Set \fB--max-memory\fR
+\fIto\fR the memory you are willing to give the collector, not below it \(em the
+reserve is already built in.
+.P
+Nothing in the loop assumes how much real memory a charged byte costs; it grants
+a conservative fraction of the headroom it can see and lets the next sample
+correct it. The budget also rises only while the state is actually pressed
+against it, so it records demand that has already been carried at a safe
+resident size rather than a speculative allowance a burst could fill between
+two samples.
 .P
 This is \fIbest-effort, not a guarantee\fR. Only the correlation state is under
 the collector's control: the receive queue, the pending output bodies and memory
@@ -507,10 +521,22 @@ through \fBxrootd_collector_memory_floored_total\fR and a log message rather tha
 pursued until no state remains. The only hard cap is the one the kernel
 enforces; see \fBMemoryMax=\fR in \fBsystemd.resource-control\fR(5).
 .P
-\fBxrootd_process_resident_memory_bytes\fR reports what is being capped,
-\fBxrootd_collector_state_budget_bytes\fR the setpoint the loop is currently
-enforcing, and \fBxrootd_collector_state_entries\fR how much correlation state
-that is buying.
+\fBxrootd_process_resident_memory_bytes\fR reports what is being capped and
+\fBxrootd_collector_memory_cap_bytes\fR the cap itself;
+\fBxrootd_collector_state_budget_bytes\fR is the setpoint the loop is currently
+enforcing, \fBxrootd_collector_state_budget_used_ratio\fR how full it is, and
+\fBxrootd_collector_state_entries{kind}\fR how much correlation state that is
+buying, split by dictionary. A utilisation pinned at 1 with
+\fBevicted_total\fR climbing while resident memory sits well below the cap means
+the budget is binding before memory is.
+.P
+\fBWarning:\fR the collector now uses the allowance it is given. Before, the
+budget was pinned at a fixed eighth of \fB--max-memory\fR and the process never
+came near the rest, so a deployment whose cgroup \fBMemoryMax=\fR equalled or
+undercut \fB--max-memory\fR survived only by accident. Raise the cgroup limit
+above \fB--max-memory\fR \(em 1.5 times is the usual figure \(em before
+deploying this release; the collector warns at start-up when it can read a limit
+at or below its own cap. Expect resident memory to rise on upgrade.
 .P
 \fBNote:\fR this option previously bounded an \fIestimate\fR of the correlation
 state alone, and that estimate ran four to eight times below the memory really
@@ -546,6 +572,46 @@ operation refresh its entry every reporting interval — anything older is
 genuinely stranded. Set it to at least three times that server's \fBxfr\fR
 period, or long-running operations will be expired out from under their own
 close records and every one of them will be reported as an orphan close.
+.RE
+\fB--user-ttl\fR \fIs\fR
+.RS 5
+Drop a user (session) entry \fIs\fR seconds after its disconnect was reported
+(default \fB300\fR; \fB0\fR = never), counting it in
+\fBexpired_users_total{cluster,server,reason="disconnected"}\fR.
+.P
+The entry outlives its disconnect only so that a straggling close can still
+resolve its identity against it; past that it is dead weight. The window runs
+from the disconnect and is not extended by the stragglers it serves, so the
+lifetime is predictable.
+.P
+On by default because it is safe by construction: a server reports a session's
+closes before its \fBisDisc\fR, so a record naming a session after its
+disconnect is already an anomaly. Without it the only things that ever reclaim a
+finished session are memory pressure and \fB--server-ttl\fR a day later, and a
+busy collector accumulates hundreds of thousands of spent sessions against a few
+thousand open files \(em visible as
+\fBstate_entries{kind="users"}\fR far above \fBstate_entries{kind="files"}\fR.
+.RE
+\fB--user-idle-ttl\fR \fIs\fR
+.RS 5
+Drop a \fIstill-connected\fR user entry that has not been named for \fIs\fR
+seconds and holds no open files (default \fB21600\fR, six hours; \fB0\fR = off),
+counting it in \fBexpired_users_total{...,reason="idle"}\fR. This covers a
+disconnect record that was lost entirely, as \fB--file-ttl\fR does on the file
+side.
+.P
+Unlike \fB--user-ttl\fR this is a \fIguess\fR: an idle but connected client is
+legitimate and indistinguishable from one whose disconnect was lost. Hence the
+long default, and hence it never takes an entry that still holds an open file,
+which is a session demonstrably mid-operation.
+.P
+\fBSet too low it is destructive rather than merely lossy.\fR A live session
+whose entry has been expired reaches its disconnect with no identity to resolve
+against, and is reported as an \fIinstant\fR: \fBxrootd.session.start_time_source\fR
+becomes \fBdisconnect\fR and a zero-second value is folded into
+\fBsession_duration_seconds\fR, quietly corrupting the distribution. The two
+series that say so are \fBexpired_users_total{reason="idle"}\fR and
+\fBsession_starts_total{source="disconnect"}\fR; read them together.
 .RE
 \fB--state-file\fR \fIfile\fR
 .RS 5

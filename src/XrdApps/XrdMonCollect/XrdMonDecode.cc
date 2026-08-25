@@ -2016,15 +2016,27 @@ void XrdMonDecode::DecodeMap(unsigned char code, Server& srv,
        u.site       = cgiVal(text, "S");
        std::string iv = cgiVal(text, "I");
        if (!iv.empty()) u.ipVersion = atoi(iv.c_str());
-       // A 'u' map can be re-sent for a dictid whose session is already under
-       // way (the server retransmits on a late "set monitor on", and any
-       // destination can see a duplicated datagram). lruPut replaces the entry
-       // wholesale, so carry the session forward explicitly.
+       // A 'u' map can be seen twice for the same dictid: any destination can
+       // receive a duplicated datagram. It is never a *new* session, because
+       // the server mints dictids from a process-wide monotonic counter
+       // (XrdXrootdMonitor::GetDictID) and a restart makes a new incarnation,
+       // so a dictid is not reused within one. Every emission path -- login,
+       // post-auth via MonAuth, the late "set monitor on" (guarded on
+       // !Monitor.Did, so it sends a first map rather than a repeat) and the
+       // transit protocol -- takes a fresh id.
+       //
+       // Treating a repeat after a disconnect as a new session, which this
+       // used to do, resurrected a spent one: sessions_open gained a client
+       // that had already left, lruPut's wholesale replacement cleared `disc`,
+       // and the real disconnect had already happened, so nothing could ever
+       // mark it again. It then survived to the server TTL.
        bool fresh = true;
        if (auto old = srv.users.find(dictid); old != srv.users.end())
-          {// A re-send mid-session is the same session; one for a dictid whose
-           // disconnect was already reported is a new session reusing it.
-           fresh = old->second.disc;
+          {fresh  = false;
+           u.disc = old->second.disc;   // a spent session stays spent
+           // lruPut replaces the entry wholesale, so carry the session forward
+           // explicitly: the rollup, the login time and the open-file set are
+           // properties of the session, not of this copy of the map.
            u.adopt(std::move(old->second));
           }
        if (fresh) srv.sessions++;
@@ -2373,6 +2385,11 @@ void XrdMonDecode::DecodeFStream(const std::string& src, int32_t stod,
                       uint32_t userID = rd32(rec + 4);
                       EmitDisc(src, stod, srv, userID, recTime());
                       DropUserFiles(src, srv, userID);
+                      // Last, because EmitDisc builds a document through
+                      // otelIdentity(), which promotes the entry to
+                      // most-recently-used on its way past.
+                      auto uit = srv.users.find(userID);
+                      if (uit != srv.users.end()) Demote(uit->second.lru);
                      }
                      break;
 
@@ -2497,6 +2514,22 @@ XrdMonDecode::sessionSpanOf(int32_t stod, const Server& srv, const UserInfo* u,
 void XrdMonDecode::EmitDisc(const std::string& src, int32_t stod, Server& srv,
                             uint32_t userID, double tRec)
 {
+// The session is over whether or not a document is emitted for it, so the mark
+// happens before the emission gate. It used to sit after it, which meant that
+// with session emission off -- the default -- `disc` was never set for anyone:
+// sessions_open then climbed monotonically (nothing decrements it but this),
+// and every spent session looked live to eviction and, now, to the user TTL.
+//
+// The entry itself stays: a straggling close still resolves its identity
+// against it. Guard the decrement, because a duplicated disconnect datagram
+// must not count twice.
+//
+   auto uit = srv.users.find(userID);
+   if (uit != srv.users.end() && !uit->second.disc)
+      {uit->second.disc = true;
+       if (srv.sessions) srv.sessions--;
+      }
+
    if (!emitSessions) return;             // session documents disabled
 
 // Resolve the bounds once: the log attributes, the duration, the envelope
@@ -2505,18 +2538,8 @@ void XrdMonDecode::EmitDisc(const std::string& src, int32_t stod, Server& srv,
 // is optional -- the login record can have been lost, evicted or never enabled
 // -- and the session is still reported when it is missing.
 //
-   auto uit = srv.users.find(userID);
    const UserInfo*   u  = uit != srv.users.end() ? &uit->second : nullptr;
    const SessionSpan sp = sessionSpanOf(stod, srv, u, tRec);
-
-// The session is over. The entry stays -- a straggling close still resolves
-// its identity against it -- so mark it rather than erase it, and guard: a
-// duplicated disconnect datagram must not decrement twice.
-//
-   if (uit != srv.users.end() && !uit->second.disc)
-      {uit->second.disc = true;
-       if (srv.sessions) srv.sessions--;
-      }
 
    json j;
    otelResource(j, src, stod, srv);

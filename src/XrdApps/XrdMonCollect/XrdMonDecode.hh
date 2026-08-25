@@ -710,6 +710,13 @@ void lruPut(Server* owner, Dict dict, Map& m, const Key& key, uint32_t ikey,
    EnforceBudget();
 }
 void     Touch(LruIt node) {lru.splice(lru.end(), lru, node);}
+// The opposite of Touch: send an entry to the eviction front. Used when a
+// session disconnects, because otelIdentity() promotes the entry while building
+// the disconnect's own document -- so without this a session is most-recently-
+// used at the exact moment it becomes dead weight, and has to age past the
+// entire rest of the index before eviction can reach it. That is why the
+// spent sessions of a busy collector outlive the live entries they crowd out.
+void     Demote(LruIt node) {lru.splice(lru.begin(), lru, node);}
 void     LruDrop(LruIt node)
             {lruBytes -= node->bytes; lru.erase(node); --lruCount;}
 // Re-charge an existing entry whose held size changed (e.g. its session rollup

@@ -51,6 +51,18 @@ std::size_t XrdMonProcessRss();
 //! equivalent (musl's mallocng already releases eagerly).
 void XrdMonReleaseMemory();
 
+//! The cgroup memory limit applying to this process, in bytes.
+//!
+//! Needed because --max-memory is best-effort and a cgroup limit is not: the
+//! control loop steers RSS into a band just under the cap, so a limit set at or
+//! below --max-memory turns the daemon's normal operating point into an OOM
+//! kill. Reading it at start-up is how that gets said before it happens rather
+//! than after.
+//!
+//! @return the limit in bytes, or 0 when there is none, it is "max", or this
+//!         platform has no cgroups. Never an error: a caller can only warn.
+std::size_t XrdMonCgroupLimit();
+
 //! Pin the glibc allocator parameters that otherwise let RSS ratchet upward.
 //!
 //! Must be called before any thread starts. Environment settings the operator

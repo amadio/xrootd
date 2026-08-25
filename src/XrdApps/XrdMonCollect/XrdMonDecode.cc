@@ -1737,21 +1737,48 @@ constexpr std::size_t kStateFloorBytes = 8u << 20;
 
 // How long to stay quiet between warnings about being stuck at the floor.
 constexpr long kFloorWarnSecs = 300;
+
+// Top of the target band, as a shift of the cap: the loop climbs below
+// maxRss - maxRss/8 and holds between there and the cap. The old deadband was
+// maxRss/16, which left the process content at 94% of a limit it samples only
+// every 15s. An eighth is what the proportional-decrease path needs to work in
+// before RSS actually crosses the cap.
+//
+constexpr unsigned kBandShift = 3;
+
+// Worst plausible real bytes per charged byte. bytesOf() counts held strings
+// plus a flat 96 and charges nothing for map nodes, bucket arrays, Server or
+// gsPrev, which is where the documented 4-8x comes from. Nothing here assumes
+// the ratio *is* 8; assuming it is at most 8 is what makes a single grant of
+// headroom/8 unable to overshoot the band even in the worst case.
+//
+constexpr std::size_t kChargedWorst = 8;
 }
 
 void XrdMonDecode::SetMaxRss(std::size_t n)
 {
    maxRss = n;
-   if (!n) {rssCeil = rssFloor = maxBytes = 0; return;}   // 0 = unbounded
+   if (!n) {rssCeil = rssBand = rssFloor = maxBytes = 0; return;} // 0 = unbounded
 
-// The ceiling is a sanity bound, not the operative limit -- the loop is. It is
-// maxRss/8 because bytesOf() under-counts real memory by 4-8x, so a charged
-// budget of R/8 already corresponds to something like 0.5R-1R of real state;
-// past that the state alone could fill the cap.
+// The ceiling is a pure sanity bound, not the operative limit -- the loop is.
+// It is maxRss because a charged byte is always strictly cheaper than a real
+// one, so a charged budget of maxRss can never itself be what pushes RSS over.
+// It used to be maxRss/8, a guess at the charged-to-real ratio installed as a
+// hard ceiling: since the budget also *started* there, the climb branch's
+// maxBytes < rssCeil test was false from the first tick and the loop could only
+// ever descend. A 4G cap therefore pinned the budget at 512M forever and left
+// most of the allowance unreachable.
 //
-   rssCeil  = n / 8;
-   rssFloor = std::min(std::max(kStateFloorBytes, n/128), rssCeil/2);
-   maxBytes = rssCeil;          // start optimistic; the loop only descends
+   rssCeil  = n;
+   rssBand  = n - (n >> kBandShift);
+   rssFloor = std::min(std::max(kStateFloorBytes, n/128), n >> kBandShift);
+
+// The old ceiling is exactly right as a *starting* point -- it is the
+// conservative ratio guess -- and starting there costs at most a minute of
+// under-use, where starting at rssCeil would let the state run to the cap
+// before the first sample ever looked.
+//
+   maxBytes = std::max(rssFloor, n >> kBandShift);
 }
 
 // One step of the loop: additive-increase, proportional-decrease over the
@@ -1818,15 +1845,35 @@ void XrdMonDecode::MemoryTick(time_t now)
               }
           }
       }
-      else if (rss + maxRss/16 < maxRss && maxBytes < rssCeil)
+      else if (rss < rssBand && maxBytes < rssCeil)
       {
-// Deadband: without it the budget hunts across the cap. Sixteen ticks (four
-// minutes) from floor to ceiling is fast enough that a transient does not
-// cripple correlation for long, slow enough that the loop cannot oscillate
-// against the lag between evicting and the allocator reflecting it.
+// Grant a fraction of the *real* headroom, converted at the worst plausible
+// charged-to-real ratio. This is the whole point of the rewrite: the loop
+// steers by what it measures instead of by a constant, so it settles in the
+// band whether the true ratio for this workload is 3 or 30.
 //
-       maxBytes = std::min(rssCeil, maxBytes + rssCeil/16);
+// head/kChargedWorst cannot overshoot. At the pessimistic end of the ratio
+// range one charged byte costs eight real ones, so this grant turns into at
+// most `head` real bytes -- one tick can close the gap to the band but never
+// jump past it. At the optimistic end it takes a few ticks, which is the
+// intended fast-down/slow-up asymmetry. rssFloor/16 keeps it making progress
+// once head has shrunk to almost nothing.
+//
+       std::size_t head = rssBand - rss;
+       std::size_t step = std::max(head/kChargedWorst, rssFloor/16);
+
+// Anti-windup, and the safety property that makes the whole scheme sound under
+// a hard cgroup limit. A budget far above what the state holds is not a
+// constraint at all, and raising it further only builds an allowance the next
+// burst can fill between two 15s samples -- which is how a process gets killed
+// between ticks. Climbing from `held` instead means the budget is a record of
+// demand that has already been carried at a safe RSS, never a speculative one.
+// The descend path computes from the same quantity, for the same reason.
+//
+       std::size_t held = std::min<std::size_t>(maxBytes, lruBytes);
+       maxBytes = std::min(rssCeil, std::max<std::size_t>(maxBytes, held + step));
       }
+      // Otherwise RSS is inside [rssBand, maxRss]: hold station.
 }
 
 /******************************************************************************/

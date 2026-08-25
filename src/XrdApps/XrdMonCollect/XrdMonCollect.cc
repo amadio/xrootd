@@ -1391,6 +1391,25 @@ int main(int argc, char* argv[])
               "state, so the state budget will sit at its floor\n",
               argv[0], maxMemory >> 20);
 
+// The control loop steers RSS into a band just under --max-memory and holds
+// only the top eighth in reserve, so the daemon's healthy operating point is
+// close to the number set here. A cgroup limit at or below it therefore turns
+// normal operation into an OOM kill -- and this is not hypothetical for a site
+// upgrading past the release where the budget was pinned at maxRss/8 and the
+// process never came near its allowance. Warn loudly; only the operator can
+// decide which of the two numbers is wrong.
+//
+   if (maxMemory)
+      {std::size_t cg = XrdMonCgroupLimit();
+       if (cg && cg <= maxMemory)
+          fprintf(stderr, "%s: warning: the cgroup memory limit (%zuM) is at or "
+                  "below --max-memory (%zuM). The collector now uses the "
+                  "allowance it is given, so it will be killed rather than "
+                  "shed state; raise the cgroup limit above --max-memory (1.5x "
+                  "is the usual figure) or lower --max-memory\n",
+                  argv[0], cg >> 20, maxMemory >> 20);
+      }
+
 // The site is a property of this collector, not of the servers reporting to it:
 // it is not on the monitoring wire at all (all.sitename names the storage
 // cluster), and the deployment model is one collector per site. As a global

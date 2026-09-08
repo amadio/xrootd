@@ -172,14 +172,12 @@ start(){
        stop
        generate
        set -x
-       # start for each component
-       for i in "${servernames[@]}"; do
-              launch ${XROOTD} ${i} xrootd
-       done
-
-       # start cmsd in the redirectors
+       # Start each instance top-down (meta manager, managers, servers), and
+       # its cmsd before its xrootd: xrootd connects to the local cmsd through
+       # the admin path at start, so the cmsd must already be there.
        for i in "${servernames[@]}"; do
               launch ${CMSD} ${i} cmsd
+              launch ${XROOTD} ${i} xrootd
        done
 
        sleep 1

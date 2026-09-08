@@ -154,12 +154,34 @@ cleanup() {
        rm -f ${ERRFILE} || :
        remove_uploads
 }
+# On failure, print the tail of the manager logs. The failures seen in CI are
+# HTTP PUTs through a manager that never get their redirect, and the reason
+# is only in the cmsd and xrootd logs of that manager, which CDash does not
+# keep. The poller, link and scheduler trace lines are dropped as noise.
+dump_logs() {
+       for i in metaman man1 man2; do
+              for log in cmsd xrootd; do
+                     echo "===== ${i}/${log}.log (tail) ====="
+                     grep -a -v "Xrd_Poll\|Xrd_Link\|Xrd_Sched\|received dump" \
+                            "${i}/${log}.log" 2>/dev/null | tail -n 150 || :
+              done
+       done
+}
+
 # Only EXIT runs cleanup. A signal trap that called cleanup directly would
 # replace bash's default terminating behaviour: after the handler returns, the
 # script would carry on past the interrupted command, now with its state
 # removed. Exiting explicitly keeps the conventional 128+signal status and
-# fires the EXIT trap exactly once.
-trap cleanup EXIT
+# fires the EXIT trap exactly once. The exit status is saved first, since the
+# commands in the trap would otherwise overwrite it.
+on_exit() {
+       local rc=$?
+       cleanup
+       if [[ ${rc} -ne 0 ]]; then
+              dump_logs
+       fi
+}
+trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 131' QUIT
@@ -187,8 +209,18 @@ ${XRDFS} ${HOST_METAMAN} stat /
 ${XRDFS} ${HOST_METAMAN} statvfs /
 ${XRDFS} ${HOST_METAMAN} spaceinfo /
 
-# Leftovers from a run that CTest killed on timeout would break the MOVE step.
-remove_uploads
+# Leftovers from a run that CTest killed on timeout would break the MOVE step,
+# since XrdOfs::rename refuses to overwrite its destination. Only those three
+# files are removed here. A full remove_uploads at this point costs a 2s
+# lookup per missing file, and its rmdir poisons the managers' caches: once
+# every holder of a path has reported it gone, the cmsd keeps an entry with no
+# holder and no node left to query, and later lookups of that path fail at
+# once with "No servers are available", even after the uploads re-create the
+# directory (a mkpath announces nothing). Same-tree re-runs restart the
+# cluster, so the caches are fresh; this is about this run only.
+for src in "${!srcs[@]}"; do
+       ${XRDFS} ${HOST_METAMAN} rm ${RMTDATADIR}/new_file_${src} >/dev/null 2>&1 || :
+done
 
 # create local files with random contents using OpenSSL
 

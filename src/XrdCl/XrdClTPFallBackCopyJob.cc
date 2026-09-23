@@ -117,7 +117,7 @@ namespace XrdCl
     }
 
     // check if we can fall back to streaming
-    if( tpcFallBack && ( st.code == errNotSupported || st.code == errOperationExpired ) )
+    if( tpcFallBack && ( st.code == errNotSupported || st.code == errNotImplemented || st.code == errOperationExpired ) )
     {
       Log *log = DefaultEnv::GetLog();
       log->Debug( UtilityMsg, "TPC is not supported, falling back to streaming mode." );

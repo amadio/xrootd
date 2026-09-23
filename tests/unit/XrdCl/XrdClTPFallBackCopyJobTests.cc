@@ -179,3 +179,49 @@ TEST_F(TPFallBackCopyJobFixture, ThirdPartyCopyReceivesNoProgressHandlerWhenTheJ
 
     job.Run();
 }
+
+TEST_F(TPFallBackCopyJobFixture, FallBackDisabledDoesNotFallBackWhenThirdPartyCopyReturnsErrNotImplemented)
+{
+    ON_CALL(*plugin_filesystem, ThirdPartyCopy(_, _, _, _, _)).WillByDefault(Return(XRootDStatus{stError, errNotImplemented}));
+
+    EXPECT_CALL(*factory, CreateFile(_)).Times(0);
+
+    XRootDStatus status = job.Run();
+    ASSERT_EQ(status.status, stError);
+    ASSERT_EQ(status.code, errNotImplemented);
+}
+
+TEST_F(TPFallBackCopyJobFixture, FallBackEnabledFallsBackToStreamingWhenThirdPartyCopyReturnsErrNotImplemented)
+{
+    properties.Set("thirdParty", "first");
+
+    ON_CALL(*plugin_filesystem, ThirdPartyCopy(_, _, _, _, _)).WillByDefault(Return(XRootDStatus{stError, errNotImplemented}));
+
+    EXPECT_CALL(*factory, CreateFile(_)).Times(AtLeast(1));
+
+    job.Run();
+}
+
+TEST_F(TPFallBackCopyJobFixture, FallBackEnabledFallsBackToStreamingWhenThirdPartyCopyReturnsErrOperationExpired)
+{
+    properties.Set("thirdParty", "first");
+
+    ON_CALL(*plugin_filesystem, ThirdPartyCopy(_, _, _, _, _)).WillByDefault(Return(XRootDStatus{stError, errOperationExpired}));
+
+    EXPECT_CALL(*factory, CreateFile(_)).Times(AtLeast(1));
+
+    job.Run();
+}
+
+TEST_F(TPFallBackCopyJobFixture, FallBackEnabledDoesNotFallBackWhenThirdPartyCopyReturnsAnUnrelatedError)
+{
+    properties.Set("thirdParty", "first");
+
+    // ThirdPartyCopy keeps returning plugin_status/plugin_code from SetUp,
+    // which is neither errNotSupported, errNotImplemented nor errOperationExpired.
+    EXPECT_CALL(*factory, CreateFile(_)).Times(0);
+
+    XRootDStatus status = job.Run();
+    ASSERT_EQ(status.status, plugin_status);
+    ASSERT_EQ(status.code, plugin_code);
+}

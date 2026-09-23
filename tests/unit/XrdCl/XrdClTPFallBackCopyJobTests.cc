@@ -56,12 +56,38 @@ protected:
     void SetUp() override
     {
         ON_CALL(*factory, CreateFileSystem(_)).WillByDefault(Return(plugin_filesystem));
+        ON_CALL(*factory, CreateFile(_)).WillByDefault(Invoke([](const std::string &) { return new FilePlugIn(); }));
         ON_CALL(*plugin_filesystem, ThirdPartyCopy(_, _, _, _, _)).WillByDefault(Return(XRootDStatus{plugin_status, plugin_code}));
 
         DefaultEnv::GetPlugInManager()->RegisterFactory("mock://*", factory);
 
         properties.Set("source", "mock://unresolvable:1094//src");
         properties.Set("target", "mock://unresolvable:1094//dst");
+
+        // ClassicCopyJob, reached through the streaming fall back, reads these
+        // properties assuming CopyProcess::AddJob already gave them a default.
+        // Set the same defaults here so the fall back does not read uninitialized
+        // PropertyList values.
+        properties.Set("force", false);
+        properties.Set("posc", false);
+        properties.Set("coerce", false);
+        properties.Set("makeDir", false);
+        properties.Set("zipArchive", false);
+        properties.Set("xcp", false);
+        properties.Set("preserveXAttr", false);
+        properties.Set("rmOnBadCksum", false);
+        properties.Set("continue", false);
+        properties.Set("zipAppend", false);
+        properties.Set("doServer", false);
+        properties.Set("dynamicSource", false);
+        properties.Set("checkSumMode", "none");
+        properties.Set("parallelChunks", 4);
+        properties.Set("chunkSize", 8388608);
+        properties.Set("xcpBlockSize", 134217728);
+        properties.Set("cpTimeout", 0);
+        properties.Set("xrate", 0);
+        properties.Set("xrateThreshold", 0);
+
         job.Init();
     }
 

@@ -23,9 +23,9 @@ setup() {
 
 	sleep 0.5
 
-	src_token=$(curl -k --cert $BATS_SUITE_TMPDIR/client.crt --key $BATS_SUITE_TMPDIR/client.key -X POST -d '{ "caveats": [ "activity:READ_METADATA,UPDATE_METADATA,LIST,DOWNLOAD,UPLOAD,MANAGE,DELETE" ], "validity": "PT1H" }' -H 'Content-Type: application/macaroon-request' https://${XROOTD_SRC}/ | jq -r .macaroon)
+	src_token=$(curl --fail --show-error -k --cert $BATS_SUITE_TMPDIR/client.crt --key $BATS_SUITE_TMPDIR/client.key -X POST -d '{ "caveats": [ "activity:READ_METADATA,UPDATE_METADATA,LIST,DOWNLOAD,UPLOAD,MANAGE,DELETE" ], "validity": "PT1H" }' -H 'Content-Type: application/macaroon-request' https://${XROOTD_SRC}/ | jq -r .macaroon)
 	echo $src_token >  token-file
-	dst_token=$(curl -k --cert $BATS_SUITE_TMPDIR/client.crt --key $BATS_SUITE_TMPDIR/client.key -X POST -d '{ "caveats": [ "activity:READ_METADATA,UPDATE_METADATA,LIST,DOWNLOAD,UPLOAD,MANAGE,DELETE" ], "validity": "PT1H" }' -H 'Content-Type: application/macaroon-request' https://${XROOTD_DST}/ | jq -r .macaroon)
+	dst_token=$(curl --fail --show-error -k --cert $BATS_SUITE_TMPDIR/client.crt --key $BATS_SUITE_TMPDIR/client.key -X POST -d '{ "caveats": [ "activity:READ_METADATA,UPDATE_METADATA,LIST,DOWNLOAD,UPLOAD,MANAGE,DELETE" ], "validity": "PT1H" }' -H 'Content-Type: application/macaroon-request' https://${XROOTD_DST}/ | jq -r .macaroon)
 	echo $dst_token >> token-file
 
 	printf '%s\n\n' "$src_token" > token-file-src

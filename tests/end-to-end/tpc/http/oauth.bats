@@ -23,7 +23,7 @@ setup_file() {
 	endpoint=$(curl -s "${IAM_OAUTH_ISSUER}/.well-known/openid-configuration" | jq -r .token_endpoint)
 
 	scope='storage.read:/ storage.modify:/ storage.create:/ storage.stage:/'
-	export TOKEN=$(curl -s -X POST --user "${IAM_OAUTH_CLIENT_ID}:${IAM_OAUTH_CLIENT_SECRET}" \
+	export TOKEN=$(curl --fail --show-error -s -X POST --user "${IAM_OAUTH_CLIENT_ID}:${IAM_OAUTH_CLIENT_SECRET}" \
 		-H "Content-Type: application/x-www-form-urlencoded" \
 		--data "grant_type=client_credentials&scope=${scope}" \
 		${endpoint} | jq -r .access_token)

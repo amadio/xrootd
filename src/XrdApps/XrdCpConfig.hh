@@ -212,10 +212,10 @@ static const uint64_t    DoZipAppend       = 0x0000000800000000LL; // --zip-appe
 
 static const uint64_t    OpHttpHeader      =  'H';
 static const uint64_t    DoHttpHeader      = 0x0000001000000000LL; // -H | --header
-static const uint64_t    OpTpcTokenFile    = 0x14;
-static const uint64_t    DoTpcTokenFile    = 0x0000001000000000LL; // --tpc-token-file
+static const uint64_t    OpTpcTokenFile    = 0x15;
+static const uint64_t    DoTpcTokenFile    = 0x0000002000000000LL; // --tpc-token-file
 
-static const uint64_t    DoTpcModePush     = 0x0000002000000000LL; // --tpc ... push ...
+static const uint64_t    DoTpcModePush     = 0x0000004000000000LL; // --tpc ... push ...
 
 // Call Config with the parameters passed to main() to fill out this object. If
 // the method returns then no errors have been found. Otherwise, it exits.

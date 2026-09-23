@@ -22,23 +22,20 @@
 #include "XrdClHttpFilesystem.hh"
 #include "XrdClHttpOps.hh"
 #include "XrdClHttpResponses.hh"
+#include "XrdClHttpTokenFileParser.hh"
 
 #include "XrdCl/XrdClAnyObject.hh"
 #include "XrdCl/XrdClDefaultEnv.hh"
 #include "XrdCl/XrdClPropertyList.hh"
-
-#include "XrdOuc/XrdOucJson.hh"
 
 #include <algorithm>
 #include <cerrno>
 #include <condition_variable>
 #include <chrono>
 #include <exception>
-#include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <sstream>
 #include <string>
 
 using namespace XrdClHttp;
@@ -383,76 +380,6 @@ Filesystem::Stat(const std::string      &path,
     return QueueOperation(std::move(statOp), "filesystem stat operation");
 }
 
-// Reads the tokens held by the given token file and appends the corresponding
-// 'Authorization' headers to the <src> and/or <dst> header lists.
-//
-// A JSON token file holds the tokens in the 'src' and/or 'dst' properties,
-// any other file holds the <src> token in the first line and the <dst> one
-// in the second line. An absent or empty token means the corresponding side
-// is given no token at all.
-//
-// Returns false if the file cannot be opened or holds no token at all, in
-// which case no header is appended.
-static bool ParseTokenFile( const std::string   &token_file,
-                            CurlCopyOp::Headers &src_hdrs,
-                            CurlCopyOp::Headers &dst_hdrs,
-                            XrdCl::Log          *log )
-{
-    std::ifstream file(token_file);
-
-    if (!file.is_open())
-    {
-        log->Warning(kLogXrdClHttp, "Failed to open token file");
-        return false;
-    }
-
-    constexpr std::streamsize max_token_file_size = 10 * 1024;
-
-    std::string content(max_token_file_size, '\0');
-    file.read(&content[0], max_token_file_size);
-    content.resize(file.gcount());
-
-    std::string src_token;
-    std::string dst_token;
-
-    if (const auto json = nlohmann::json::parse(content, nullptr, false); json.is_object())
-    {
-        const auto read_token = [&json, log] (const char *key, std::string &token)
-        {
-            if (const auto value = json.find(key); value != json.end() && value->is_string() && !value->get_ref<const std::string &>().empty())
-                token = value->get_ref<const std::string &>();
-            else
-                log->Warning(kLogXrdClHttp, "Property '%s' of the token file is not a non-empty string", key);
-        };
-
-        read_token("src", src_token);
-        read_token("dst", dst_token);
-    }
-    else
-    {
-        std::istringstream lines(content);
-        std::getline(lines, src_token);
-        std::getline(lines, dst_token);
-    }
-
-    if (src_token.empty() && dst_token.empty())
-    {
-        log->Warning(kLogXrdClHttp, "Token file holds neither a <src> nor a <dst> token");
-        return false;
-    }
-
-    const auto add_token = [] (CurlCopyOp::Headers &headers, const std::string &token)
-    {
-        if (!token.empty())
-            headers.emplace_back("Authorization"s, "Bearer "s + token);
-    };
-
-    add_token(src_hdrs, src_token);
-    add_token(dst_hdrs, dst_token);
-
-    return true;
-}
-
 // Returns true if the URL uses the http or the https protocol. A third party
 // copy is possible only between these two protocols.
 static bool is_http_url( const std::string &url )
@@ -517,7 +444,7 @@ XrdCl::XRootDStatus Filesystem::ThirdPartyCopy( const std::string            &so
     CurlCopyOp::Headers src_hdrs;
     CurlCopyOp::Headers dst_hdrs;
 
-    if (!token_file.empty() && !ParseTokenFile(token_file, src_hdrs, dst_hdrs, log))
+    if (!token_file.empty() && !ParseTokenFile(token_file, src_hdrs, dst_hdrs))
         return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errAuthFailed, 0,
                                    "Failed to parse the token file '" + token_file + "'");
 

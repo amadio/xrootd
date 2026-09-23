@@ -1,9 +1,8 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 
-#include "XrdCl/XrdClDefaultEnv.hh"
-
 #include "XrdClHttp/XrdClHttpOps.hh"
+#include "XrdClHttp/XrdClHttpTokenFileParser.hh"
 
 #include <filesystem>
 #include <fstream>
@@ -14,8 +13,7 @@
 using namespace std::string_literals;
 
 using namespace testing;
-
-#include "XrdClHttp/XrdClHttpFilesystem.cc"
+using namespace XrdClHttp;
 
 class ParseTokenFileFixture : public testing::Test
 {
@@ -48,7 +46,7 @@ protected:
 
 TEST_F(ParseTokenFileFixture, FailsWhenTheFileDoesNotExist)
 {
-    ASSERT_FALSE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_FALSE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, IsEmpty());
     ASSERT_THAT(dst_hdrs, IsEmpty());
 }
@@ -57,7 +55,7 @@ TEST_F(ParseTokenFileFixture, SetsBothAuthorizationHeadersWhenTheFileHasTwoLines
 {
     write_token_file("TokenA\nTokenB\n");
 
-    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, ElementsAre(Pair("Authorization"s, "Bearer TokenA"s)));
     ASSERT_THAT(dst_hdrs, ElementsAre(Pair("Authorization"s, "Bearer TokenB"s)));
 }
@@ -66,7 +64,7 @@ TEST_F(ParseTokenFileFixture, SetsOnlyTheSourceAuthorizationHeaderWhenTheFileHas
 {
     write_token_file("TokenA\n");
 
-    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, ElementsAre(Pair("Authorization"s, "Bearer TokenA"s)));
     ASSERT_THAT(dst_hdrs, IsEmpty());
 }
@@ -75,7 +73,7 @@ TEST_F(ParseTokenFileFixture, SetsOnlyTheSourceAuthorizationHeaderWhenTheSecondL
 {
     write_token_file("TokenA\n\n");
 
-    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, ElementsAre(Pair("Authorization"s, "Bearer TokenA"s)));
     ASSERT_THAT(dst_hdrs, IsEmpty());
 }
@@ -84,7 +82,7 @@ TEST_F(ParseTokenFileFixture, SetsOnlyTheDestinationAuthorizationHeaderWhenTheFi
 {
     write_token_file("\nTokenB\n");
 
-    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, IsEmpty());
     ASSERT_THAT(dst_hdrs, ElementsAre(Pair("Authorization"s, "Bearer TokenB"s)));
 }
@@ -93,7 +91,7 @@ TEST_F(ParseTokenFileFixture, FailsWhenTheFileHasOnlyEmptyLines)
 {
     write_token_file("\n\n");
 
-    ASSERT_FALSE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_FALSE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, IsEmpty());
     ASSERT_THAT(dst_hdrs, IsEmpty());
 }
@@ -102,7 +100,7 @@ TEST_F(ParseTokenFileFixture, FailsWhenTheFileIsEmpty)
 {
     write_token_file("");
 
-    ASSERT_FALSE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_FALSE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, IsEmpty());
     ASSERT_THAT(dst_hdrs, IsEmpty());
 }
@@ -111,7 +109,7 @@ TEST_F(ParseTokenFileFixture, SetsBothAuthorizationHeadersWhenTheJsonHasSrcAndDs
 {
     write_token_file(R"({ "src": "TokenA", "dst": "TokenB" })");
 
-    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, ElementsAre(Pair("Authorization"s, "Bearer TokenA"s)));
     ASSERT_THAT(dst_hdrs, ElementsAre(Pair("Authorization"s, "Bearer TokenB"s)));
 }
@@ -120,7 +118,7 @@ TEST_F(ParseTokenFileFixture, SetsOnlyTheSourceAuthorizationHeaderWhenTheJsonHas
 {
     write_token_file(R"({ "src": "TokenA" })");
 
-    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, ElementsAre(Pair("Authorization"s, "Bearer TokenA"s)));
     ASSERT_THAT(dst_hdrs, IsEmpty());
 }
@@ -129,7 +127,7 @@ TEST_F(ParseTokenFileFixture, SetsOnlyTheDestinationAuthorizationHeaderWhenTheJs
 {
     write_token_file(R"({ "dst": "TokenB" })");
 
-    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, IsEmpty());
     ASSERT_THAT(dst_hdrs, ElementsAre(Pair("Authorization"s, "Bearer TokenB"s)));
 }
@@ -138,7 +136,7 @@ TEST_F(ParseTokenFileFixture, SetsOnlyTheSourceAuthorizationHeaderWhenTheJsonDst
 {
     write_token_file(R"({ "src": "TokenA", "dst": 1234 })");
 
-    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, ElementsAre(Pair("Authorization"s, "Bearer TokenA"s)));
     ASSERT_THAT(dst_hdrs, IsEmpty());
 }
@@ -147,7 +145,7 @@ TEST_F(ParseTokenFileFixture, SetsOnlyTheDestinationAuthorizationHeaderWhenTheJs
 {
     write_token_file(R"({ "src": 1234, "dst": "TokenB" })");
 
-    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_TRUE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, IsEmpty());
     ASSERT_THAT(dst_hdrs, ElementsAre(Pair("Authorization"s, "Bearer TokenB"s)));
 }
@@ -156,7 +154,7 @@ TEST_F(ParseTokenFileFixture, FailsWhenTheJsonHasNeitherSrcNorDst)
 {
     write_token_file(R"({ "token": "TokenA" })");
 
-    ASSERT_FALSE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_FALSE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, IsEmpty());
     ASSERT_THAT(dst_hdrs, IsEmpty());
 }
@@ -165,7 +163,7 @@ TEST_F(ParseTokenFileFixture, FailsWhenTheJsonSrcIsNotAString)
 {
     write_token_file(R"({ "src": 1234 })");
 
-    ASSERT_FALSE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_FALSE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, IsEmpty());
     ASSERT_THAT(dst_hdrs, IsEmpty());
 }
@@ -174,7 +172,7 @@ TEST_F(ParseTokenFileFixture, FailsWhenTheJsonSrcIsEmpty)
 {
     write_token_file(R"({ "src": "" })");
 
-    ASSERT_FALSE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_FALSE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, IsEmpty());
     ASSERT_THAT(dst_hdrs, IsEmpty());
 }
@@ -183,7 +181,7 @@ TEST_F(ParseTokenFileFixture, FailsWhenTheJsonDstIsNotAString)
 {
     write_token_file(R"({ "dst": 1234 })");
 
-    ASSERT_FALSE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_FALSE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, IsEmpty());
     ASSERT_THAT(dst_hdrs, IsEmpty());
 }
@@ -192,7 +190,7 @@ TEST_F(ParseTokenFileFixture, FailsWhenTheJsonDstIsEmpty)
 {
     write_token_file(R"({ "dst": "" })");
 
-    ASSERT_FALSE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs, XrdCl::DefaultEnv::GetLog()));
+    ASSERT_FALSE(ParseTokenFile(token_file_path, src_hdrs, dst_hdrs));
     ASSERT_THAT(src_hdrs, IsEmpty());
     ASSERT_THAT(dst_hdrs, IsEmpty());
 }

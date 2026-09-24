@@ -5,18 +5,24 @@ if [[ -n "${BINARY_DIR:-}" ]]; then
     export PATH="${BINARY_DIR}/bin:${PATH}"
 fi
 
-# Start xrootd in the background and wait until it has completed its
-# initialization, so that a test never races with the server startup.
+# Start xrootd and wait until it has completed its initialization, so that a
+# test never races with the server startup. xrootd runs in the foreground, as a
+# child of the test shell, so that kill_pid_files can wait for its exit.
 launch_xrootd() {
     local config=$1
     local name=$2
     local log="$BATS_TEST_TMPDIR/$name.log"
-    local pidfile="$BATS_TEST_TMPDIR/$name.pid"
+    local pid
 
     pushd "$(pwd)" 1>/dev/null
     cd "$BATS_TEST_TMPDIR"
+    # bats waits for the standard streams and fd 3 to close, thus the server
+    # must not keep them open
     BATS_TEST_DIRNAME=${BATS_TEST_DIRNAME} BATS_SUITE_TMPDIR=${BATS_SUITE_TMPDIR} NAME=$name \
-        xrootd -b -c "${BATS_TEST_DIRNAME}/$config" -l "$name.log" -s "$name.pid"
+        xrootd -c "${BATS_TEST_DIRNAME}/$config" -l "$name.log" -s "$name.pid" \
+        </dev/null >"$name.stdout.log" 2>&1 3>&- &
+    pid=$!
+    XROOTD_PIDS+=("$pid")
     popd 1>/dev/null
 
     # xrootd logs one of these lines at the end of its configuration; the
@@ -30,8 +36,8 @@ launch_xrootd() {
             break
         fi
 
-        # the pid file exists but the daemon is gone
-        if [[ -s "$pidfile" ]] && ! is_running "$(<"$pidfile")"; then
+        # the server exited before it logged the result
+        if ! jobs -rp | grep -qx "$pid"; then
             break
         fi
 
@@ -55,44 +61,22 @@ print_log_files() {
     fi
 }
 
-# Return success if the process exists and has not exited. A daemon which
-# exited stays a zombie until its parent reaps it, and in a container the
-# parent of a daemon may be a PID 1 which never does, thus kill -0 alone
-# would report it as running.
-is_running() {
-    local pid=$1 stat
-
-    if [[ -d /proc ]]; then
-        stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
-        # the state follows the command name, which is in parentheses
-        stat=${stat##*) }
-        [[ ${stat%% *} != Z ]]
-    else
-        stat=$(ps -o stat= -p "$pid" 2>/dev/null) || return 1
-        [[ -n "$stat" && $stat != Z* ]]
-    fi
-}
-
-# Stop every daemon started by the test and wait until it exits, so that the
-# next test can bind the same ports.
+# Stop every server started by the test. wait returns only once the whole
+# process has exited, thus closed its sockets, so the next test can bind the
+# same ports at once.
+#
+# Teardown runs on a normal exit, on Ctrl-C, and on a CTest timeout. A SIGTERM
+# or SIGKILL sent only to the top bats process leaves the servers running,
+# since bats then deletes its run directory and cannot run teardown. To stop a
+# run, signal its whole process group, as Ctrl-C does.
 kill_pid_files() {
     local pid
 
-    # xrootd writes its pid both to the file given with -s and to all.pidpath,
-    # without a newline, thus awk rather than cat
-    for pid in $(find "$BATS_TEST_TMPDIR" -name '*.pid' -type f -exec awk '{ print }' {} + | sort -u); do
-        [[ "$pid" =~ ^[0-9]+$ ]] && is_running "$pid" || continue
-
+    for pid in "${XROOTD_PIDS[@]}"; do
         kill "$pid" 2>/dev/null
-
-        for _ in {1..100}; do
-            is_running "$pid" || break
-            sleep 0.05
-        done
-
-        # the graceful shutdown timed out
-        is_running "$pid" && kill -9 "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null
     done
+    XROOTD_PIDS=()
 
     find "$BATS_TEST_TMPDIR" -name '*.pid' -type f -delete
 

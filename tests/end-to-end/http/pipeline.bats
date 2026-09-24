@@ -1,54 +1,121 @@
 #!/usr/bin/env bash
 
-# HTTP/1.1 pipelining: a client sends the next request before it gets the
-# response to the last one, thus the server finds the next request in its
-# buffer when a request ends. The pull of XrdHttpTPC with more than one
-# stream sends its requests in this way with libcurl before 7.62.0. The tests
-# use a redirector, which ends each request with a redirect.
+# HTTP/1.1 lets a client send several requests on a connection without a wait
+# for each response (pipelining). The server must answer all of them in order,
+# also when the requests arrive together in one read. The pull of XrdHttpTPC
+# with more than one stream sent its requests in this way with libcurl before
+# 7.62.0. The tests share the servers: a data server, and a redirector, which
+# ends each request with a redirect.
 
 load ../setup/server.bash
 
 setup_file() {
     require_plugin libXrdHttp
-    require_commands python3
     cd "$BATS_FILE_TMPDIR"
 
+    start_server http.cfg
     start_server rdr http.cfg pipeline-rdr.cfg
+
+    printf '0123456789' > "$SERVER_DATA/file"
+}
+
+setup() {
+    requests=
 }
 
 teardown_file() {
     stop_servers
 }
 
-# pipeline <port> <count> <request>
-#
-# Send <count> copies of the request (a printf format) on one connection, in
-# one write, and print the status of each response
-pipeline() {
-    local port=$1 count=$2 request=$3 i
+# Append a request for the given method and path to $requests. The extra
+# headers may use \r\n escapes. The last request of a pipeline closes the
+# connection, so that the read of the responses ends.
+request() {
+    local method=$1 path=$2 extra=${3:-} body=${4:-} r
 
-    for (( i = 0; i < count; i++ )); do
-        # shellcheck disable=SC2059 # the argument is the format
-        printf "$request"
-    done | python3 "$BATS_TEST_DIRNAME/pipeline.py" localhost "$port" "$count"
+    printf -v r '%s %s HTTP/1.1\r\nHost: localhost\r\n%b\r\n%s' "$method" "$path" "$extra" "$body"
+    requests+=$r
 }
 
-readonly GET='GET /file HTTP/1.1\r\nHost: localhost\r\n\r\n'
-readonly GET_RANGE='GET /file HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1024-2047\r\n\r\n'
-readonly HEAD='HEAD /file HTTP/1.1\r\nHost: localhost\r\n\r\n'
+# pipeline <port>
+#
+# Send $requests in one write and print the status codes received before the
+# server closes the connection, or before a timeout. A status line may follow
+# a response body without a newline, thus grep -o rather than a line match.
+pipeline() {
+    exec 3<>"/dev/tcp/localhost/$1"
+    printf '%s' "$requests" >&3
+    timeout 10 cat <&3 | grep -ao 'HTTP/1\.1 [0-9]\{3\}' | cut -d' ' -f2 || true
+    exec 3<&-
+}
+
+@test "two pipelined GET requests get two responses" {
+    request GET /file 'Range: bytes=0-4\r\n'
+    request GET /file 'Range: bytes=5-9\r\nConnection: close\r\n'
+    run -0 pipeline "$SERVER_PORT"
+    assert_output $'206\n206'
+}
+
+@test "sixteen pipelined GET requests get sixteen responses" {
+    for _ in {1..15}; do
+        request GET /file 'Range: bytes=0-4\r\n'
+    done
+    request GET /file 'Range: bytes=0-4\r\nConnection: close\r\n'
+    run -0 pipeline "$SERVER_PORT"
+    assert_equal "$(grep -c '^206$' <<< "$output")" 16
+}
+
+@test "a GET pipelined after a HEAD request gets a response" {
+    request HEAD /file
+    request GET /file 'Connection: close\r\n'
+    run -0 pipeline "$SERVER_PORT"
+    assert_output $'200\n200'
+}
+
+@test "a GET pipelined after a DELETE request gets a response" {
+    printf 'x' > "$SERVER_DATA/removed"
+    request DELETE /removed
+    request GET /file 'Connection: close\r\n'
+    run -0 pipeline "$SERVER_PORT"
+    assert_output $'200\n200'
+}
+
+@test "a GET pipelined after an OPTIONS request gets a response" {
+    request OPTIONS /file
+    request GET /file 'Connection: close\r\n'
+    run -0 pipeline "$SERVER_PORT"
+    assert_output $'200\n200'
+}
+
+@test "a GET pipelined after a PUT gets a response" {
+    request PUT /new 'Content-Length: 5\r\n' abcde
+    request GET /new 'Connection: close\r\n'
+    run -0 pipeline "$SERVER_PORT"
+    assert_line --index 0 --regexp '^20[01]$'
+    assert_line --index 1 '200'
+}
 
 @test "a redirector redirects each GET of a pipeline" {
-    run -0 pipeline "$RDR_PORT" 3 "$GET"
+    request GET /file
+    request GET /file
+    request GET /file 'Connection: close\r\n'
+    run -0 pipeline "$RDR_PORT"
     assert_output $'302\n302\n302'
 }
 
-# Without the fix, the redirector answered the second GET with 416
+# The redirector answered the second GET with 416
 @test "a redirector redirects each GET with a range of a pipeline" {
-    run -0 pipeline "$RDR_PORT" 3 "$GET_RANGE"
+    request GET /file 'Range: bytes=0-4\r\n'
+    request GET /file 'Range: bytes=5-9\r\n'
+    request GET /file 'Range: bytes=0-4\r\nConnection: close\r\n'
+    run -0 pipeline "$RDR_PORT"
     assert_output $'302\n302\n302'
 }
 
 @test "a redirector redirects each HEAD of a pipeline" {
-    run -0 pipeline "$RDR_PORT" 3 "$HEAD"
+    request HEAD /file
+    request HEAD /file
+    request HEAD /file 'Connection: close\r\n'
+    run -0 pipeline "$RDR_PORT"
     assert_output $'307\n307\n307'
 }

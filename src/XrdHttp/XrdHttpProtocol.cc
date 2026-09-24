@@ -397,6 +397,23 @@ BIO *XrdHttpProtocol::CreateBIO(XrdLink *lp)
 
 int XrdHttpProtocol::Process(XrdLink *lp) // We ignore the argument here
 {
+  int rc = ProcessRequest(lp);
+
+  // An HTTP/1.1 client may send the next requests before it gets a response
+  // (pipelining), so they can already be in the buffer. The poller calls us
+  // only for new data on the socket, thus run them now. A request which uses
+  // the bridge returns 0 instead, and the bridge calls us again when it ends.
+  while (rc > 0 && CurrentReq.request == XrdHttpReq::rtUnset && BuffUsed() > 0) {
+    const int used = BuffUsed();
+    rc = ProcessRequest(nullptr);
+    if (BuffUsed() == used) break; // not a complete line yet; wait for data
+  }
+
+  return rc;
+}
+
+int XrdHttpProtocol::ProcessRequest(XrdLink *lp)
+{
   int rc = 0;
 
   TRACEI(DEBUG, " Process. lp:"<<(void *)lp<<" reqstate: "<<CurrentReq.reqstate);
@@ -505,8 +522,10 @@ int XrdHttpProtocol::Process(XrdLink *lp) // We ignore the argument here
       if (BuffUsed() < ResumeBytes) return 1;
 
 
-    } else
+    } else if (CurrentReq.request != XrdHttpReq::rtUnset) {
+      // Advance the request, unless it ended and the buffer holds the next one
       CurrentReq.reqstate++;
+    }
   } else if (!DoneSetInfo && !CurrentReq.userAgent().empty()) { // DoingLogin is true, meaning the login finished.
     std::string mon_info = "monitor info " + CurrentReq.userAgent();
     DoneSetInfo = true;

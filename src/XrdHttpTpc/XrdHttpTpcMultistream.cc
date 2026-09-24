@@ -299,7 +299,9 @@ int TPCHandler::RunCurlWithStreamsImpl(XrdHttpExtReq &req, State &state,
     MultiCurlHandler mch(handles, m_log);
     CURLM *multi_handle = mch.Get();
 
-    curl_multi_setopt(multi_handle, CURLMOPT_PIPELINING, 1);
+    // Never pipeline HTTP/1.1 requests: many servers mishandle it, and libcurl
+    // >= 7.62 ignores it anyway. Extra requests wait for a free connection.
+    curl_multi_setopt(multi_handle, CURLMOPT_PIPELINING, CURLPIPE_MULTIPLEX);
     curl_multi_setopt(multi_handle, CURLMOPT_MAX_HOST_CONNECTIONS, streams);
 
     // Start response to client prior to the first call to curl_multi_perform

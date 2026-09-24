@@ -1,4 +1,6 @@
 add_bats_test(XrdCl::tpc-http-bigfiles bigfiles.bats)
+# copies 3 files of up to 25 GB in 12 ways, which takes minutes in CI
+set_tests_properties(XrdCl::tpc-http-bigfiles PROPERTIES TIMEOUT 600)
 add_bats_test(XrdCl::tpc-http-https https.bats)
 add_bats_test(XrdCl::tpc-http-plain plain.bats)
 add_bats_test(XrdCl::tpc-http-protocol protocol.bats)

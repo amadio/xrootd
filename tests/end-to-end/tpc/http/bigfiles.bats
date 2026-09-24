@@ -42,20 +42,14 @@ teardown() {
 }
 
 @test "pull copy with 10 streams transfers a 1GB file" {
-	skip "known bug: the pull copy with --streams for big files fails - event=MULTISTREAM_FAIL"
-
 	run -0 xrdcp --streams 10 -T only http://${XROOTD_SRC}//file_1gb http://${XROOTD_DST}//file_dst
 }
 
 @test "pull copy with 10 streams transfers a 10GB file" {
-	skip "known bug: the pull copy with --streams for big files fails - event=MULTISTREAM_FAIL"
-
 	run -0 xrdcp --streams 10 -T only http://${XROOTD_SRC}//file_10gb http://${XROOTD_DST}//file_dst
 }
 
 @test "pull copy with 10 streams transfers a 25GB file" {
-	skip "known bug: the pull copy with --streams for big files fails - event=MULTISTREAM_FAIL"
-
 	run -0 xrdcp --streams 10 -T only http://${XROOTD_SRC}//file_25gb http://${XROOTD_DST}//file_dst
 }
 

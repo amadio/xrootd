@@ -203,7 +203,8 @@ private:
 
     // 16 blocks in flight at 16 MB each, meaning that there will be up to 256MB
     // in flight; this is equal to the bandwidth delay product of a 200ms transcontinental
-    // connection at 10Gbps.
+    // connection at 10Gbps. The requests beyond one per stream wait in libcurl
+    // for a free connection; they are not pipelined.
     static const int m_pipelining_multiplier = 16;
 
     bool usingEC; // indicate if XrdEC is used

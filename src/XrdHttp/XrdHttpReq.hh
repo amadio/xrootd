@@ -163,6 +163,11 @@ private:
   ///  -1->error
   int PostProcessHTTPReq(bool final = false);
 
+  /// Return value of ProcessHTTPReq after the last bridge request of an HTTP
+  /// request. Ask to be invoked again once it completes only if the client
+  /// already sent the next request (pipelining), which the buffer holds.
+  int LastBridgeRequest() const;
+
   // Parse a resource string, typically a filename, setting the resource field and the opaque data
   void parseResource(char *url);
 

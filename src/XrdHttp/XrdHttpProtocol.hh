@@ -144,6 +144,9 @@ public:
 
 private:
 
+  /// Process one request, or one step of it. Process() calls it again while
+  /// requests which the client pipelined wait in the buffer.
+  int ProcessRequest(XrdLink *lp);
 
   /// The resume function
   int (XrdHttpProtocol::*Resume)();

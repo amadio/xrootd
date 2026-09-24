@@ -1293,8 +1293,8 @@ int XrdHttpReq::ProcessHTTPReq() {
               return -1;
             }
 
-            // We don't want to be invoked again after this request is finished
-            return 1;
+            // The last bridge request; invoked again only for a pipelined request
+            return LastBridgeRequest();
           }
           else {
             reqstate += 1;
@@ -1332,7 +1332,7 @@ int XrdHttpReq::ProcessHTTPReq() {
 
             // We have finished
             readClosing = true;
-            return 1;
+            return LastBridgeRequest();
 
           }
           // --------- READ or READV
@@ -1590,7 +1590,7 @@ int XrdHttpReq::ProcessHTTPReq() {
           }
 
           // We have finished
-          return 1;
+          return LastBridgeRequest();
 
         }
 
@@ -1666,8 +1666,8 @@ int XrdHttpReq::ProcessHTTPReq() {
           }
 
 
-          // We don't want to be invoked again after this request is finished
-          return 1;
+          // The last bridge request; invoked again only for a pipelined request
+          return LastBridgeRequest();
 
       }
 
@@ -1726,8 +1726,8 @@ int XrdHttpReq::ProcessHTTPReq() {
 
 
           if (depth == 0) {
-            // We don't need to be invoked again
-            return 1;
+            // The last bridge request; invoked again only for a pipelined request
+            return LastBridgeRequest();
           } else
             // We need to be invoked again to complete the request
             return 0;
@@ -1756,8 +1756,8 @@ int XrdHttpReq::ProcessHTTPReq() {
             return -1;
           }
 
-          // We don't want to be invoked again after this request is finished
-          return 1;
+          // The last bridge request; invoked again only for a pipelined request
+          return LastBridgeRequest();
         }
       }
 
@@ -1782,8 +1782,8 @@ int XrdHttpReq::ProcessHTTPReq() {
         return -1;
       }
 
-      // We don't want to be invoked again after this request is finished
-      return 1;
+      // The last bridge request; invoked again only for a pipelined request
+      return LastBridgeRequest();
     }
     case XrdHttpReq::rtMOVE:
     {
@@ -1827,8 +1827,8 @@ int XrdHttpReq::ProcessHTTPReq() {
         return -1;
       }
 
-      // We don't want to be invoked again after this request is finished
-      return 1;
+      // The last bridge request; invoked again only for a pipelined request
+      return LastBridgeRequest();
     }
     default:
     {
@@ -2190,6 +2190,10 @@ void XrdHttpReq::setTransferStatusHeader(std::string &header) {
 }
 
 // This is invoked by the callbacks, after something has happened in the bridge
+
+int XrdHttpReq::LastBridgeRequest() const {
+  return prot->BuffUsed() > 0 ? 0 : 1;
+}
 
 int XrdHttpReq::PostProcessHTTPReq(bool final_) {
 

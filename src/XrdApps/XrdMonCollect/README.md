@@ -1933,7 +1933,7 @@ UDP datagrams:
 | Buffer | Directive option | Default | Streams |
 | :-- | :-- | :-- | :-- |
 | trace buffer | `mbuff <sz>` | 16K | `t` (I/O traces) |
-| fstat buffer | `fbsz <sz>` | **65472** | `f` (open/close/xfr) |
+| fstat buffer | `fbsz <sz>` | **65472** (minimum 1024) | `f` (open/close/xfr) |
 | redirect buffer | `rbuff <sz>` | 32K | `r` (redirects) |
 | g-stream buffer | `gbuff <sz>` | 32K | `g` (pfc/tpc/oss/... plugin records) |
 

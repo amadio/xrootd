@@ -225,6 +225,11 @@ multiple frames.
 > whole datagram. That is precisely the stream the file operation documents are built
 > from. Set `fbsz` explicitly on such servers.
 
+> **A floor, too.** The minimum `fbsz` is **1024 bytes**. The server truncates
+> the lfn in an open record so that the record fits the buffer: 963 bytes for
+> `fbsz 1024`. With the default `fbsz`, a path of up to 4096 bytes is not
+> truncated.
+
 > **IPv6 pitfall:** buffer sizes chosen against the IPv4 limit — `1472` is a
 > popular choice — exceed the IPv6 payload limit by 20 bytes, so on an IPv6
 > path *every full packet* is fragmented into a 1452-byte fragment plus a tiny

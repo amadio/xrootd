@@ -769,14 +769,15 @@ server's own \fBservice.namespace\fR and of the collector's \fB--site\fR.
 The monitor streams are UDP: a datagram larger than the path MTU is fragmented
 at the IP layer and the loss of any one fragment drops the whole datagram.
 Keep \fIevery\fR stream buffer at or below the MTU: \fBmbuff\fR (trace),
-\fBfbsz\fR (fstat, \fBdefault 65472\fR), \fBrbuff\fR (redirect, default 32K)
+\fBfbsz\fR (fstat, \fBdefault 65472\fR, minimum 1024), \fBrbuff\fR
+(redirect, default 32K)
 and \fBgbuff\fR (g-stream, default 32K) — 1472 for a 1500-byte IPv4 path, 1452
 for IPv6. Note that before XRootD 6.1 \fBfbsz\fR does \fInot\fR follow
 \fBmbuff\fR: setting \fBmbuff 1472\fR alone still emits ~64K fstat datagrams
 (~44 fragments each), which is the stream the file operation documents are built
 from — set \fBfbsz\fR explicitly on such servers. Do not go far below the MTU
-either: a single fstat record (a close with a long LFN and an error message)
-must fit the buffer or the server drops it.
+either: the server truncates the lfn in an open record so that the record fits
+the buffer, which gives 963 bytes for \fBfbsz 1024\fR.
 .P
 \fBflush\fR/\fBfstat\fR/\fBwindow\fR bound latency, not loss: smaller buffers
 just flush more often. In the collector's metrics,

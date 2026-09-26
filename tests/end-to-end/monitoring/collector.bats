@@ -350,6 +350,50 @@ sys.exit(1 if bad else 0)
     assert_regex "$output" '"xrootd.error.code":3003'
 }
 
+@test "a path longer than an fstat record gives a prefix of the path and the server stays up" {
+    # The server clamps the lfn and does not write past the end of the report
+    # buffer, which collector.cfg keeps at the minimum (fbsz 1024). The lfn
+    # can then have at most 963 bytes. The path has nested components, each
+    # shorter than NAME_MAX: one long component fails the open with
+    # ENAMETOOLONG, and the open never reaches the monitoring.
+    local seg deep=$DIR pmax local_path lfn path
+    seg=$(printf 'd%.0s' {1..250})
+    for _ in 1 2 3 4 5; do
+        deep="$deep/$seg"
+    done
+
+    # The oss refuses a physical path of PATH_MAX bytes or more. PATH_MAX is
+    # 1024 on macOS, less than this lfn alone.
+    pmax=$(getconf PATH_MAX / 2>/dev/null || echo 4096)
+    local_path="$SERVER_DATA$deep/deep.ref"
+    (( ${#local_path} < pmax )) || skip "the local path has ${#local_path} bytes, PATH_MAX is $pmax"
+    assert [ "${#deep}" -gt 963 ]
+
+    xrdfs "$SERVER_URL" mkdir -p "$deep"
+    drive_until "\"file.path\":\"$DIR/$seg" "$SUCCESSFUL" -- xrdcp -f ok.ref "$SERVER_URL/$deep/deep.ref"
+
+    # a record that overflowed the report buffer used to stop the server
+    run -0 xrdfs "$SERVER_URL" query config version
+
+    # The lfn of the close document comes from the open record on the
+    # f-stream, which clamps it to fit an empty buffer.
+    run -0 document "\"file.path\":\"$DIR/$seg" "$SUCCESSFUL"
+    lfn=$(sed -E 's/.*"file\.path":"([^"]*)".*/\1/' <<< "$output")
+    assert [ "${#lfn}" -le 963 ]
+    assert_equal "$lfn" "${deep:0:${#lfn}}"
+
+    # Each reported path is a prefix of the real path. The length of the
+    # dictionary record on the main stream once came from the path before
+    # the clamp, which put bytes of the stack on the wire: a reported path
+    # longer than any copied path.
+    while read -r path; do
+        assert_equal "$path" "${deep:0:${#path}}"
+    done < <(grep -oE "\"file\.path\":\"$DIR/$seg[^\"]*" "$COLLECTOR_OUT" | sed -E 's/^"file\.path":"//' | sort -u)
+
+    # a wrong recSize is how an overrun of the buffer looks to the collector
+    run -1 grep -q '"reason":"bad_record"' "$COLLECTOR_OUT"
+}
+
 @test "the collector loads the filter rules of its configuration" {
     run -0 grep -Eq '2 filter rule\(s\) loaded \(1 tag, 1 drop, 0 keep\)' "$COLLECTOR_LOG"
 }

@@ -10,6 +10,7 @@
 #include "XrdSys/XrdSysPthread.hh"
 
 #include <list>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -18,6 +19,7 @@ class XrdOss;
 
 namespace XrdPfc {
 
+class CacheMetrics;
 struct DataFsState;
 struct DirState;
 struct DirStateElement;
@@ -125,6 +127,8 @@ class ResourceMonitor
 
    DataFsState &m_fs_state;
    XrdOss      &m_oss;
+
+   std::unique_ptr<CacheMetrics> m_metrics; // owned "cache" group instruments
 
    // Requests for File opens during name-space scans. Such LFNs are processed
    // with some priority

@@ -745,10 +745,8 @@ int XrdOfsFile::open(const char          *path,      // In
        FTRACE(open, "attach use=" <<oh->Usage());
        if (oP.poscNum > 0) XrdOfsFS->poscQ->Commit(path, oP.poscNum);
        oP.hP->UnLock();
-       OfsStats.sdMutex.Lock();
        isRW ? OfsStats.Data.numOpenW++ : OfsStats.Data.numOpenR++;
        if (oP.poscNum > 0) OfsStats.Data.numOpenP++;
-       OfsStats.sdMutex.UnLock();
        return oP.OK();
       }
 
@@ -839,10 +837,8 @@ int XrdOfsFile::open(const char          *path,      // In
 
 // Maintain statistics
 //
-   OfsStats.sdMutex.Lock();
    isRW ? OfsStats.Data.numOpenW++ : OfsStats.Data.numOpenR++;
    if (oP.poscNum > 0) OfsStats.Data.numOpenP++;
-   OfsStats.sdMutex.UnLock();
 
 // All done
 //
@@ -938,12 +934,10 @@ int XrdOfsFile::close()  // In
 
 // Maintain statistics
 //
-   OfsStats.sdMutex.Lock();
    if (!(hP->isRW)) OfsStats.Data.numOpenR--;
       else {OfsStats.Data.numOpenW--;
             if (hP->isRW == XrdOfsHandle::opPC) OfsStats.Data.numOpenP--;
            }
-   OfsStats.sdMutex.UnLock();
 
 // Do an fsync() on this file prior to closing if it was open r/w
 //
@@ -2973,7 +2967,7 @@ void XrdOfs::Unpersist(XrdOfsHandle *oh, int xcev)
 
 // Count this
 //
-   OfsStats.Add(OfsStats.Data.numUnpsist);
+   OfsStats.Data.numUnpsist++;
 
 // Now unpersist the file
 //

@@ -76,7 +76,9 @@ void          TimeSched();
 
 void          setNproc(const bool limlower);
 
-// Statistical information
+// Statistical information. These stay plain ints in their historical layout
+// (the installed header is an ABI contract); the XrdMetrics registry exposes
+// them read-only via observed metrics registered in Init.
 //
 int        num_TCreate; // Number of threads created
 int        num_TDestroy;// Number of threads destroyed

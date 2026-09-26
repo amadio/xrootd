@@ -51,6 +51,7 @@
 
 #endif
 
+#include "XrdMetrics/XrdMetricsRegistry.hh"
 #include "XrdSys/XrdSysAtomics.hh"
 #include "XrdSys/XrdSysError.hh"
 #include "XrdSys/XrdSysFD.hh"
@@ -1096,7 +1097,34 @@ int XrdLinkXeq::Stats(char *buff, int blen, bool do_sync)
    AtomicEnd(statsMutex);
    return i;
 }
-  
+
+/******************************************************************************/
+/*                       R e g i s t e r M e t r i c s                        */
+/******************************************************************************/
+
+void XrdLinkXeq::RegisterMetrics()
+{
+   XrdMetrics::Subsystem& subsystem = XrdMetrics::Default().subsystem("link");
+
+   subsystem.observeGauge<std::int64_t>("connections", "current open connections")
+    .add({}, []{return (int64_t)AtomicGet(LinkCount);});
+   subsystem.observeGauge<std::int64_t>("connections_max", "peak concurrent connections")
+    .add({}, []{return (int64_t)AtomicGet(LinkCountMax);});
+   subsystem.observeCounter<std::uint64_t>("connections_total", "connections accepted")
+    .add({}, []{return (uint64_t)AtomicGet(LinkCountTot);});
+   subsystem.observeCounter<std::uint64_t>("bytes_total", "bytes transferred over links", {}, {"dir"})
+    .add({"in"},  []{return (uint64_t)AtomicGet(LinkBytesIn);})
+    .add({"out"}, []{return (uint64_t)AtomicGet(LinkBytesOut);});
+   subsystem.observeCounter<std::uint64_t>("connect_seconds_total", "accumulated connection time")
+    .add({}, []{return (uint64_t)AtomicGet(LinkConTime);});
+   subsystem.observeCounter<std::uint64_t>("timeouts_total", "link timeouts")
+    .add({}, []{return (uint64_t)AtomicGet(LinkTimeOuts);});
+   subsystem.observeCounter<std::uint64_t>("stalls_total", "link stalls")
+    .add({}, []{return (uint64_t)AtomicGet(LinkStalls);});
+   subsystem.observeCounter<std::uint64_t>("sendfile_interrupts_total", "sendfile interrupts")
+    .add({}, []{return (uint64_t)AtomicGet(LinkSfIntr);});
+}
+
 /******************************************************************************/
 /*                             s y n c S t a t s                              */
 /******************************************************************************/

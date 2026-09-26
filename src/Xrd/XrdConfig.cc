@@ -64,6 +64,8 @@
 #include "Xrd/XrdStats.hh"
 #include "Xrd/XrdTrace.hh"
 
+#include "XrdMetrics/XrdMetricsConfig.hh"
+
 #include "XrdNet/XrdNetAddr.hh"
 #include "XrdNet/XrdNetIdentity.hh"
 #include "XrdNet/XrdNetIF.hh"
@@ -540,7 +542,13 @@ int XrdConfig::Configure(int argc, char **argv)
 
 // Set the site name if we have one
 //
-   if (mySitName) mySitName = XrdOucSiteName::Set(mySitName, 63);
+   if (mySitName)
+      {const char *sitArg = mySitName;
+       mySitName = XrdOucSiteName::Set(sitArg, 63);
+       if (strcmp(mySitName, sitArg))
+          Log.Emsg("Config", "sitename contains invalid characters or is too "
+                   "long; using '", mySitName, "'.");
+      }
 
 // Drop into non-privileged state if so requested
 //
@@ -686,6 +694,12 @@ int XrdConfig::Configure(int argc, char **argv)
       {XrdTrace.What = TRACE_ALL;
        XrdSysThread::setDebug(&Log);
       }
+
+// Load the process-wide metrics configuration now: the config file has been
+// parsed but Setup() has not yet created any metric family, so the constant
+// global labels (program/role/cluster) can still be frozen onto the registry.
+//
+   XrdMetrics::Config::Instance().Load(ConfigFN, &Log);
 
 // Setup the admin path now
 //
@@ -2365,7 +2379,11 @@ int XrdConfig::xsit(XrdSysError *eDest, XrdOucStream &Config)
 
     if (mySitName) eDest->Emsg("Config", "sitename already specified, using '",
                                mySitName, "'.");
-       else mySitName = XrdOucSiteName::Set(val, 63);
+       else {mySitName = XrdOucSiteName::Set(val, 63);
+             if (strcmp(mySitName, val))
+                eDest->Emsg("Config", "sitename contains invalid characters or "
+                            "is too long; using '", mySitName, "'.");
+            }
     return 0;
 }
 

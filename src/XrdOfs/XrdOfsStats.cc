@@ -27,47 +27,69 @@
 /* specific prior written permission of the institution or contributor.       */
 /******************************************************************************/
 
+#include <cstdint>
 #include <cstdio>
 
+#include "Xrd/XrdStatsLegacy.hh"
+#include "XrdMetrics/XrdMetricsRegistry.hh"
+#include "XrdMetrics/XrdMetricsSerializer.hh"
 #include "XrdOfs/XrdOfsStats.hh"
+
+/******************************************************************************/
+/*                       R e g i s t e r M e t r i c s                        */
+/******************************************************************************/
+
+// Native, atomic instruments owned by the process-wide registry. Each family is
+// created exactly once (the factories do not deduplicate by name); multiple
+// series are pulled from the labelled families via labels. The metric
+// names, labels and help are unchanged from the earlier observed version, so the
+// serialized output and the legacy <stats id="ofs"> block are identical.
+//
+XrdOfsStats::StatsData XrdOfsStats::RegisterMetrics()
+{
+   XrdMetrics::Subsystem& subsystem = XrdMetrics::Default().subsystem("ofs");
+
+   auto& filesOpen = subsystem.gaugeFamily<std::int64_t>("files_open", "currently open files", {"mode"});
+   auto& events    = subsystem.counterFamily<std::uint64_t>("events_total", "scheduled event outcomes", {"result"});
+   auto& tpc       = subsystem.counterFamily<std::uint64_t>("tpc_total", "third-party-copy outcomes", {"result"});
+
+   return StatsData
+   {
+      filesOpen.labels({"read"}),
+      filesOpen.labels({"write"}),
+      filesOpen.labels({"posc"}),
+      subsystem.gauge<std::int64_t>("handles", "active file handles"),
+      subsystem.counter<std::uint64_t>("unpersisted_total", "posc files not persisted"),
+      subsystem.counter<std::uint64_t>("redirects_total", "redirects issued"),
+      subsystem.counter<std::uint64_t>("started_total", "background ops started"),
+      subsystem.counter<std::uint64_t>("replies_total", "direct data replies"),
+      subsystem.counter<std::uint64_t>("errors_total", "errors returned"),
+      subsystem.counter<std::uint64_t>("delays_total", "delays returned"),
+      events.labels({"ok"}),
+      events.labels({"error"}),
+      tpc.labels({"granted"}),
+      tpc.labels({"denied"}),
+      tpc.labels({"error"}),
+      tpc.labels({"expired"})
+   };
+}
 
 /******************************************************************************/
 /*                                R e p o r t                                 */
 /******************************************************************************/
-  
+
+// The <stats id="ofs"> block is now produced from the XrdMetrics registry by
+// XrdStatsLegacy; the metrics registered above observe this instance's Data.
+//
 int XrdOfsStats::Report(char *buff, int blen)
 {
-    static const char stats1[] = "<stats id=\"ofs\"><role>%s</role>"
-           "<opr>%d</opr><opw>%d</opw><opp>%d</opp><ups>%d</ups><han>%d</han>"
-           "<rdr>%d</rdr><bxq>%d</bxq><rep>%d</rep><err>%d</err><dly>%d</dly>"
-           "<sok>%d</sok><ser>%d</ser>"
-           "<tpc><grnt>%d</grnt><deny>%d</deny><err>%d</err><exp>%d</exp></tpc>"
-           "</stats>";
-    static const int  statsz = sizeof(stats1) + (12*10) + 64;
+   XrdMetrics::MetricSnapshot snap;
+   if (buff) XrdMetrics::Default().serialize(snap);
 
-    StatsData myData;
+   const int statsz = XrdStatsLegacy::Ofs(snap, myRole, nullptr, 0);
 
-// If only the size is wanted, return the size
-//
-   if (!buff) return statsz;
+   if (!buff)            return statsz;
+   if (blen  < statsz)   return 0;
 
-// Make sure buffer is large enough
-//
-   if (blen < statsz) return 0;
-
-// Get a copy of the statistics
-//
-   sdMutex.Lock();
-   myData = Data;
-   sdMutex.UnLock();
-
-// Format the buffer
-//
-   return sprintf(buff, stats1, myRole, myData.numOpenR,   myData.numOpenW,
-                    myData.numOpenP,    myData.numUnpsist, myData.numHandles,
-                    myData.numRedirect, myData.numStarted, myData.numReplies,
-                    myData.numErrors,   myData.numDelays,
-                    myData.numSeventOK, myData.numSeventER,
-                    myData.numTPCgrant, myData.numTPCdeny,
-                    myData.numTPCerrs,  myData.numTPCexpr);
+   return XrdStatsLegacy::Ofs(snap, myRole, buff, blen);
 }

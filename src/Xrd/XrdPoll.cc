@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
   
+#include "XrdMetrics/XrdMetricsRegistry.hh"
 #include "XrdSys/XrdSysError.hh"
 #include "XrdSys/XrdSysFD.hh"
 #include "XrdSys/XrdSysPlatform.hh"
@@ -355,6 +356,32 @@ int XrdPoll::Stats(char *buff, int blen, int do_sync)
 // Format and return
 //
    return snprintf(buff, blen, statfmt, numatt, numen, numev, numint);
+}
+
+/******************************************************************************/
+/*                       R e g i s t e r M e t r i c s                        */
+/******************************************************************************/
+
+void XrdPoll::RegisterMetrics()
+{
+   XrdMetrics::Subsystem& subsystem = XrdMetrics::Default().subsystem("poll");
+
+   subsystem.observeGauge<std::int64_t>("attached", "file descriptors attached to pollers")
+    .add({}, []{int64_t t=0; for (int i=0;i<XRD_NUMPOLLERS;i++)
+                                 if (Pollers[i]) t += Pollers[i]->numAttached;
+               return t;});
+   subsystem.observeGauge<std::int64_t>("enabled", "poll enable count")
+    .add({}, []{int64_t t=0; for (int i=0;i<XRD_NUMPOLLERS;i++)
+                                 if (Pollers[i]) t += Pollers[i]->numEnabled;
+               return t;});
+   subsystem.observeCounter<std::uint64_t>("events_total", "poll events dispatched")
+    .add({}, []{uint64_t t=0; for (int i=0;i<XRD_NUMPOLLERS;i++)
+                                  if (Pollers[i]) t += (unsigned)Pollers[i]->numEvents;
+               return t;});
+   subsystem.observeCounter<std::uint64_t>("interrupts_total", "poll interrupts")
+    .add({}, []{uint64_t t=0; for (int i=0;i<XRD_NUMPOLLERS;i++)
+                                  if (Pollers[i]) t += (unsigned)Pollers[i]->numInterrupts;
+               return t;});
 }
   
 /******************************************************************************/

@@ -28,12 +28,16 @@
 /******************************************************************************/
  
 #include <cstdio>
-  
+
 #include "Xrd/XrdStats.hh"
+#include "Xrd/XrdStatsLegacy.hh"
+#include "XrdMetrics/XrdMetricsRegistry.hh"
+#include "XrdMetrics/XrdMetricsSerializer.hh"
 #include "XrdSfs/XrdSfsInterface.hh"
+#include "XrdSys/XrdSysAtomics.hh"
 #include "XrdXrootd/XrdXrootdResponse.hh"
 #include "XrdXrootd/XrdXrootdStats.hh"
- 
+  
 /******************************************************************************/
 /*                           C o n s t r c u t o r                            */
 /******************************************************************************/
@@ -72,6 +76,71 @@ AuthBad  = 0;     // Stats: Number of authentication failures
 aokSCnt  = 0;     // Stats: Number of signature successes
 badSCnt  = 0;     // Stats: Number of signature failures
 ignSCnt  = 0;     // Stats: Number of signature ignored
+
+RegisterMetrics();
+}
+
+/******************************************************************************/
+/*                       R e g i s t e r M e t r i c s                        */
+/******************************************************************************/
+
+void XrdXrootdStats::RegisterMetrics()
+{
+// The xrootd protocol counters keep their existing flat names, so they live in
+// the registry's empty subsystem group (prefix only). Each reader reads the
+// live counter atomically so the value is consistent with the concurrent
+// AtomicInc/AtomicAdd updates on the hot path; the counters themselves remain
+// the source of truth and these only observe them.
+//
+   XrdMetrics::Subsystem& subsystem = XrdMetrics::Default().subsystem("");
+
+   auto& ops = subsystem.observeCounter<std::uint64_t>("ops_total", "xrootd protocol operations", {}, {"op"});
+#define OPS(label, fld) ops.add({label}, [this]{return (uint64_t)AtomicGet(fld);})
+   OPS("open",    openCnt);
+   OPS("read",    readCnt);
+   OPS("preread", prerCnt);
+   OPS("readv",   rvecCnt);
+   OPS("write",   writeCnt);
+   OPS("writev",  wvecCnt);
+   OPS("sync",    syncCnt);
+   OPS("getfile", getfCnt);
+   OPS("putfile", putfCnt);
+   OPS("refresh", Refresh);
+   OPS("misc",    miscCnt);
+#undef OPS
+
+   auto& lgn = subsystem.observeCounter<std::uint64_t>("logins_total", "xrootd login outcomes", {}, {"result"});
+#define LGN(label, fld) lgn.add({label}, [this]{return (uint64_t)AtomicGet(fld);})
+   LGN("attempt",  LoginAT);
+   LGN("auth",     LoginAU);
+   LGN("noauth",   LoginUA);
+   LGN("authfail", AuthBad);
+#undef LGN
+
+   auto& sig = subsystem.observeCounter<std::uint64_t>("signatures_total", "xrootd request signature checks", {}, {"result"});
+#define SIG(label, fld) sig.add({label}, [this]{return (uint64_t)AtomicGet(fld);})
+   SIG("ok",      aokSCnt);
+   SIG("bad",     badSCnt);
+   SIG("ignored", ignSCnt);
+#undef SIG
+
+#define CTR(name, help, fld) \
+   subsystem.observeCounter<std::uint64_t>(name, help) \
+    .add({}, [this]{return (uint64_t)AtomicGet(fld);})
+   CTR("requests_total",        "xrootd protocol requests",      Count);
+   CTR("readv_segments_total",  "readv segments read",           rsegCnt);
+   CTR("writev_segments_total", "writev segments written",       wsegCnt);
+   CTR("async_ops_total",       "asynchronous i/o operations",   AsyncNum);
+   CTR("async_rejected_total",  "rejected asynchronous i/o ops", AsyncRej);
+   CTR("errors_total",          "errors returned to clients",    errorCnt);
+   CTR("redirects_total",       "client redirects issued",       redirCnt);
+   CTR("stalls_total",          "client stalls (delays) issued", stallCnt);
+#undef CTR
+
+// High-water mark of concurrent async i/o operations is a gauge, not a counter.
+//
+   subsystem.observeGauge<std::int64_t>("async_max", "peak concurrent asynchronous i/o ops")
+    .add({}, [this]{return (int64_t)AtomicGet(AsyncMax);});
 }
 
 /******************************************************************************/
@@ -80,46 +149,22 @@ ignSCnt  = 0;     // Stats: Number of signature ignored
   
 int XrdXrootdStats::Stats(char *buff, int blen, int do_sync)
 {
-   static const char statfmt[] = "<stats id=\"xrootd\"><num>%d</num>"
-   "<ops><open>%d</open><rf>%d</rf><rd>%lld</rd><pr>%lld</pr>"
-   "<rv>%lld</rv><rs>%lld</rs>"
-   "<wv>%lld</wv><ws>%lld</ws><wr>%lld</wr>"
-   "<sync>%d</sync><getf>%d</getf><putf>%d</putf><misc>%d</misc></ops>"
-   "<sig><ok>%d</ok><bad>%d</bad><ign>%d</ign></sig>"
-   "<aio><num>%lld</num><max>%d</max><rej>%lld</rej></aio>"
-   "<err>%d</err><rdr>%lld</rdr><dly>%d</dly>"
-   "<lgn><num>%d</num><af>%d</af><au>%d</au><ua>%d</ua></lgn></stats>";
-//                                   1 2 3 4 5 6 7 8
-   static const long long LLMax = 0x7fffffffffffffffLL;
-   static const int       INMax = 0x7fffffff;
+   (void)do_sync;  // the registry readers are atomic; no separate sync needed
    int len;
 
-// If no buffer, caller wants the maximum size we will generate
+// If no buffer, caller wants the maximum size we will generate. The xrootd block
+// is now produced from the XrdMetrics registry by XrdStatsLegacy; the nested
+// filesystem block is still appended here.
 //
    if (!buff)
-      {char dummy[4096]; // Almost any size will do
-       len = snprintf(dummy, sizeof(dummy), statfmt,
-                      INMax, INMax, INMax, LLMax,
-                      LLMax, LLMax, LLMax, LLMax, LLMax, LLMax, INMax, INMax,
-                      INMax, INMax,
-                      INMax, INMax, INMax,
-                      LLMax, INMax, LLMax, INMax, LLMax, INMax,
-                      INMax, INMax, INMax, INMax);
+      {XrdMetrics::MetricSnapshot empty;
+       len = XrdStatsLegacy::Xrootd(empty, 0, 0);
        return len + (fsP ? fsP->getStats(0,0) : 0);
       }
 
-// Format our statistics
-//
-   statsMutex.Lock();
-   len = snprintf(buff, blen, statfmt,
-                  Count,   openCnt, Refresh, readCnt,
-                  prerCnt, rvecCnt, rsegCnt, wvecCnt, wsegCnt, writeCnt,
-                  syncCnt, getfCnt,
-                  putfCnt, miscCnt,
-                  aokSCnt, badSCnt, ignSCnt,
-                  AsyncNum, AsyncMax, AsyncRej, errorCnt, redirCnt, stallCnt,
-                  LoginAT, AuthBad, LoginAU, LoginUA);
-   statsMutex.UnLock();
+   XrdMetrics::MetricSnapshot snap;
+   XrdMetrics::Default().serialize(snap);
+   len = XrdStatsLegacy::Xrootd(snap, buff, blen);
 
 // Now include filesystem statistics and return
 //

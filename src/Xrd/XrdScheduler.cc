@@ -41,6 +41,7 @@
 
 #include "Xrd/XrdJob.hh"
 #include "Xrd/XrdScheduler.hh"
+#include "XrdMetrics/XrdMetricsRegistry.hh"
 #include "XrdOuc/XrdOucTrace.hh"    // For ABI compatibility only!
 #include "XrdSys/XrdSysError.hh"
 #include "XrdSys/XrdSysLogger.hh"
@@ -759,6 +760,30 @@ void XrdScheduler::Init(int minw, int maxw, int maxi)
    num_Limited =  0;
    firstPID    =  0;
    WorkFirst = WorkLast = TimerQueue = 0;
+
+// Wire the scheduler's metrics into the process-wide registry. All the fields
+// stay plain scheduler ints in their historical layout (the installed header
+// is an ABI contract) and are surfaced read-only via observed metrics that
+// read the int at scrape time.
+//
+   XrdMetrics::Subsystem& subsystem = XrdMetrics::Default().subsystem("sched");
+   subsystem.observeCounter<std::uint64_t>("jobs_total", "jobs scheduled")
+     .add({}, [this]{return (uint64_t)num_Jobs;});
+   subsystem.observeCounter<std::uint64_t>("threads_created_total", "worker threads created")
+     .add({}, [this]{return (uint64_t)num_TCreate;});
+   subsystem.observeCounter<std::uint64_t>("threads_destroyed_total", "worker threads destroyed")
+     .add({}, [this]{return (uint64_t)num_TDestroy;});
+   subsystem.observeCounter<std::uint64_t>("thread_limit_hits_total", "times the worker-thread maximum was reached")
+     .add({}, [this]{return (uint64_t)num_Limited;});
+
+   subsystem.observeGauge<std::int64_t>("threads", "worker threads")
+     .add({}, [this]{return (int64_t)num_Workers;});
+   subsystem.observeGauge<std::int64_t>("threads_idle", "idle worker threads")
+     .add({}, [this]{return (int64_t)idl_Workers;});
+   subsystem.observeGauge<std::int64_t>("jobs_in_queue", "jobs waiting in the queue")
+     .add({}, [this]{return (int64_t)num_JobsinQ;});
+   subsystem.observeGauge<std::int64_t>("queue_length_max", "longest queue length seen")
+     .add({}, [this]{return (int64_t)max_QLength;});
 }
 
 /******************************************************************************/

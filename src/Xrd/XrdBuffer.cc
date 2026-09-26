@@ -33,6 +33,7 @@
 #include <cstdlib>
 #include <sys/types.h>
 
+#include "XrdMetrics/XrdMetricsRegistry.hh"
 #include "XrdOuc/XrdOucUtils.hh"
 #include "XrdSys/XrdSysError.hh"
 #include "XrdSys/XrdSysPlatform.hh"
@@ -338,4 +339,34 @@ int XrdBuffManager::Stats(char *buff, int blen, int do_sync)
    nlen = snprintf(buff,blen,statfmt,totreq,totalo,totbuf,totadj,xlStats);
    if (do_sync) Reshaper.UnLock();
    return nlen;
+}
+
+/******************************************************************************/
+/*                              x l S t a t s                                 */
+/******************************************************************************/
+
+int XrdBuffManager::xlStats(char *buff, int blen, int do_sync)
+{
+   if (do_sync) Reshaper.Lock();
+   int nlen = xlBuff.Stats(buff, blen, do_sync);
+   if (do_sync) Reshaper.UnLock();
+   return nlen;
+}
+
+/******************************************************************************/
+/*                       R e g i s t e r M e t r i c s                        */
+/******************************************************************************/
+
+void XrdBuffManager::RegisterMetrics()
+{
+   XrdMetrics::Subsystem& subsystem = XrdMetrics::Default().subsystem("buff");
+
+   subsystem.observeCounter<std::uint64_t>("requests_total", "buffer requests")
+    .add({}, [this]{return (uint64_t)totreq;});
+   subsystem.observeGauge<std::int64_t>("memory_bytes", "memory allocated to buffers")
+    .add({}, [this]{return (int64_t)totalo;});
+   subsystem.observeGauge<std::int64_t>("buffers", "buffers allocated")
+    .add({}, [this]{return (int64_t)totbuf;});
+   subsystem.observeCounter<std::uint64_t>("adjustments_total", "buffer pool reshapes")
+    .add({}, [this]{return (uint64_t)totadj;});
 }

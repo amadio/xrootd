@@ -2,6 +2,8 @@ add_library(XrdAppUtils SHARED
   XrdCpConfig.cc  XrdCpConfig.hh
   XrdCpFile.cc    XrdCpFile.hh
   XrdMpxXml.cc    XrdMpxXml.hh
+  XrdMonCollect/XrdMonDecode.cc  XrdMonCollect/XrdMonDecode.hh
+  XrdMonCollect/XrdMonFilter.cc  XrdMonCollect/XrdMonFilter.hh
 )
 
 target_link_libraries(XrdAppUtils PRIVATE XrdUtils)
@@ -61,6 +63,38 @@ if(NOT XRDCL_ONLY)
     ${SOCKET_LIBRARY}
   )
 
+  find_package(CURL)
+  if(CURL_FOUND)
+    add_executable(xrdmoncollect
+      XrdMonCollect/XrdMonCollect.cc
+      XrdMonCollect/XrdMonForward.cc
+      XrdMonCollect/XrdMonShovel.cc
+      XrdMonCollect/XrdMonTcpServer.cc
+      XrdMonCollect/XrdMonDiskCache.cc
+      XrdMonCollect/XrdMonMemory.cc
+      XrdMonCollect/XrdMonOtlp.cc
+      XrdMonCollect/XrdMonOpenSearch.cc)
+    target_compile_definitions(xrdmoncollect PRIVATE XRDMON_HAVE_CURL)
+    target_link_libraries(xrdmoncollect XrdAppUtils XrdUtils CURL::libcurl Threads::Threads)
+  else()
+    add_executable(xrdmoncollect
+      XrdMonCollect/XrdMonCollect.cc
+      XrdMonCollect/XrdMonForward.cc
+      XrdMonCollect/XrdMonShovel.cc
+      XrdMonCollect/XrdMonTcpServer.cc
+      XrdMonCollect/XrdMonDiskCache.cc
+      XrdMonCollect/XrdMonMemory.cc
+      XrdMonCollect/XrdMonOtlp.cc)
+    target_link_libraries(xrdmoncollect XrdAppUtils XrdUtils Threads::Threads)
+  endif()
+  # Header-only INI parser (vendor/inih) for the optional configuration file.
+  target_include_directories(xrdmoncollect PRIVATE ${CMAKE_SOURCE_DIR}/vendor/inih)
+  # systemd socket activation (sd_listen_fds) and readiness (sd_notify).
+  if(SYSTEMD_FOUND)
+    target_include_directories(xrdmoncollect PRIVATE ${SYSTEMD_INCLUDE_DIRS})
+    target_link_libraries(xrdmoncollect ${SYSTEMD_LIBRARIES})
+  endif()
+
   add_executable(wait41 XrdWait41.cc)
   target_link_libraries(wait41
     XrdUtils
@@ -111,6 +145,7 @@ if(NOT XRDCL_ONLY)
       xrdcks
       xrdcrc32c
       xrdmapc
+      xrdmoncollect
       xrdpinls
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   )

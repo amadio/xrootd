@@ -1,0 +1,226 @@
+{
+  "//": "Composable index template for xrdmoncollect OpenTelemetry documents. Apply with:",
+  "//apply": "curl -XPUT $OS/_index_template/xrootd-file-ops -H 'Content-Type: application/json' -d @opensearch-template.json",
+  "//schema": "Documents follow the OpenTelemetry data model: a process-level 'resource' object and an event-level 'attributes' object, both keyed by dotted semantic-convention names. OpenSearch expands the dots into sub-objects, so 'file.path' indexes as attributes.file.path, etc.",
+  "//datastream": "The data_stream block makes 'xrootd-file-ops' a data stream (append-only, time-series). Drop it for a plain rolling index, and remove --os-datastream from xrdmoncollect.",
+  "index_patterns": ["xrootd-file-ops*"],
+  "data_stream": {},
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index.number_of_shards": 1,
+      "index.number_of_replicas": 1,
+      "index.codec": "best_compression"
+    },
+    "mappings": {
+      "dynamic_templates": [
+        {
+          "strings_as_keyword": {
+            "match_mapping_type": "string",
+            "mapping": { "type": "keyword", "ignore_above": 1024 }
+          }
+        }
+      ],
+      "properties": {
+        "@timestamp":           { "type": "date" },
+        "timeUnixNano":         { "type": "keyword" },
+        "observedTimeUnixNano": { "type": "keyword" },
+        "severityNumber":       { "type": "integer" },
+        "severityText":         { "type": "keyword" },
+        "eventName":            { "type": "keyword" },
+        "traceId":              { "type": "keyword" },
+        "spanId":               { "type": "keyword" },
+        "scope": {
+          "properties": {
+            "name":    { "type": "keyword" },
+            "version": { "type": "keyword" }
+          }
+        },
+
+        "resource": {
+          "properties": {
+            "service": {
+              "properties": {
+                "namespace": { "type": "keyword" },
+                "name":      { "type": "keyword" },
+                "version":   { "type": "keyword" },
+                "instance":  { "properties": { "id": { "type": "keyword" } } }
+              }
+            },
+            "server": {
+              "properties": {
+                "address": { "type": "keyword" },
+                "port":    { "type": "integer" }
+              }
+            },
+            "process": {
+              "properties": {
+                "executable": { "properties": { "name": { "type": "keyword" } } }
+              }
+            },
+            "xrootd": {
+              "properties": {
+                "site": { "type": "keyword" },
+                "server": {
+                  "properties": {
+                    "id":          { "type": "long" },
+                    "incarnation": { "type": "long" }
+                  }
+                }
+              }
+            }
+          }
+        },
+
+        "attributes": {
+          "properties": {
+            "event":   { "properties": { "name": { "type": "keyword" } } },
+            "file": {
+              "properties": {
+                "path":      { "type": "keyword", "ignore_above": 4096 },
+                "name":      { "type": "keyword" },
+                "directory": { "type": "keyword", "ignore_above": 4096 },
+                "extension": { "type": "keyword" },
+                "size":      { "type": "long" }
+              }
+            },
+            "client":  { "properties": { "address": { "type": "keyword" } } },
+            "network": {
+              "properties": {
+                "type":      { "type": "keyword" },
+                "transport": { "type": "keyword" },
+                "peer":      { "properties": { "address": { "type": "keyword" } } },
+                "protocol":  { "properties": { "name":    { "type": "keyword" } } }
+              }
+            },
+            "url":     { "properties": { "scheme": { "type": "keyword" } } },
+            "session": { "properties": { "id":     { "type": "keyword" } } },
+            "user_agent": {
+              "properties": {
+                "name":    { "type": "keyword" },
+                "version": { "type": "keyword" }
+              }
+            },
+            "user": {
+              "properties": {
+                "name":  { "type": "keyword" },
+                "id":    { "type": "keyword", "ignore_above": 2048 },
+                "roles": { "type": "keyword" }
+              }
+            },
+            "error": {
+              "properties": {
+                "type": { "type": "keyword", "ignore_above": 2048 }
+              }
+            },
+            "scitags": {
+              "properties": {
+                "experiment":    { "type": "keyword" },
+                "activity":      { "type": "keyword" },
+                "experiment_id": { "type": "integer" },
+                "activity_id":   { "type": "integer" }
+              }
+            },
+            "xrootd": {
+              "properties": {
+                "vo":     { "type": "keyword" },
+                "groups": { "type": "keyword" },
+                "operation": {
+                  "properties": {
+                    "name":       { "type": "keyword" },
+                    "state":      { "type": "keyword" },
+                    "start_time": { "type": "date" },
+                    "duration":   { "type": "double" }
+                  }
+                },
+                "forced_close": { "type": "boolean" },
+                "is_local":     { "type": "boolean" },
+                "open_seen":    { "type": "boolean" },
+                "read_bytes":   { "type": "long" },
+                "readv_bytes":  { "type": "long" },
+                "write_bytes":  { "type": "long" },
+                "read_ops":     { "type": "long" },
+                "readv_ops":    { "type": "long" },
+                "write_ops":    { "type": "long" },
+                "readv_segs":   { "type": "long" },
+                "read_min":     { "type": "long" },
+                "read_max":     { "type": "long" },
+                "readv_min":    { "type": "long" },
+                "readv_max":    { "type": "long" },
+                "readv_segs_min": { "type": "long" },
+                "readv_segs_max": { "type": "long" },
+                "write_min":    { "type": "long" },
+                "write_max":    { "type": "long" },
+                "read_sumsq":   { "type": "double" },
+                "readv_sumsq":  { "type": "double" },
+                "rsegs_sumsq":  { "type": "double" },
+                "write_sumsq":  { "type": "double" },
+                "dataset":         { "type": "keyword" },
+                "filter": { "properties": { "labels": { "type": "keyword" } } },
+                "auth":   { "properties": { "method": { "type": "keyword" } } },
+                "error":  { "properties": { "code":   { "type": "integer" } } },
+                "client": {
+                  "properties": {
+                    "site": { "type": "keyword" }
+                  }
+                },
+                "app": {
+                  "properties": {
+                    "name": { "type": "keyword" },
+                    "info": { "type": "keyword", "ignore_above": 2048 },
+                    "raw":  { "type": "keyword", "ignore_above": 2048 }
+                  }
+                },
+                "file": {
+                  "properties": {
+                    "id":         { "type": "long" },
+                    "read_write": { "type": "boolean" }
+                  }
+                },
+                "io": {
+                  "properties": {
+                    "offset": { "type": "long" },
+                    "length": { "type": "long" }
+                  }
+                },
+                "gstream": {
+                  "properties": {
+                    "provider": { "type": "keyword" },
+                    "data":     { "type": "object", "enabled": false }
+                  }
+                },
+                "redirect": {
+                  "properties": {
+                    "kind": { "type": "keyword" },
+                    "target": {
+                      "properties": {
+                        "address": { "type": "keyword" },
+                        "port":    { "type": "integer" }
+                      }
+                    }
+                  }
+                },
+                "session": {
+                  "properties": {
+                    "files":        { "type": "long" },
+                    "reads":        { "type": "long" },
+                    "writes":       { "type": "long" },
+                    "errors":       { "type": "long" },
+                    "read_bytes":   { "type": "long" },
+                    "readv_bytes":  { "type": "long" },
+                    "write_bytes":  { "type": "long" },
+                    "start_time":   { "type": "date" },
+                    "end_time":     { "type": "date" },
+                    "duration":     { "type": "double" },
+                    "start_time_source": { "type": "keyword" },
+                    "recent_files": { "type": "object", "enabled": false }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

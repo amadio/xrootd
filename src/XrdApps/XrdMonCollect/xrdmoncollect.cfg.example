@@ -1,0 +1,260 @@
+# Example xrdmoncollect configuration file.
+#
+# Loaded with `xrdmoncollect -c <file>`, or automatically from
+# /etc/xrootd/xrdmoncollect.cfg when that file exists. All keys live in a single
+# [xrdmoncollect] section and mirror the long command-line option names.
+# Command-line options override values set here. Lines starting with # or ; are
+# comments.
+
+[xrdmoncollect]
+
+# UDP port to listen on (same as -p / --udp-port; required unless tcp-port is
+# set). The udp-port key is an accepted alias. Under systemd with the
+# xrdmoncollect.socket unit enabled, sockets matching these ports are
+# inherited from systemd (socket activation) and stay open across service
+# restarts for zero-loss restarts; keep the ports here and in the socket
+# unit in sync.
+port = 9930
+
+# Address to bind (default: all interfaces, dual-stack). Same as -b.
+# bind = 0.0.0.0
+
+# Also accept UDP packets encapsulated over TCP from remote xrdmoncollect
+# instances running in shoveler mode (see the shovel key below), optionally
+# requiring a shared-secret token in the connection hello. A token of the form
+# @<file> is read from that file. With tcp-port set, port/-p is optional (a
+# TCP-only central collector).
+# tcp-port = 9931
+# tcp-token = @/etc/xrootd/shovel.token
+
+# Shoveler mode: instead of decoding, relay the received UDP packets over TCP
+# to a central collector's tcp-port (host:port). Decode/sink options are
+# ignored (with a warning) in this mode, so shovelers and the central
+# collector can share this file. While the collector is unreachable, framed
+# buffers spool under <cache-dir>/shovel, capped by spool-max (K/M/G suffix;
+# 0 = unbounded), evicting the oldest buffers when full.
+# shovel = collector.example.org:9931
+# shovel-token = @/etc/xrootd/shovel.token
+# spool-max = 1G
+
+# Append decoded documents to this file (default: stdout unless an OpenSearch or
+# forward sink is configured). Same as -o.
+# output = /var/log/xrootd/moncollect.ndjson
+
+# Write the file/stdout sink in OpenSearch _bulk format for this index.
+# bulk = xrootd-file-ops
+
+# Post documents to an OpenSearch cluster's _bulk API. Authenticate with either
+# basic auth (os-user/os-pass) or a bearer token (os-token, sent as
+# "Authorization: Bearer <token>"); the token wins if both are set. A token of
+# the form @<file> is read from that file so it does not appear in ps/argv.
+# These keys define the destination named "default"; see the [opensearch] and
+# [otlp] sections near the end of this file for additional endpoints.
+# os-url = https://opensearch.example.org:9200
+# os-index = xrootd-file-ops
+# os-user = collector
+# os-pass = secret
+# os-token = @/etc/xrootd/opensearch.token
+# os-insecure = false
+# os-datastream = false
+
+# Export as OTLP/JSON to an OpenTelemetry collector (Alloy / OTel Collector):
+# logs to <url>/v1/logs and, with spans = true, traces to <url>/v1/traces.
+# Optional bearer token (Authorization: Bearer); @<file> reads it from a file.
+# otlp-url = http://collector.example.org:4318
+# otlp-token = @/etc/xrootd/otlp.token
+# otlp-insecure = false
+
+# On-failure disk cache (shared by the OpenSearch and OTLP sinks): bodies that
+# fail to POST are written here and retried oldest-first (and replayed on
+# startup). Each destination caches separately. For "default", OpenSearch bulk
+# bodies live directly under the dir and OTLP bodies under otlp-logs/ and
+# otlp-traces/; a destination named <n> uses os-<n>/, otlp-<n>-logs/ and
+# otlp-<n>-traces/. Unset = drop on failure.
+# cache-dir = /var/lib/xrootd/moncollect
+
+# Also stream documents as NDJSON over TCP to a buffering frontend (host:port).
+# forward = logstash.example.org:5044
+
+# Receive batching: packets per batch (one batch -> one _bulk POST) and the max
+# age of a partial batch in seconds.
+# flush-count = 500
+# flush-secs = 5
+
+# Kernel UDP receive buffer (SO_RCVBUF; K/M/G suffix) and the number of packet
+# batches in flight between the receiver and serializer threads.
+# rcvbuf = 16M
+# queue-depth = 64
+
+# Serve aggregated Prometheus metrics over HTTP on this port (0 = disabled).
+# metrics-port = 9931
+
+# Cap TOTAL process memory at ~this many bytes (K/M/G/T suffix; 0 = unbounded),
+# met by evicting least-recently-used correlation state. Best-effort: only the
+# correlation state can be evicted, so use a cgroup MemoryMax= for a hard bound
+# -- set ABOVE this value, never equal to it. The collector steers itself into
+# the top eighth of the cap and holds the rest in reserve for what a 15s sample
+# cannot see, so it will settle close to whatever is set here. A deployment that
+# matched MemoryMax= to max-memory survived only because the budget used to be
+# pinned at a fixed eighth of the cap; it no longer is.
+# Note this also used to bound an estimate of the correlation state alone, which
+# ran 4-8x below real usage -- review a value carried over from then.
+# Alongside it, an optional hard entry cap and an idle-incarnation reap age.
+# max-memory = 1G
+# max-entries = 0
+# server-ttl = 86400
+
+# Drop a user entry this many seconds after its disconnect was reported
+# (0 = never). The entry outlives the disconnect only so a straggling close can
+# still resolve its identity against it; past that it is dead weight, and
+# without this the only things that ever reclaim a finished session are memory
+# pressure and server-ttl a day later.
+# user-ttl = 300
+
+# Drop a still-connected user entry idle this long and holding no open files
+# (0 = off). Covers a disconnect record that was lost entirely. Unlike the grace
+# above this is a guess -- an idle client is legitimate and looks identical --
+# so it is long, and setting it low is destructive rather than merely lossy: a
+# live session whose entry is gone is reported as an instant with
+# xrootd.session.start_time_source="disconnect" and a zero duration. Watch
+# expired_users_total{reason="idle"} and session_starts_total{source="disconnect"}.
+# user-idle-ttl = 21600
+
+# Expire an open-file entry untouched for this many seconds: a leaked open
+# whose close record was lost, e.g. to UDP packet loss (0 = off). Only applied
+# to servers reporting in-flight snapshots ("xfr" on xrootd.monitor fstat),
+# which refresh live operations every interval; set it to at least 3x the
+# server's xfr reporting period (xfr count x flush interval).
+# file-ttl = 7200
+
+# Correlation-state persistence: save the state to this file on shutdown and
+# reload it on startup, so a clean restart does not open a blind window while
+# the dictionaries repopulate. A snapshot older than state-ttl (s/m/h/d
+# suffix) is discarded. Under systemd the file defaults into the service's
+# StateDirectory ($STATE_DIRECTORY/xrdmoncollect-state.json); an explicitly
+# empty state-file disables persistence.
+# state-file = /var/lib/xrootd/xrdmoncollect-state.json
+# state-ttl = 15m
+
+# SciTags registry (a file path or http(s):// URL) and its refresh interval.
+# scitags = /etc/xrootd/scitags.json
+# scitags-refresh = 3600
+
+# Dataset capture: a POSIX extended regex whose first capture group, matched
+# against each file path, is emitted as the xrootd.dataset attribute (feeds
+# the data-popularity dashboards). Matched once per emitted document; keep
+# the pattern anchored and simple. Example for a CMS-style namespace
+# (/store/<class>/<era>/<primary-dataset>/...):
+# dataset = ^/store/[^/]+/[^/]+/([^/]+)/
+
+# The site this collector serves. It is not on the monitoring wire --
+# all.sitename names the storage cluster (eosalice, eoscms), and one site holds
+# several -- so it comes from here, on the deployment model of one collector per
+# site. When set, every metric series gains a `site` label and every document an
+# `xrootd.site` resource attribute; when unset, nothing is tagged.
+# site = CERN-PROD
+
+# Do not substitute the local FQDN for a loopback (co-located) server.
+# no-resolve = false
+
+# Correlate per-session activity and emit a session document per client
+# disconnect (off by default; adds a bounded per-session rollup).
+# sessions = false
+
+# Also emit OpenTelemetry span documents (a file-operation span per close and
+# a session span per disconnect) alongside the log records. Only meaningful
+# together with sessions, which is where the span waterfall gets its root.
+# spans = false
+
+# Opt-in extra document streams (high volume; off by default).
+# traces = false
+# gstream = false
+# redirects = false
+
+# Debugging: also emit one JSON object per decoded record; print stats on exit.
+# debug = false
+# verbose = false
+
+# ----------------------------------------------------------------------------
+# Additional sink destinations
+# ----------------------------------------------------------------------------
+#
+# Both HTTP sinks accept any number of endpoints. The os-*/otlp-* keys above
+# define the one named "default"; each extra one gets its own section. The
+# typical use is keeping a site's own monitoring while also feeding a central
+# collector, from one collector instead of two.
+#
+# Keys are the long-option names without the os-/otlp- prefix: url (required),
+# index, user, pass, token, insecure, datastream for [opensearch]; url
+# (required), token, insecure for [otlp]. An unrecognised key is a fatal error.
+#
+# A named section inherits NOTHING from the keys above, not even the index:
+# inheriting would depend on whether a value came from this file or the command
+# line (read in that order), and an inherited credential would be POSTed to an
+# endpoint it was never meant for. Spell out what each destination needs.
+#
+# Every destination runs its own thread, queue, retry state and cache
+# directory, and every sink metric carries a destination="<name>" label. One
+# that is slow or unreachable cannot stall the collector or the others.
+#
+# A name must start with a letter or digit and may contain only letters,
+# digits, '_', '-' and '.'; it becomes a directory component under cache-dir
+# and a Prometheus label value. Names are compared without regard to case, and
+# "default" is reserved for the keys above.
+#
+# [otlp "wlcg"]
+# url = https://otel.wlcg.example:4318
+# token = @/etc/xrootd/wlcg.token
+#
+# [opensearch "central"]
+# url = https://es.wlcg.example:9200
+# index = wlcg-file-ops
+# datastream = true
+
+# Document filtering. Each [filter "<name>"] section is one rule, matched
+# against every finished document just before it reaches the sinks: a rule
+# either drops the document or tags it with a label for filtering downstream.
+# Metrics are unaffected — a dropped document is still counted in the
+# Prometheus series, so the aggregate view of the cluster stays complete.
+#
+# Reserved keys: action (tag | drop | keep; default tag) and label (default:
+# the rule name). Every other key is a match condition; an unknown one is a
+# start-up error. Conditions AND together; a value is a comma-separated OR-list
+# whose alternatives are an exact string, a glob (when it contains * or ?), or
+# a POSIX extended regex (when it starts with ~). A leading ! negates.
+#
+# A key naming a field the document does not carry never matches, negated or
+# not, so an identity rule cannot fire on a server-identity document.
+#
+# Rules are evaluated in no particular order: every matching rule contributes
+# its label, and the document is dropped only if some matching rule says drop
+# and none says keep.
+#
+# Condition keys: user userid role vo groups authprot proto scheme client
+# clientip clientsite app appver appinfo appid experiment activity path dir
+# filename ext dataset event op state error provider target session
+# severity server site instance program version -- or a raw
+# attributes.<key> / resource.<key> path for anything else in the document.
+#
+# IMPORTANT: keys must start in column 1. An indented line is appended to the
+# preceding key's value (INI multi-line continuation), which would silently
+# fold the rest of the rule into the first key; the collector rejects the
+# recognisable cases at start-up, but do not indent.
+#
+# Tag an EOS instance's internal traffic instead of dropping it, so dashboards
+# can exclude it while the raw records stay available:
+# [filter "eos-internal"]
+# user     = daemon, root, ~^[0-9]+$
+# authprot = sss
+# action   = tag
+# label    = internal
+#
+# Drop the namespace's own bookkeeping accesses outright:
+# [filter "eos-proc"]
+# path   = /eos/*/proc/*
+# action = drop
+#
+# ... but never drop anything belonging to a real VO user (keep beats drop):
+# [filter "keep-vo"]
+# vo     = ~.+
+# action = keep

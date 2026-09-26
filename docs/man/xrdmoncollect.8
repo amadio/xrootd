@@ -1,0 +1,1024 @@
+.TH xrdmoncollect 8 "@XRootD_VERSION_STRING@"
+.SH NAME
+xrdmoncollect - collect and correlate XRootD detailed monitoring streams
+.SH SYNOPSIS
+.nf
+
+\fBxrdmoncollect\fR [\fB-c\fR \fIfile\fR] \fB-p\fR \fIport\fR [\fB-b\fR \fIbindaddr\fR] [\fB-o\fR \fIfile\fR] [\fB--bulk\fR \fIindex\fR]
+              [\fB--os-url\fR \fIurl\fR [\fB--os-index\fR \fIname\fR] [\fB--os-user\fR \fIuser\fR]
+               [\fB--os-pass\fR \fIpass\fR] [\fB--os-token\fR \fItoken\fR] [\fB--os-insecure\fR] [\fB--os-datastream\fR]]
+              [\fB--otlp-url\fR \fIurl\fR [\fB--otlp-token\fR \fItoken\fR] [\fB--otlp-insecure\fR]]
+              [\fB--cache-dir\fR \fIdir\fR]
+              [\fB--forward\fR \fIhost:port\fR] [\fB--metrics-port\fR \fIport\fR] [\fB--site\fR \fIname\fR]
+              [\fB--tcp-port\fR \fIport\fR [\fB--tcp-token\fR \fItoken\fR]]
+              [\fB--shovel\fR \fIhost:port\fR [\fB--shovel-token\fR \fItoken\fR] [\fB--spool-max\fR \fIsz\fR]]
+              [\fB--flush-count\fR \fIn\fR] [\fB--flush-secs\fR \fIn\fR]
+              [\fB--rcvbuf\fR \fIsz\fR] [\fB--queue-depth\fR \fIn\fR]
+              [\fB--max-memory\fR \fIsz\fR] [\fB--max-entries\fR \fIn\fR]
+              [\fB--server-ttl\fR \fIs\fR] [\fB--file-ttl\fR \fIs\fR]
+              [\fB--user-ttl\fR \fIs\fR] [\fB--user-idle-ttl\fR \fIs\fR]
+              [\fB--state-file\fR \fIfile\fR] [\fB--state-ttl\fR \fIdur\fR]
+              [\fB--scitags\fR \fIsrc\fR [\fB--scitags-refresh\fR \fIs\fR]] [\fB--dataset\fR \fIre\fR]
+              [\fB--no-resolve\fR]
+              [\fB--sessions\fR] [\fB--spans\fR] [\fB--traces\fR] [\fB--gstream\fR] [\fB--redirects\fR] [\fB--debug\fR] [\fB-v\fR]
+
+\fBxrdmoncollect\fR \fB-h\fR | \fB--help\fR
+
+.fi
+.br
+.ad l
+.SH DESCRIPTION
+The \fBxrdmoncollect\fR daemon receives the binary UDP \fIdetailed monitoring\fR
+streams emitted by one or more \fBxrootd\fR servers (the \fIu\fR, \fId\fR,
+\fIi\fR, \fI=\fR, \fIf\fR, \fIt\fR, \fIg\fR, \fIr\fR, \fIT\fR, \fIU\fR, and FRM
+\fIx\fR/\fIp\fR streams configured via the \fBxrootd.monitor\fR directive) and
+correlates them into self-contained JSON documents.
+.P
+The principal output is one document per file close, joining the
+\fIf\fR-stream close record with the user, path, application-info, token, and
+activity dictionaries into a single record carrying WLCG-aligned identity,
+location, and I/O fields. Documents use an OpenTelemetry-aligned schema: a
+process-level \fBresource\fR object and an event-level \fBattributes\fR object
+keyed by dotted semantic-convention names (with XRootD-specific fields under the
+\fBxrootd.*\fR vendor namespace; for example \fBresource.server.address\fR,
+\fBattributes.client.address\fR, \fBattributes.xrootd.vo\fR,
+\fBattributes.xrootd.read_bytes\fR).
+A store that expands dotted field names (such as OpenSearch) indexes each key as
+a nested field, and empty or zero-valued fields are omitted. The OpenSearch
+\fB_bulk\fR and OTLP sinks serialize this one canonical document, so they carry
+the same fields and differ only in wire encoding (nested JSON vs typed
+\fBKeyValue\fR arrays); see the README for a field-by-field sink comparison and
+the per-stream wire-field-to-JSON mapping tables. There is no
+top-level \fBtype\fR field: the record kind is the top-level \fBeventName\fR
+(the OTLP LogRecord EventName field), duplicated as
+\fBattributes["event.name"]\fR for stores that only query attributes (such as
+Loki structured metadata).
+.P
+The event names the operation. A file close is \fBxrootd.read\fR or
+\fBxrootd.write\fR depending on whether it carried write bytes; an operation
+that failed without producing a close is \fBxrootd.\fIcategory\fR
+(\fBxrootd.open\fR, \fBxrootd.read\fR and so on); a redirect is
+\fBxrootd.redirect\fR. Per-I/O trace records (\fB--traces\fR) are named
+\fBxrootd.io.*\fR, keeping the much higher volume detail stream apart from the
+per-file documents. Whether a close moved the file in its entirety is left to
+the consumer, which has \fBfile.size\fR and the byte counters
+(\fBxrootd.read_bytes\fR, \fBxrootd.readv_bytes\fR, \fBxrootd.write_bytes\fR)
+in the same document; the collector reports what the server measured and derives
+nothing from it. Operations are counted in
+\fBxrootd_collector_io_total{cluster,server,operation}\fR, whose \fBoperation\fR label
+is \fBopen\fR, \fBclose\fR, or -- when the server config includes the \fBops\fR
+block -- \fBread\fR, \fBreadv\fR and \fBwrite\fR per request.
+.P
+A file operation document also carries the terminal status of the operation in
+\fBxrootd.operation.state\fR: a normal close reports \fBSuccessful\fR, while a
+failed open, a mid-operation read/write error, or a failed close reports
+\fBFailed\fR together with \fBxrootd.operation.name\fR
+(\fBopen\fR, \fBread\fR, \fBwrite\fR, or \fBclose\fR),
+\fBxrootd.error.code\fR (the kXR error code), and the name of that code in
+\fBerror.type\fR. The server reports errors only with the \fBerr\fR option
+of \fBxrootd.monitor fstat\fR. Failed opens, which
+produce no close record, are reported by the server as a dedicated terminal
+record on the \fIf\fR-stream; mid-operation and close failures travel with the
+close record itself. A redirect (\fIr\fR-stream, with \fB--redirects\fR) is a
+third terminal state, \fBRedirected\fR: from the redirector's point of view the
+operation concluded by sending the client elsewhere, with the destination in the
+\fBxrootd.redirect.*\fR attributes.
+.P
+With \fB--sessions\fR, a \fIsession\fR document
+(\fBattributes["event.name"]\fR = \fBxrootd.session\fR) aggregates each
+disconnecting client's whole session (off by default; when disabled no session
+rollup is kept and no session document is emitted):
+every file close that named the user is folded into running totals
+(\fBxrootd.session.files\fR, \fB.reads\fR, \fB.writes\fR,
+\fB.read_bytes\fR, \fB.readv_bytes\fR, \fB.write_bytes\fR, \fB.errors\fR, and
+start/end/duration) plus a capped \fBxrootd.session.recent_files\fR list (each
+with \fBfile.path\fR, \fBxrootd.operation.name\fR, and
+\fBxrootd.bytes\fR). The totals cover every closed file; only the recent-file
+list is bounded, so a long session that opens many files stays memory-bounded.
+.P
+\fBxrootd.session.start_time\fR, \fB.end_time\fR and \fB.duration\fR are always
+present on a session document, and the duration is never negative. The window
+also encloses every record the session accounts for, so no open, I/O trace,
+close, error or redirect belonging to it falls outside and, with \fB--spans\fR,
+no child span escapes its parent. This needs stating because no record carries
+an exact time: a record's time is interpolated across the window of the packet
+carrying it, and two packets \(em especially from two streams, which window
+independently \(em carry independent estimation error, so an operation that
+finished before the client disconnected can arrive stamped after it. The
+earliest and latest time of any record naming a session are tracked and the
+resolved window widened to cover both.
+.P
+The same holds one level down, for the \fB--spans\fR waterfall
+session \(-> file \(-> I/O. A trace-stream I/O record is the coarsest thing the
+collector handles \(em records after the last window mark all land on that
+window's start \(em so it is clamped into the interval its file is known to have
+been open (it cannot precede the open, nor follow the moment the packet
+reporting it arrived here), and whatever still outruns the close widens the
+file's span rather than the record being left hanging outside it. The clamp does
+not touch \fBxrootd.operation.duration\fR, which stays the open \(-> close
+estimate. An I/O record that arrives before the open of its file cannot be
+correlated at all; see \fBSpan nesting\fR in README.md for what that costs.
+.P
+The start has a further problem: no dictionary record carries a time on the wire
+at all, so the login can only be timed by the collector, whose clock is not the
+reporting server's; the offset between the two is estimated per server
+incarnation from the window ends the \fBf\fR stream carries.
+\fBxrootd.session.start_time_source\fR reports how the start was arrived at, in
+decreasing authority: \fBlogin\fR (the connect duration the \fBt\fR-stream
+disconnect carries), \fBconnect\fR (the login record's arrival, translated into
+the server's clock), \fBfirst_activity\fR (the earliest record naming the
+session) or \fBdisconnect\fR (nothing else was available, so the session is
+reported as an instant). The earliest admissible candidate wins, ties going to
+the more authoritative one, so \fBfirst_activity\fR also covers activity that
+predates a login estimate. Candidates are accepted only within the session's own
+bounds, so a skewed clock degrades the start to a later source rather than
+producing a wrong or missing one. The counter
+\fBxrootd_collector_session_starts_total{cluster,server,source}\fR shows the mix: mostly
+\fBdisconnect\fR means \fBu\fR records are being lost, or the server's
+\fBxrootd.monitor\fR destination lacks the \fBuser\fR flag.
+When the disconnect carries no usable time either, the end is \fIestimated\fR
+through that same offset and doubles as the document's record timestamp. An
+estimate landing more than five minutes ahead of the collector's clock falls
+back to the collector's own time: a strict OTLP receiver refuses a far-future
+timestamp outright. Server-\fIstamped\fR times are never clamped.
+.P
+Documents are emitted as newline-delimited JSON (NDJSON) to a file or standard
+output, posted directly to an OpenSearch cluster, exported as OTLP/JSON to an
+OpenTelemetry collector (\fB--otlp-url\fR), and/or streamed over TCP to a
+buffering frontend. The collector can additionally serve aggregated Prometheus
+metrics over HTTP.
+.P
+For large or distributed clusters, where long-haul UDP to a central collector
+is lossy, \fBxrdmoncollect\fR can also run as a \fIshoveler\fR: started with
+\fB--shovel\fR \fIhost:port\fR next to each daemon, it does not decode at all
+but encapsulates every received UDP datagram (together with its original source
+address) in a simple length-prefixed TCP framing and relays it to a central
+collector listening with \fB--tcp-port\fR, which re-injects the datagrams into
+its normal pipeline attributed to the original sender. The channel carries an
+optional shared-secret token (\fB--shovel-token\fR / \fB--tcp-token\fR), and the
+shoveler spools frames to disk under \fB--cache-dir\fR while the collector is
+unreachable, replaying them oldest-first on reconnect (capped by
+\fB--spool-max\fR, evicting the oldest buffers). See the README for the frame
+layout and deployment guidance.
+.SS Threads
+The daemon has one blocking boundary and one shedding one, and which is which
+determines what a stall costs.
+.P
+.nf
+                       xrdmoncollect (collector mode)
+
+ UDP :--udp-port ---+
+                    v
+       +----------------------+   batch closes on --flush-count,
+       | RECEIVER (main)      |   --flush-secs, or a byte budget
+       +----------+-----------+
+                  |  recvPipe: --queue-depth batches,
+ XSHV :--tcp-port |  bounded, recycling, BLOCKS the producer
+       +----------+-----------+  (the only backpressure there is)
+       | TCP ACCEPT           |
+       | + TCP CONNECTION xN  |========+
+       |   (up to 512)        |        |
+       +----------------------+        v
+                       +----------------------------------------+
+                       | SERIALIZER                             |
+                       |  sole owner of the decoder             |
+                       |  decode, correlate, emitDoc()          |
+                       |  the file/stdout and --forward sinks   |
+                       |    are written INLINE, on this thread  |
+                       |  each 1s idle wake: reap servers (60s),|
+                       |  memory tick (15s), flush (coalescing) |
+                       +------------------+---------------------+
+                                          | sink queue: 16 bodies AND
+                                          | a byte cap, never blocks,
+                                          | drops the OLDEST, counted
+             +----------------+-----------+------------+
+             v                v                        v
+     +---------------++---------------+        +---------------+
+     | SINK THREAD   || SINK THREAD   |        | SINK THREAD   |
+     | opensearch    || opensearch    |        | otlp          |
+     |  "default"    ||  "central"    |        |  "default"    |
+     | POST /_bulk   || POST /_bulk   |        | 2 queues:     |
+     |               ||               |        |  logs+traces  |
+     +-------+-------++-------+-------+        +-------+-------+
+             +----------------+--- on failure ---------+
+                    disk cache (--cache-dir): spill, then replay
+                    oldest-first.  One directory per destination.
+
+   off the data path, both optional:
+     +--------------------------+  +--------------------------+
+     | METRICS EXPORTER         |  | SCITAGS REFRESHER        |
+     | --metrics-port           |  | --scitags <url>          |
+     +--------------------------+  +--------------------------+
+.fi
+.P
+Receive to decode blocks because the producer is the kernel and a dropped
+datagram is unrecoverable. Decode to sink never blocks because the consumer is a
+remote endpoint: a queue that fills sheds its oldest body and counts it, so a
+dead central collector cannot slow the decoder or affect the other destinations.
+The unit of parallelism is the \fIdestination\fR, not the sink kind; one OTLP
+destination is a single thread draining two queues (logs and traces, which
+replay to different endpoints and so cache apart). The serializer is the sole
+decoder, so correlation state needs no locking, and it waits with a timeout
+rather than blocking so that housekeeping runs on the clock instead of on packet
+arrival. In shoveler mode the receiver feeds a sender thread instead, and nothing
+is decoded, correlated or serialized.
+.P
+Shutdown order is load-bearing: the TCP connection threads are joined before the
+receive pipe closes (they are producers into it), the correlation state is
+snapshotted only once the serializer has joined, and every sink then gets 20
+seconds to deliver what it holds -- in parallel, so the wait is the slowest and
+not their sum -- before whatever is still in flight is cancelled. The bundled
+unit allows for this with \fBTimeoutStopSec=45\fR. See the README for the full
+thread model, the queue budget arithmetic and the coalescing rule.
+.P
+Usage synopsis can be displayed by typing "\fBxrdmoncollect --help\fR".
+.SH OPTIONS
+\fB-c\fR \fIfile\fR, \fB--config\fR \fIfile\fR
+.RS 5
+Load options from an INI configuration file. Keys live in a single
+\fB[xrdmoncollect]\fR section and mirror the long-option names; command-line
+options override values from the file. When \fB-c\fR is not given, the default
+file \fI/etc/xrootd/xrdmoncollect.cfg\fR is loaded if it exists (a missing
+default is silently ignored). A named-but-unreadable or malformed file is a
+fatal error. See the \fBCONFIGURATION FILE\fR section.
+.RE
+\fB-p\fR \fIport\fR, \fB--udp-port\fR \fIport\fR
+.RS 5
+UDP port to listen on (required unless \fB--tcp-port\fR is given).
+.RE
+\fB-b\fR \fIbindaddr\fR
+.RS 5
+Address to bind. The default binds all interfaces using an IPv6 dual-stack
+socket.
+.RE
+\fB-o\fR \fIfile\fR
+.RS 5
+Append output to \fIfile\fR. The default is standard output unless a network
+sink (\fB--os-url\fR or \fB--forward\fR) is configured.
+.RE
+\fB--bulk\fR \fIindex\fR
+.RS 5
+Write the file/stdout sink in OpenSearch \fB_bulk\fR format using \fIindex\fR.
+.RE
+\fB--os-url\fR \fIurl\fR
+.RS 5
+POST documents to an OpenSearch cluster's \fB_bulk\fR API at \fIurl\fR. Requires
+that \fBxrdmoncollect\fR was built with libcurl. This defines the destination
+named \fBdefault\fR; further destinations are declared in the configuration file
+(see \fBMULTIPLE DESTINATIONS\fR).
+A body the cluster \fIpermanently refuses\fR (any 4xx other than 429, e.g. a
+mapping conflict or a blocked index) is never retried: it is quarantined as a
+\fB.rejected\fR file under \fB--cache-dir\fR (or dropped without one) and the
+cluster's full response text is logged, naming the exact reason. A \fB2xx\fR
+reporting \fIper-item\fR failures is a warning, not a rejection: the rest of the
+body was indexed, so re-posting it would duplicate what got through.
+.RE
+\fB--os-index\fR \fIname\fR
+.RS 5
+Index or data-stream name (default: \fBxrootd-file-ops\fR).
+.RE
+\fB--os-user\fR \fIuser\fR, \fB--os-pass\fR \fIpass\fR
+.RS 5
+HTTP basic-auth credentials for the OpenSearch endpoint.
+.RE
+\fB--os-token\fR \fItoken\fR
+.RS 5
+Bearer token for the OpenSearch endpoint, sent as an
+\fBAuthorization: Bearer \fR\fItoken\fR header. Takes precedence over basic auth
+(\fB--os-user\fR/\fB--os-pass\fR) when both are given. If \fItoken\fR begins with
+\fB@\fR, the remainder is a path to a file the token is read from (trailing
+whitespace stripped), so the secret need not appear in \fBps\fR/argv.
+.RE
+\fB--os-insecure\fR
+.RS 5
+Skip TLS certificate verification for the OpenSearch endpoint.
+.RE
+\fB--os-datastream\fR
+.RS 5
+Target is an OpenSearch data stream; use the \fBcreate\fR bulk action instead of
+\fBindex\fR.
+.RE
+\fB--otlp-url\fR \fIurl\fR
+.RS 5
+Export documents as OTLP/JSON to an OpenTelemetry endpoint (an OpenTelemetry
+Collector, Grafana Alloy, or any OTLP/HTTP receiver): logs are POSTed to
+\fIurl\fR\fB/v1/logs\fR and, with \fB--spans\fR, spans to \fIurl\fR\fB/v1/traces\fR,
+with \fBContent-Type: application/json\fR. This defines the destination named
+\fBdefault\fR; further destinations are declared in the configuration file (see
+\fBMULTIPLE DESTINATIONS\fR).
+The nested \fBresource\fR/\fBattributes\fR
+objects are re-encoded into the strict OTLP \fBresourceLogs\fR/\fBresourceSpans\fR
+envelope with typed \fBKeyValue\fR attributes. Batched per flush and posted on
+that destination's own sink thread
+with retry/backoff; with \fB--cache-dir\fR a body that still fails
+is written to disk and retried later (see \fB--cache-dir\fR), otherwise it is
+dropped. A body the endpoint \fIpermanently refuses\fR (any 4xx other than 429,
+e.g. a Loki validation error) is never retried: it is quarantined as a
+\fB.rejected\fR file under \fB--cache-dir\fR (or dropped without one) and the
+endpoint's full response text is logged, naming the exact reason. Requires that
+\fBxrdmoncollect\fR was built with libcurl.
+Pointing \fIurl\fR at Loki's OTLP endpoint (e.g. \fBhttp://loki:3100/otlp\fR)
+feeds the ready-to-import \fBgrafana-loki-dashboard.json\fR; see the README.
+.RE
+\fB--otlp-token\fR \fItoken\fR
+.RS 5
+Bearer token for the OTLP endpoint, sent as an \fBAuthorization: Bearer \fR\fItoken\fR
+header on every export (many collectors, e.g. Grafana Alloy or a gateway
+Collector, gate ingestion on it). If \fItoken\fR begins with \fB@\fR, the remainder
+is a path to a file the token is read from (trailing whitespace stripped).
+.RE
+\fB--otlp-insecure\fR
+.RS 5
+Skip TLS certificate verification for the OTLP endpoint.
+.RE
+\fB--cache-dir\fR \fIdir\fR
+.RS 5
+Directory for the on-failure disk cache, shared by the OpenSearch and OTLP sinks
+(and, in shoveler mode, the frame spool). When set, a body that still fails to
+POST after retries is written under \fIdir\fR
+and retried oldest-first once the sink recovers; files left by a previous run are
+replayed on startup. Each destination caches separately, since each recovers on its own schedule.
+For the destination named \fBdefault\fR the OpenSearch \fB_bulk\fR bodies live
+directly under \fIdir\fR and the OTLP bodies under the \fBotlp-logs\fR and
+\fBotlp-traces\fR subdirectories (logs and traces replay to different
+endpoints); a destination named \fIn\fR uses \fBos-\fR\fIn\fR, or
+\fBotlp-\fR\fIn\fR\fB-logs\fR and \fBotlp-\fR\fIn\fR\fB-traces\fR. Shoveled
+frame buffers live under \fBshovel\fR. The sink caches have no size limit (the
+shovel spool is capped by \fB--spool-max\fR).
+A destination that has a cache does not retry a live POST: it fails fast and
+spills to disk, and the replay path carries the retry ladder. Holding a body for
+the length of the ladder would let the queue behind it overflow with a working
+cache configured.
+A body a sink permanently refuses is renamed to a \fB.rejected\fR file beside
+the backlog: it is never replayed (and ignored on startup) but kept for
+inspection, so one refused body cannot block the bodies queued behind it
+(counted in \fBxrootd_collector_cache_rejected_total\fR /
+\fBxrootd_collector_otlp_cache_rejected_total\fR).
+When unset (the default), a body that cannot be posted is dropped (counted in
+\fBxrootd_collector_dropped_bulk_total\fR / \fBxrootd_collector_otlp_dropped_total\fR).
+.RE
+\fB--forward\fR \fIhost:port\fR
+.RS 5
+Also stream each document as NDJSON over a TCP connection to \fIhost:port\fR
+(for example a Logstash, Fluentd, or Vector buffering frontend). The connection
+is re-established lazily after failures; documents produced while the consumer
+is unreachable are dropped.
+.RE
+\fB--metrics-port\fR \fIport\fR
+.RS 5
+Serve aggregated metrics in Prometheus exposition format over HTTP on
+\fIport\fR. A shoveler serves its own metric set under the
+\fBxrootd_shoveler_\fR prefix.
+.P
+The exporter binds IPv4 \fBINADDR_ANY\fR and \fBignores --bind\fR, unlike the UDP
+and shovel listeners, so on an IPv6-only host it is unreachable. It serves one
+connection at a time, answers every path with the full exposition, and has no
+authentication: restrict it with a firewall or a host-local bind in the
+orchestrator, and do not scrape it at sub-second intervals -- a large registry
+serialized on every request is a self-inflicted stall.
+.P
+Every per-server series carries \fBcluster\fR and \fBserver\fR labels, so
+\fBsum by (cluster)\fR gives a whole storage system. \fBcluster\fR is the
+server's \fBall.sitename\fR, which this collector reads as the name of the
+storage cluster (\fBeoscms\fR, \fBeosalice\fR) rather than the WLCG site: a
+site holds several storage systems and nothing else on the monitoring wire
+tells them apart. The WLCG site is not on the wire at all and comes from
+\fB--site\fR (see below); without it there is no \fBsite\fR label. Both
+cluster and server come from the \fB=\fR identity record and are provisional until it
+arrives: a server not yet identified reads \fBcluster="unknown"\fR with its
+numeric address as \fBserver\fR. That record defaults to hourly, so set
+\fBident 300\fR in the server's \fBxrootd.monitor\fR directive to shorten
+the window.
+.P
+Two ready-to-import Grafana dashboards for these metrics ship beside the
+README: \fBgrafana-collector-dashboard.json\fR for the health of the
+collector pipeline itself, and \fBgrafana-cluster-dashboard.json\fR for what
+the monitored servers are doing. Neither carries per-user, per-VO or
+per-dataset panels, because no metric here carries those labels; that detail
+is in the documents.
+.RE
+\fB--site\fR \fIname\fR
+.RS 5
+Name the site this collector serves. The site is not carried on the monitoring
+wire \(em \fBall.sitename\fR names the storage cluster, and one site holds
+several \(em so it comes from here, on the deployment model of one collector
+per site. Every metric series then carries a \fBsite\fR label, including the
+collector's own unlabeled aggregates, and every document an \fBxrootd.site\fR
+resource attribute. Unset by default, in which case nothing is tagged. A
+collector receiving from several sites should instead derive the label per
+server, e.g. with a Prometheus \fBmetric_relabel_configs\fR rule on
+\fBserver\fR.
+.RE
+\fB--tcp-port\fR \fIport\fR
+.RS 5
+Also listen on TCP \fIport\fR for UDP monitoring datagrams encapsulated by
+remote \fBxrdmoncollect\fR instances running in shoveler mode. Each received
+datagram enters the normal pipeline attributed to its original source, so
+correlation and packet-loss estimation are transport-agnostic. With
+\fB--tcp-port\fR the UDP port becomes optional (a TCP-only central collector).
+.RE
+\fB--tcp-token\fR \fItoken\fR
+.RS 5
+Shared secret shovelers must present in the connection hello; compared in
+constant time, with rejected connections counted in
+\fBxrootd_collector_tcp_auth_failures_total\fR. If \fItoken\fR begins with
+\fB@\fR, the remainder is a path to a file the token is read from. When unset,
+any well-formed hello is accepted.
+.RE
+\fB--shovel\fR \fIhost:port\fR
+.RS 5
+Shoveler mode: relay every received UDP datagram over TCP to the central
+collector's \fB--tcp-port\fR at \fIhost:port\fR instead of decoding it. No
+correlation or document sink is active; options that require decoding are
+warned about and ignored, so shovelers and the central collector can share one
+configuration file. Cannot be combined with \fB--tcp-port\fR.
+.RE
+\fB--shovel-token\fR \fItoken\fR
+.RS 5
+Shared secret sent in the shovel connection hello; \fB@\fR\fIfile\fR reads it
+from a file. An explicit rejection by the collector (token or protocol-version
+mismatch) backs off for 30 seconds; plain network failures retry after 5.
+.RE
+\fB--spool-max\fR \fIsz\fR
+.RS 5
+Cap the shoveler's disk spool (under \fI--cache-dir\fR\fB/shovel\fR) at
+approximately \fIsz\fR bytes, accepting a \fBK\fR/\fBM\fR/\fBG\fR suffix
+(default \fB1G\fR; \fB0\fR = unbounded). When a new buffer would exceed the
+cap, the \fIoldest\fR spooled buffers are evicted first (counted in
+\fBxrootd_shoveler_spool_dropped_total\fR): during a long outage fresh
+monitoring data is worth more than day-old data, and replay latency stays
+bounded.
+.RE
+\fB--flush-count\fR \fIn\fR
+.RS 5
+Number of packets the receiver buffers into one batch before handing it to the
+serializer; each batch becomes one OpenSearch \fB_bulk\fR POST (default: 500).
+.RE
+\fB--flush-secs\fR \fIn\fR
+.RS 5
+Hand off a partial batch after \fIn\fR seconds, bounding latency when packets
+arrive slowly (default: 5).
+.RE
+\fB--rcvbuf\fR \fIsz\fR
+.RS 5
+Kernel UDP receive buffer size (K/M/G suffix; default 16M). A larger buffer
+absorbs bursts and the brief windows when the receiver waits on a full pipeline,
+so the kernel does not drop datagrams.
+.P
+The request is made with \fBSO_RCVBUFFORCE\fR first and falls back to plain
+\fBSO_RCVBUF\fR, so it can exceed \fBnet.core.rmem_max\fR only when the process
+holds \fBCAP_NET_ADMIN\fR -- which the bundled \fBxrdmoncollect.service\fR does
+not grant. Under the shipped units the supported way past that ceiling is
+\fBReceiveBuffer=\fR in \fBxrdmoncollect.socket\fR, which systemd applies as
+root before dropping privileges (see \fBSYSTEMD INTEGRATION\fR); otherwise raise
+\fBnet.core.rmem_max\fR on the host. Note also that the kernel doubles whatever
+is granted, and reports the doubled figure in \fBss -uanm\fR.
+.RE
+\fB--queue-depth\fR \fIn\fR
+.RS 5
+Number of packet batches that may be in flight between the receiver and the
+serializer threads (default: 64). When the serializer falls behind, the receiver
+waits for a free batch (backpressure) rather than dropping packets.
+.P
+This is the only place the collector applies backpressure. A slow \fIsink\fR
+never reaches here: its queue sheds its oldest bodies instead (see
+\fB--cache-dir\fR and \fBThreads\fR above), so what this depth absorbs is a slow
+\fIdecoder\fR, and beyond it \fB--rcvbuf\fR.
+.RE
+\fB--max-memory\fR \fIsz\fR
+.RS 5
+Cap the \fItotal resident memory\fR of the collector process at approximately
+\fIsz\fR bytes, accepting a \fBK\fR/\fBM\fR/\fBG\fR suffix (default \fB1G\fR;
+\fB0\fR = unbounded).
+.P
+Once per control tick the collector reads its own resident set size and steers
+the budget it allows the per-server dictionaries and the open-file table to
+occupy: it grants more while there is measured headroom, holds station in the
+top eighth of the cap, and lowers the budget above it, where the
+\fIleast-recently-used\fR entries go first. A long-running operation kept warm
+by its in-flight \fIf\fR-stream snapshots is therefore retained while cold,
+stranded entries (for example an open whose close was lost to a dropped
+datagram) are dropped.
+.P
+A healthy collector settles at roughly \fIseven eighths\fR of the cap. The
+remaining eighth is deliberate slack: the loop samples every fifteen seconds and
+a burst can add a great deal between two samples. Set \fB--max-memory\fR
+\fIto\fR the memory you are willing to give the collector, not below it \(em the
+reserve is already built in.
+.P
+Nothing in the loop assumes how much real memory a charged byte costs; it grants
+a conservative fraction of the headroom it can see and lets the next sample
+correct it. The budget also rises only while the state is actually pressed
+against it, so it records demand that has already been carried at a safe
+resident size rather than a speculative allowance a burst could fill between
+two samples.
+.P
+This is \fIbest-effort, not a guarantee\fR. Only the correlation state is under
+the collector's control: the receive queue, the pending output bodies and memory
+the allocator has freed but not returned to the operating system are not. The
+budget therefore has a floor below which correlation would stop working, and a
+process that is over its cap with the budget already at that floor is reported
+through \fBxrootd_collector_memory_floored_total\fR and a log message rather than
+pursued until no state remains. The only hard cap is the one the kernel
+enforces; see \fBMemoryMax=\fR in \fBsystemd.resource-control\fR(5).
+.P
+\fBxrootd_process_resident_memory_bytes\fR reports what is being capped and
+\fBxrootd_collector_memory_cap_bytes\fR the cap itself;
+\fBxrootd_collector_state_budget_bytes\fR is the setpoint the loop is currently
+enforcing, \fBxrootd_collector_state_budget_used_ratio\fR how full it is, and
+\fBxrootd_collector_state_entries{kind}\fR how much correlation state that is
+buying, split by dictionary. A utilisation pinned at 1 with
+\fBevicted_total\fR climbing while resident memory sits well below the cap means
+the budget is binding before memory is.
+.P
+\fBWarning:\fR the collector now uses the allowance it is given. Before, the
+budget was pinned at a fixed eighth of \fB--max-memory\fR and the process never
+came near the rest, so a deployment whose cgroup \fBMemoryMax=\fR equalled or
+undercut \fB--max-memory\fR survived only by accident. Raise the cgroup limit
+above \fB--max-memory\fR \(em 1.5 times is the usual figure \(em before
+deploying this release; the collector warns at start-up when it can read a limit
+at or below its own cap. Expect resident memory to rise on upgrade.
+.P
+\fBNote:\fR this option previously bounded an \fIestimate\fR of the correlation
+state alone, and that estimate ran four to eight times below the memory really
+used; its default was \fB256M\fR. A configuration carried over from that release
+caps far less than its author intended \(em review it on upgrade.
+.RE
+\fB--max-entries\fR \fIn\fR
+.RS 5
+Optional hard cap on the total number of correlation entries retained
+(\fB0\fR = off, the default). A deterministic backstop, independent of
+\fB--max-memory\fR: it bounds a count rather than a quantity of memory, and
+applies whether or not the memory cap is in use. Eviction is likewise
+least-recently-used.
+.RE
+\fB--server-ttl\fR \fIs\fR
+.RS 5
+Reclaim a whole server incarnation (its dictionaries and \fIg\fR-stream counter
+baselines) once it has reported nothing for more than \fIs\fR seconds, bounding
+the accumulation of dead incarnations across server restarts and rolling
+upgrades (default \fB86400\fR; \fB0\fR = never).
+.RE
+\fB--file-ttl\fR \fIs\fR
+.RS 5
+Expire an open-file entry that has not been touched for more than \fIs\fR
+seconds (\fB0\fR = off, the default), counting it in
+\fBstale_opens_total{cluster,server}\fR. Such an entry is a leaked open whose
+close record was lost, most often to UDP loss; without a TTL it survives until
+the client's disconnect sweep, or until the memory budget evicts it.
+.sp
+Applied only to servers that report in-flight I/O snapshots
+(\fBxfr\fR on \fBxrootd.monitor fstat\fR), because only there does a live
+operation refresh its entry every reporting interval — anything older is
+genuinely stranded. Set it to at least three times that server's \fBxfr\fR
+period, or long-running operations will be expired out from under their own
+close records and every one of them will be reported as an orphan close.
+.RE
+\fB--user-ttl\fR \fIs\fR
+.RS 5
+Drop a user (session) entry \fIs\fR seconds after its disconnect was reported
+(default \fB300\fR; \fB0\fR = never), counting it in
+\fBexpired_users_total{cluster,server,reason="disconnected"}\fR.
+.P
+The entry outlives its disconnect only so that a straggling close can still
+resolve its identity against it; past that it is dead weight. The window runs
+from the disconnect and is not extended by the stragglers it serves, so the
+lifetime is predictable.
+.P
+On by default because it is safe by construction: a server reports a session's
+closes before its \fBisDisc\fR, so a record naming a session after its
+disconnect is already an anomaly. Without it the only things that ever reclaim a
+finished session are memory pressure and \fB--server-ttl\fR a day later, and a
+busy collector accumulates hundreds of thousands of spent sessions against a few
+thousand open files \(em visible as
+\fBstate_entries{kind="users"}\fR far above \fBstate_entries{kind="files"}\fR.
+.RE
+\fB--user-idle-ttl\fR \fIs\fR
+.RS 5
+Drop a \fIstill-connected\fR user entry that has not been named for \fIs\fR
+seconds and holds no open files (default \fB21600\fR, six hours; \fB0\fR = off),
+counting it in \fBexpired_users_total{...,reason="idle"}\fR. This covers a
+disconnect record that was lost entirely, as \fB--file-ttl\fR does on the file
+side.
+.P
+Unlike \fB--user-ttl\fR this is a \fIguess\fR: an idle but connected client is
+legitimate and indistinguishable from one whose disconnect was lost. Hence the
+long default, and hence it never takes an entry that still holds an open file,
+which is a session demonstrably mid-operation.
+.P
+\fBSet too low it is destructive rather than merely lossy.\fR A live session
+whose entry has been expired reaches its disconnect with no identity to resolve
+against, and is reported as an \fIinstant\fR: \fBxrootd.session.start_time_source\fR
+becomes \fBdisconnect\fR and a zero-second value is folded into
+\fBsession_duration_seconds\fR, quietly corrupting the distribution. The two
+series that say so are \fBexpired_users_total{reason="idle"}\fR and
+\fBsession_starts_total{source="disconnect"}\fR; read them together.
+.RE
+\fB--state-file\fR \fIfile\fR
+.RS 5
+Persist the correlation state across restarts: on shutdown (SIGTERM/SIGINT)
+the whole state — the per-server dictionaries and open-file tables, the
+\fIg\fR-stream counter baselines, and the decode statistics — is written to
+\fIfile\fR as a single versioned JSON document (atomically, via a \fB.tmp\fR
+rename), and on the next start it is reloaded before the first packet is
+decoded, so a clean restart does not open a blind window while the
+dictionaries repopulate. A snapshot is good for exactly one restart (the file
+is removed once read) and is discarded when its format version does not match
+or it is older than \fB--state-ttl\fR.
+.sp
+Under systemd the option defaults to
+\fB$STATE_DIRECTORY/xrdmoncollect-state.json\fR (the bundled unit sets
+\fBStateDirectory=xrootd\fR, so \fB/var/lib/xrootd/xrdmoncollect-state.json\fR);
+outside systemd it is off unless given. An explicitly empty value disables
+persistence.
+.RE
+\fB--state-ttl\fR \fIdur\fR
+.RS 5
+Discard a state snapshot older than \fIdur\fR on reload, accepting an
+\fBs\fR/\fBm\fR/\fBh\fR/\fBd\fR suffix (default \fB15m\fR). After that long a
+stop most correlation entries would be stale anyway (opens have closed, the
+servers may have restarted with new dictids), so the collector starts fresh
+instead.
+.RE
+\fB--scitags\fR \fIsrc\fR
+.RS 5
+Load a SciTags registry (the scitags.org schema: a top-level \fBexperiments\fR
+array of \fB{expId, expName, activities:[{activityId, activityName}]}\fR). The
+numeric SciTags experiment/activity ids carried on the \fIU\fR stream are then
+additionally mapped to their names (\fBscitags.experiment\fR,
+\fBscitags.activity\fR). The names stand on their own and are deliberately
+\fInot\fR folded into \fBxrootd.vo\fR, which carries only a genuine VO. The
+numeric ids are emitted either way; a missing or unparseable source is warned about and
+otherwise ignored.
+.sp
+\fIsrc\fR is a local file path or an \fBhttp(s)://\fR URL (e.g.
+\fBhttps://www.scitags.org/api.json\fR). A URL source requires that the
+collector was built with libcurl.
+.RE
+\fB--scitags-refresh\fR \fIseconds\fR
+.RS 5
+Re-fetch a URL \fB--scitags\fR registry every \fIseconds\fR (default 3600; 0
+disables) so a long-running collector tracks the published registry. The swap
+is atomic with respect to the decode loop, and a failed re-fetch keeps the
+current registry. Ignored for a file source.
+.RE
+\fB--dataset\fR \fIre\fR
+.RS 5
+Emit an \fBxrootd.dataset\fR attribute on every document that carries a
+\fBfile.path\fR: \fIre\fR is a POSIX extended regular expression matched
+against the path, and its first capture group becomes the value. For a
+CMS-style namespace
+(\fI/store/<class>/<era>/<primary-dataset>/...\fR) that is
+.sp
+.RS 3
+\fB--dataset '^/store/[^/]+/[^/]+/([^/]+)/'\fR
+.RE
+.sp
+Pick the group to suit the namespace: an EOS instance might capture the
+project directory, ATLAS the dataset container. Dataset-level popularity
+panels need this; nothing else does. The pattern is compiled once at start-up
+(an uncompilable one is rejected) and matched once per emitted document on the
+serializer thread, never in the receive path, so the cost is negligible at
+realistic close rates \(em keep it anchored and simple all the same. A path it
+does not match simply gets no attribute.
+.RE
+\fB--no-resolve\fR
+.RS 5
+Do not substitute the collector's local fully-qualified hostname for a server
+that reports from the loopback address (\fB::1\fR/\fB127.0.0.1\fR, the common
+co-located setup). With this flag \fBserver.address\fR keeps the numeric address
+unless a hostname arrives on the \fI=\fR ident stream. Remote servers are never
+reverse-resolved; their hostname comes from the \fI=\fR ident.
+.RE
+\fB--sessions\fR
+.RS 5
+Correlate per-session activity and emit a \fIsession\fR document on each client
+disconnect (off by default). When disabled, no per-session rollup is accumulated
+and no session document is produced. See the \fBDESCRIPTION\fR.
+.RE
+\fB--spans\fR
+.RS 5
+Also emit OpenTelemetry \fIspan\fR documents alongside the log records: a
+file-operation span per close or failed operation, and a session span (the trace
+root) per disconnect. The span reuses the log's \fBresource\fR, \fBattributes\fR
+and \fBtraceId\fR/\fBspanId\fR but carries the span fields (\fBname\fR, \fBkind\fR,
+\fBstartTimeUnixNano\fR/\fBendTimeUnixNano\fR, \fBstatus\fR), so a tracing backend
+reconstructs the client session (login \(-> per-file operation). Off by default;
+like the logs it can be high volume. The session span is only meaningful together
+with \fB--sessions\fR.
+.IP
+Spans are what create traces: without \fB--spans\fR nothing is sent to
+\fB/v1/traces\fR, so a logs-only OTLP export (however many \fBtraceId\fRs the logs
+carry) shows no traces in Tempo/Grafana.
+.RE
+\fB--traces\fR
+.RS 5
+Emit a document per \fIt\fR-stream I/O record (read, write, open, close, readv,
+disconnect). This is high volume. With \fB--spans\fR, each read/write/readv also
+becomes a child \fIspan\fR nested under the file's span, so the trace
+waterfall reads session \(-> file \(-> I/O.
+.RE
+\fB--gstream\fR
+.RS 5
+Emit a document per \fIg\fR-stream (plugin) record.
+.RE
+\fB--redirects\fR
+.RS 5
+Emit a concluded-operation document per \fIr\fR-stream redirect record
+(\fBxrootd.operation.state\fR \fBRedirected\fR, with the destination in the
+\fBxrootd.redirect.*\fR attributes). Emitted mainly by redirectors/managers.
+Redirects are counted
+in the aggregated metrics regardless of this flag.
+.RE
+\fB--debug\fR
+.RS 5
+Also emit one JSON object per decoded record (raw, uncorrelated).
+.RE
+\fB-v\fR
+.RS 5
+Print decoder statistics on exit.
+.RE
+\fB-h\fR, \fB--help\fR
+.RS 5
+Print the option summary and exit.
+.RE
+.SH SERVER CONFIGURATION
+The richness of the file operation document depends on the server's
+\fBxrootd.monitor\fR directive. File-level fields (\fBfile.path\fR, byte counts,
+operation counts, and squared sums) require \fBfstat\fR with \fBlfn ops ssq
+xfr\fR; identity fields such as \fBxrootd.auth.method\fR and the auth-derived VO
+require the \fBauth\fR option. A representative configuration is:
+.P
+.RS 5
+.nf
+xrootd.monitor all flush 30s ident 5m fstat 60s lfn ops ssq xfr 1 \\
+  auth dest fstat info user io <collector-host>:9930
+.fi
+.RE
+.P
+When \fBauth\fR is omitted, \fBxrootd.auth.method\fR and the auth-derived VO are
+absent, but client version, IP version, and the remaining fields still
+populate.
+.P
+The \fBxrootd.client.site\fR field is populated when the connecting client
+advertises a site of its own: a client with \fBXRDSITE\fR (or \fBXRD_SITE\fR,
+which takes precedence) set in its environment sends it at login, and the server
+forwards it on the \fIu\fR-stream. This is independent both of the reporting
+server's own \fBservice.namespace\fR and of the collector's \fB--site\fR.
+.SS Tuning for pipeline resilience
+The monitor streams are UDP: a datagram larger than the path MTU is fragmented
+at the IP layer and the loss of any one fragment drops the whole datagram.
+Keep \fIevery\fR stream buffer at or below the MTU: \fBmbuff\fR (trace),
+\fBfbsz\fR (fstat, \fBdefault 65472\fR), \fBrbuff\fR (redirect, default 32K)
+and \fBgbuff\fR (g-stream, default 32K) — 1472 for a 1500-byte IPv4 path, 1452
+for IPv6. Note that before XRootD 6.1 \fBfbsz\fR does \fInot\fR follow
+\fBmbuff\fR: setting \fBmbuff 1472\fR alone still emits ~64K fstat datagrams
+(~44 fragments each), which is the stream the file operation documents are built
+from — set \fBfbsz\fR explicitly on such servers. Do not go far below the MTU
+either: a single fstat record (a close with a long LFN and an error message)
+must fit the buffer or the server drops it.
+.P
+\fBflush\fR/\fBfstat\fR/\fBwindow\fR bound latency, not loss: smaller buffers
+just flush more often. In the collector's metrics,
+\fBpackets_lost_total{cluster,server,stream}\fR reports pseq gaps per stream class
+(\fBmain\fR, \fBf\fR, \fBg:<provider>\fR — the server runs independent
+sequence counters for the fstat stream and each g-stream provider); loss
+concentrated on \fBf\fR while \fBt\fR arrives fine is the fragmentation
+signature, loss on all streams points at the network or the collector's
+receive buffer. \fBpackets_total{cluster,server,stream}\fR carries the same
+\fB{server,stream}\fR labels, so a per-source loss percentage is
+\fBpackets_lost_total / packets_total\fR.
+\fBmalformed_total{server,stream,reason}\fR breaks out
+structurally invalid packets (\fBbad_plen\fR, \fBshort_packet\fR,
+\fBbad_record\fR, \fBtrailing_bytes\fR, \fBtruncated_string\fR); run with
+\fB--debug\fR to log the server, stream, and reason of each rejected packet.
+\fBunknown_packets_total\fR counts unhandled stream codes (usually stray
+traffic on the port).
+\fBinvalid_utf8_total\fR counts strings arriving off the wire whose bytes were
+not valid UTF-8. Each offending byte is replaced with U+FFFD as the string is
+read, before any field is cut out of it, so the document is emitted with one
+mangled field rather than dropped and the state file and metric labels carry
+the same repaired bytes. A steady rate means files are being named in an
+encoding other than UTF-8, which JSON cannot represent faithfully.
+.SH CONFIGURATION FILE
+Options may be supplied in an INI configuration file as an alternative to the
+command line. The file is loaded from the path given with \fB-c\fR, or
+automatically from \fI/etc/xrootd/xrdmoncollect.cfg\fR when present. All keys are
+placed in a single \fB[xrdmoncollect]\fR section and use the long-option names
+(for example \fBos-url\fR, \fBforward\fR, \fBmax-memory\fR); command-line
+options override values from the file. Four keys are spelled differently from
+the option they set, because those options have only a short form:
+\fBport\fR (\fB-p\fR, also accepted as \fBudp-port\fR), \fBbind\fR (\fB-b\fR),
+\fBoutput\fR (\fB-o\fR) and \fBverbose\fR (\fB-v\fR). Flags take a boolean
+value, e.g. \fBspans = true\fR. For example:
+.P
+.RS 5
+.nf
+[xrdmoncollect]
+port = 9930
+os-url = https://opensearch.example.org:9200
+forward = logstash.example.org:5044
+max-memory = 1G
+.fi
+.RE
+.SS Multiple destinations
+Both HTTP sinks accept any number of destinations. The flat \fBos-*\fR and
+\fBotlp-*\fR keys, and their command-line equivalents, define the one named
+\fBdefault\fR; each additional endpoint gets an \fB[opensearch "\fIname\fB"]\fR
+or \fB[otlp "\fIname\fB"]\fR section. The typical use is a site keeping its own
+monitoring while also feeding a central collector, from one instance rather than
+two. There is no command-line equivalent.
+.P
+.RS 5
+.nf
+[xrdmoncollect]
+port = 9930
+cache-dir = /var/lib/xrootd/moncollect
+
+[otlp "local"]
+url = http://alloy.example.org:4318
+
+[otlp "wlcg"]
+url = https://otel.wlcg.example:4318
+token = @/etc/xrootd/wlcg.token
+
+[opensearch "site"]
+url = https://opensearch.example.org:9200
+index = site-file-ops
+.fi
+.RE
+.P
+Keys inside an \fB[opensearch]\fR section are \fBurl\fR (required), \fBindex\fR,
+\fBuser\fR, \fBpass\fR, \fBtoken\fR, \fBinsecure\fR and \fBdatastream\fR; inside
+an \fB[otlp]\fR section, \fBurl\fR (required), \fBtoken\fR and \fBinsecure\fR.
+They are the long-option names without the \fBos-\fR/\fBotlp-\fR prefix, and an
+unrecognised one is a fatal error.
+.P
+A named section \fBinherits nothing\fR from the flat keys, not even the index:
+inheriting would make the result depend on whether a value came from the file or
+the command line, since the two are read in that order, and an inherited
+credential would silently be POSTed to an endpoint it was never meant for. Every
+key defaults to what the corresponding option defaults to.
+.P
+Every destination runs its own thread, queue, retry state and disk-cache
+directory, and every sink metric carries a \fBdestination\fR label. One that is
+slow or unreachable can neither stall the collector nor affect another: its
+queue is bounded in bytes and drops its oldest body when full, counted in
+\fBxrootd_collector_post_overflow_total\fR /
+\fBxrootd_collector_otlp_overflow_total\fR (which is distinct from a drop after
+a failed POST -- an overflow means the destination cannot keep up, not that a
+disk cache is missing).
+.P
+A section name must start with a letter or digit and may contain only letters,
+digits, \fB_\fR, \fB-\fR and \fB.\fR; it becomes both a directory component
+under \fB--cache-dir\fR and a Prometheus label value. Names are compared without
+regard to case, and \fBdefault\fR is reserved for the flat keys.
+.SS Document filtering
+The configuration file may also carry any number of \fB[filter "\fIname\fB"]\fR
+sections, each one a rule matched against every finished document just before it
+reaches the output sinks. A matching rule either suppresses the document or tags
+it with a label, so activity that is uninteresting to end users (a storage
+instance's own internal traffic, say) can be dropped at the collector or merely
+marked for filtering downstream. There is no command-line equivalent.
+.P
+.RS 5
+.nf
+[filter "eos-internal"]
+user     = daemon, root, ~^[0-9]+$
+authprot = sss
+action   = tag
+label    = internal
+
+[filter "eos-proc"]
+path   = /eos/*/proc/*
+action = drop
+.fi
+.RE
+.P
+Within a rule, \fBaction\fR (\fBtag\fR, the default, \fBdrop\fR or \fBkeep\fR)
+and \fBlabel\fR (default: the rule name) are reserved; every other key is a
+match condition, and an unrecognised one is a start-up error. Conditions are
+ANDed. A value is a comma-separated OR-list whose alternatives are matched as an
+exact string, as a glob when they contain \fB*\fR or \fB?\fR, or as a POSIX
+extended regular expression when they begin with \fB~\fR; a leading \fB!\fR
+negates the condition. A condition naming a field the document does not carry
+never matches, negated or not.
+.P
+Rules are evaluated in no particular order: every matching rule contributes its
+label to the \fBxrootd.filter.labels\fR attribute, and the document is dropped
+only when some matching rule says \fBdrop\fR and none says \fBkeep\fR.
+.P
+Condition keys are \fBuser\fR, \fBuserid\fR, \fBrole\fR, \fBvo\fR, \fBgroups\fR,
+\fBauthprot\fR, \fBproto\fR, \fBscheme\fR, \fBclient\fR, \fBclientip\fR,
+\fBclientsite\fR, \fBapp\fR, \fBappver\fR, \fBappinfo\fR, \fBappid\fR,
+\fBexperiment\fR, \fBactivity\fR, \fBpath\fR, \fBdir\fR, \fBfilename\fR,
+\fBext\fR, \fBdataset\fR, \fBevent\fR, \fBop\fR, \fBstate\fR,
+\fBerror\fR, \fBprovider\fR, \fBtarget\fR, \fBsession\fR, \fBseverity\fR,
+\fBserver\fR, \fBsite\fR, \fBcluster\fR, \fBservice\fR, \fBprogram\fR
+and \fBversion\fR, or a
+raw \fBattributes.\fIkey\fR / \fBresource.\fIkey\fR path for any other field.
+.P
+Filtering applies to the emitted documents only: a dropped document is still
+counted in the I/O, session and error series and still folded into its session
+rollup, so the aggregate view of the cluster remains complete. The exception is
+\fBdocuments_total\fR, which counts documents that reached at least one sink --
+the tree sink, the text sink, or both -- so it is the same number for an
+OTLP-only collector, which never serializes a document to text, as for one
+writing NDJSON. The number
+suppressed is exported as \fBfiltered_documents_total\fR and reported as
+\fBfiltered=\fR in the \fB-v\fR exit summary.
+.P
+Note that a filter key must start in column 1: an indented line is appended to
+the preceding key's value by the INI parser's multi-line continuation, which
+would fold the rest of the rule into its first key.
+.SH SYSTEMD INTEGRATION
+The bundled \fBxrdmoncollect.service\fR unit runs the collector as
+\fBType=notify\fR: the daemon signals readiness once its listeners and worker
+threads are up, and signals \fBSTOPPING=1\fR when shutdown begins.
+.P
+For zero-loss restarts, enable the companion socket unit:
+.P
+.RS 5
+.nf
+systemctl enable --now xrdmoncollect.socket
+.fi
+.RE
+.P
+With socket activation, systemd creates and \fIholds\fR the listening
+sockets (\fBListenDatagram=\fR for the UDP monitor port, optionally
+\fBListenStream=\fR for the TCP shovel listener) and passes them to the
+collector, which matches them against its configured ports by socket type and
+port number. Because the sockets never close across a service restart —
+whether a clean \fBsystemctl restart\fR or a crash with \fBRestart=on-failure\fR
+— datagrams keep queueing in the kernel receive buffer (sized with the socket
+unit's \fBReceiveBuffer=\fR, applied by systemd as root and therefore not
+capped by \fBnet.core.rmem_max\fR) and shovel connections queue in the listen
+backlog. Combined with \fB--state-file\fR, a collector restart is invisible to
+the monitoring pipeline as long as the downtime fits the receive buffer.
+.P
+The ports in the socket unit must match \fBudp-port\fR/\fBtcp-port\fR in the
+configuration file; when no inherited socket fits a configured port the
+collector binds that socket itself, so a mismatch merely loses the zero-loss
+property. Without the socket unit (or outside systemd) nothing changes: the
+collector binds its sockets as usual.
+.SH ENVIRONMENT
+\fBSTATE_DIRECTORY\fR
+.RS 5
+Set by systemd from \fBStateDirectory=\fR. When present and \fB--state-file\fR
+was not given, the correlation snapshot defaults to
+\fB$STATE_DIRECTORY/xrdmoncollect-state.json\fR.
+.RE
+\fBLISTEN_FDS\fR, \fBLISTEN_PID\fR
+.RS 5
+Set by systemd socket activation. Sockets passed this way are adopted in
+preference to binding; see \fBSYSTEMD INTEGRATION\fR.
+.RE
+\fBNOTIFY_SOCKET\fR
+.RS 5
+Set by systemd for \fBType=notify\fR. Used to report readiness and, on
+shutdown, that the collector is stopping. Only when built with libsystemd.
+.RE
+\fBMALLOC_ARENA_MAX\fR, \fBGLIBC_TUNABLES\fR, \fBMALLOC_MMAP_THRESHOLD_\fR, \fBMALLOC_TRIM_THRESHOLD_\fR
+.RS 5
+The collector tunes the glibc allocator at start-up \(em bounding arenas,
+pinning the mmap threshold so large output bodies are returned to the operating
+system on free, and lowering the trim threshold \(em because the default
+behaviour makes resident memory a poor proxy for memory in use, which is what
+\fB--max-memory\fR steers on. Any of these set in the environment is left
+alone, so the tuning can be overridden without rebuilding.
+.RE
+.SH FILES
+\fI/etc/xrootd/xrdmoncollect.cfg\fR
+.RS 5
+Default configuration file, used when it exists and \fB-c\fR was not given.
+.RE
+\fI$STATE_DIRECTORY/xrdmoncollect-state.json\fR
+.RS 5
+Correlation snapshot; see \fB--state-file\fR. Written at shutdown and removed
+once read.
+.RE
+\fI<cache-dir>\fR
+.RS 5
+On-failure spool; see \fB--cache-dir\fR. The destination named \fBdefault\fR
+uses the directory itself for OpenSearch and \fIotlp-logs\fR/\fIotlp-traces\fR
+beneath it; every other destination uses \fIos-<name>\fR and
+\fIotlp-<name>-logs\fR/\fIotlp-<name>-traces\fR. Bodies a sink permanently
+refused are kept alongside as \fI*.rejected\fR and never replayed; removing
+them is left to the operator who has read them.
+.RE
+.SH NOTES
+Documentation for all components associated with \fBxrdmoncollect\fR can be
+found at https://xrootd.org/docs.html
+.SH DIAGNOSTICS
+Errors yield an error message and a non-zero exit status. The program otherwise
+runs until terminated; use the kill command to stop it.
+.SH SEE ALSO
+\fBxrootd\fR(8), \fBsystemd.socket\fR(5), \fBsystemd.resource-control\fR(5)
+.SH LICENSE
+LGPL
+.SH SUPPORT LEVEL
+The \fBxrdmoncollect\fR command is supported by the xrootd collaboration.
+Contact information can be found at:
+
+.ce
+https://xrootd.org/contact.html

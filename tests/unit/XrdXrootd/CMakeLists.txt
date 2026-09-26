@@ -5,7 +5,15 @@ if(NOT TARGET XrdServer)
   return()
 endif()
 
-add_unit_tests(SOURCES XrdXrootdFileStats.cc XrdXrootdRedirHelper.cc LIBRARIES XrdServer XrdUtils)
+add_unit_tests(
+  SOURCES
+    XrdXrootdFileStats.cc
+    XrdXrootdRedirHelper.cc
+    XrdXrootdStats.cc
+  LIBRARIES
+    XrdServer
+    XrdUtils
+)
 
 # The monitor statics are global to the process and Init() runs only once, so
 # these tests have their own executable. The test file provides main().

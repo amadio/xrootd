@@ -1,1 +1,2 @@
+add_subdirectory(XrdHttpMetricsExporter)
 add_subdirectory(XrdSecgsi)

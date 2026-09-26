@@ -31,13 +31,39 @@
 
 #include "Xrd/XrdStats.hh"
 #include "Xrd/XrdStatsLegacy.hh"
+#include "XProtocol/XProtocol.hh"
 #include "XrdMetrics/XrdMetricsRegistry.hh"
 #include "XrdMetrics/XrdMetricsSerializer.hh"
 #include "XrdSfs/XrdSfsInterface.hh"
 #include "XrdSys/XrdSysAtomics.hh"
+#include "XrdXrootd/XrdXrootdFileStats.hh"
 #include "XrdXrootd/XrdXrootdResponse.hh"
 #include "XrdXrootd/XrdXrootdStats.hh"
-  
+
+/******************************************************************************/
+/*           F i l e   I / O   b y t e   t o t a l s   ( g l o b a l )        */
+/******************************************************************************/
+
+// Process-wide file I/O byte counters, updated by XrdXrootdFileStats on every
+// read/write regardless of the per-file monitoring level (see the header).
+//
+RAtomic_llong XrdXrootdFileStats::totRdBytes{0};
+RAtomic_llong XrdXrootdFileStats::totRvBytes{0};
+RAtomic_llong XrdXrootdFileStats::totWrBytes{0};
+
+/******************************************************************************/
+/*          P e r - o p e r a t i o n   a d m i n   c o u n t e r s           */
+/******************************************************************************/
+
+namespace
+{
+// Cached per-request-id counter handles for the metadata/admin operations that
+// otherwise fold into miscCnt. Indexed by (reqid - kXR_auth); populated once in
+// RegisterMetrics, then a pointer deref on the dispatch hot path.
+//
+XrdMetrics::Counter<std::uint64_t> *adminOpCtr[kXR_REQFENCE - kXR_auth] = {nullptr};
+}
+ 
 /******************************************************************************/
 /*                           C o n s t r c u t o r                            */
 /******************************************************************************/
@@ -137,10 +163,48 @@ void XrdXrootdStats::RegisterMetrics()
    CTR("stalls_total",          "client stalls (delays) issued", stallCnt);
 #undef CTR
 
+// File I/O byte totals (counted on every read/write across all files). pgread
+// folds into read, pgwrite/writev into write.
+//
+   subsystem.observeCounter<std::uint64_t>("bytes_total", "file I/O bytes", {}, {"op"})
+    .add({"read"},  []{return (uint64_t)XrdXrootdFileStats::totRdBytes.load();})
+    .add({"readv"}, []{return (uint64_t)XrdXrootdFileStats::totRvBytes.load();})
+    .add({"write"}, []{return (uint64_t)XrdXrootdFileStats::totWrBytes.load();});
+
 // High-water mark of concurrent async i/o operations is a gauge, not a counter.
 //
    subsystem.observeGauge<std::int64_t>("async_max", "peak concurrent asynchronous i/o ops")
     .add({}, [this]{return (int64_t)AtomicGet(AsyncMax);});
+
+// Async i/o operations currently in flight. AsyncNow gates async scheduling on
+// the hot path, so it stays the source of truth and is only observed here.
+//
+   subsystem.observeGauge<std::int64_t>("async_now", "asynchronous i/o operations in flight")
+    .add({}, [this]{return (int64_t)AtomicGet(AsyncNow);});
+
+// Per-operation counters for the metadata/admin requests that otherwise only
+// add to miscCnt. These are native (the series is the source of truth, bumped in
+// the dispatch path); one cached series handle per request id, labelled by the
+// request name. The existing ops_total/requests_total are left untouched.
+//
+   auto& adm = subsystem.counterFamily<std::uint64_t>("admin_ops_total", "metadata/admin protocol operations", {"op"});
+   for (int reqid : {kXR_chmod, kXR_dirlist, kXR_fattr,   kXR_locate,
+                     kXR_mkdir, kXR_mv,      kXR_query,    kXR_prepare,
+                     kXR_rm,    kXR_rmdir,   kXR_set,      kXR_stat,
+                     kXR_statx, kXR_truncate})
+       adminOpCtr[reqid - kXR_auth] =
+           &adm.labels({XProtocol::reqName((kXR_unt16)reqid)});
+}
+
+/******************************************************************************/
+/*                           B u m p A d m i n O p                            */
+/******************************************************************************/
+
+void XrdXrootdStats::BumpAdminOp(int reqid)
+{
+   unsigned int i = (unsigned int)(reqid - kXR_auth);
+   if (i < (unsigned int)(kXR_REQFENCE - kXR_auth) && adminOpCtr[i])
+      ++*adminOpCtr[i];
 }
 
 /******************************************************************************/

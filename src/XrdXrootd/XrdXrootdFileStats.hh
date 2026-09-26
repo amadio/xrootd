@@ -33,11 +33,20 @@
 #include <atomic>
 #include <cstring>
 
+#include "XrdSys/XrdSysRAtomic.hh"
 #include "XrdXrootd/XrdXrootdMonData.hh"
 
 class XrdXrootdFileStats
 {
 public:
+
+// Process-wide file I/O byte totals across all files, updated unconditionally
+// (independent of the per-file monitoring level) for the Prometheus metrics.
+// pgread/pgwrite bytes fold into the read/write totals.
+//
+static RAtomic_llong totRdBytes;   // read + pgread bytes
+static RAtomic_llong totRvBytes;   // readv bytes
+static RAtomic_llong totWrBytes;   // write + writev + pgwrite bytes
 
 kXR_unt32           FileID;   // Unique file id used for monitoring
 short               MonEnt;   // Set by mon: entry in reporting table or -1
@@ -95,7 +104,8 @@ inline ErrRec firstErr() const
                   }
 
 inline void pgrOps(int rsz, bool isRetry=false)
-                  {if (monLvl)
+                  {totRdBytes += rsz;
+                   if (monLvl)
                       {prw.rBytes += rsz;
                        prw.rCount++;
                        if(isRetry) prw.rRetry++;
@@ -103,7 +113,8 @@ inline void pgrOps(int rsz, bool isRetry=false)
                    }
 
 inline void pgwOps(int wsz, bool isRetry=false)
-                  {if (monLvl)
+                  {totWrBytes += wsz;
+                   if (monLvl)
                       {prw.wBytes += wsz;
                        prw.wCount++;
                        if(isRetry) prw.wRetry++;
@@ -119,7 +130,8 @@ inline void pgUpdt(int wErrs, int wFixd, int wUnc)
                   }
 
 inline void rdOps(int rsz)
-                 {if (monLvl)
+                 {totRdBytes += rsz;
+                  if (monLvl)
                      {xfr.read += rsz; ops.read++; xfrXeq = 1;
                       if (monLvl > 1)
                          {if (rsz < ops.rdMin) ops.rdMin = rsz;
@@ -132,7 +144,8 @@ inline void rdOps(int rsz)
                  }
 
 inline void rvOps(int rsz, int ssz)
-                 {if (monLvl)
+                 {totRvBytes += rsz;
+                  if (monLvl)
                      {xfr.readv += rsz; ops.readv++; ops.rsegs += ssz; xfrXeq=1;
                       if (monLvl > 1)
                          {if (rsz < ops.rvMin) ops.rvMin = rsz;
@@ -150,7 +163,8 @@ inline void rvOps(int rsz, int ssz)
                  }
 
 inline void wrOps(int wsz)
-                 {if (monLvl)
+                 {totWrBytes += wsz;
+                  if (monLvl)
                      {xfr.write += wsz; ops.write++; xfrXeq = 1;
                       if (monLvl > 1)
                          {if (wsz < ops.wrMin) ops.wrMin = wsz;

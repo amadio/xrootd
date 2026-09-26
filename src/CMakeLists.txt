@@ -53,6 +53,7 @@ add_subdirectory( XrdNet )
 add_subdirectory( XrdSut )
 add_subdirectory( XrdSys )
 add_subdirectory( XrdOuc )
+add_subdirectory( XrdMetrics )
 add_subdirectory( XrdTls )
 add_subdirectory( XrdRmc )
 

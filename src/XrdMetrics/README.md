@@ -1,0 +1,363 @@
+# XrdMetrics
+
+`XrdMetrics` is a new XRootD component that adds native instrumentation support.
+It's a small, lock-free, Prometheus- and OpenTelemetry-aware metrics system
+built into the common `XrdUtils` library. Therefore, it may be linked by any
+component and/or plugin. This means that it makes it possible to add monitoring
+features both to the server and the client sides using the same library, as well
+as into external applications linking against XRootD (e.g. EOS, and ROOT).
+
+The library exposes an `XrdMetrics::Collector` instance by default, and allows
+additional instances to be registered and scraped. From a collector instance,
+developers can declare subsystems, which are collections of related metrics,
+and within a subsystem metric families can be defined such as counters, gauges,
+histograms, and summaries. The process-wide registry keeps track of the whole
+hierarchy of objects, starting at the collector instances.
+
+Metrics are exposed on the server-side by a new `XrdHttpMetricsExporter` plugin
+that serves them via HTTP under a configurable endpoint, or pushes them
+periodically to a configurable endpoint in Prometheus text exposition format, or
+OTLP/JSON.
+
+## Object model
+
+The object structure is as shown below, with a unique, process-wide
+`CollectorRegistry` owning all top-level `Collector` instances. When scraping,
+the `CollectorRegistry` iterates through each `Collector`, its `Subsystems`,
+and metric families and serializes everything into a buffer that can be served
+or written out to a file (for example, at the end of a batch job in the case of
+the client).
+
+```
+CollectorRegistry          # process-wide directory of Collectors (one scrape/push)
+  └─ Collector             # a named prefix + frozen global labels + subsystems
+       └─ Subsystem        # a group of metric families ("sched", "cms", "http", ...)
+            └─ Family      # a metric name, family formed by the sets of labels
+                 └─ Series/Instrument   Counter / Gauge / Histogram / Summary
+```
+
+Lifetime is **strictly nested**: a `Collector` outlives its `Subsystem`s, which
+outlive their families, which outlive their series. Back-pointers rely on this, so
+you should never heap-allocate a `Collector` that may outlive the code using it.
+Make sure any collector other than the default is initialized as early as
+possible, before any metric family is registered, or use the process-wide default:
+
+```cpp
+XrdMetrics::Collector& c = XrdMetrics::Default(); // prefix "xrootd", auto-registered
+```
+
+`Default()` returns the singleton `Collector` with prefix `xrootd`; it joins the
+`CollectorRegistry` on first use, so anything you register on it is scraped.
+
+All examples below use `namespace XrdMetrics`.
+
+## Quick start
+
+A subsystem author grabs a `Subsystem`, then creates instruments once.
+Instruments are returned by reference, and can be cached. One should hold on to
+the reference to avoid having to perform lookups on the hot path. After metrics
+are all registered, which should happen during the initialization phase,
+updating is usually a simple increment or assignment, as the instruments are all
+handled internally with relaxed atomics, and the operator expose only the
+operations necessary for each of them to function. For example, a simple metric
+to count file open events can be declared as shown below:
+
+```cpp
+#include "XrdMetrics/XrdMetricsInstrument.hh"   // Counter, Gauge, Histogram, Summary
+#include "XrdMetrics/XrdMetricsRegistry.hh"     // Collector, Subsystem, CollectorRegistry
+
+XrdMetrics::Subsystem& ofs = XrdMetrics::Default().subsystem("ofs");
+
+auto m_Opens = ofs.counter<std::uint64_t>("opens_total", "file opens");
+
+// ... later, on the hot path (lock-free):
+++m_Opens;
+```
+
+The full metric names are then of the form `<prefix>_<subsystem>_<name>`, e.g.
+`xrootd_ofs_file_ops_total`. Metric and label names are validated at creation
+(`[a-zA-Z_:][a-zA-Z0-9_:]*` / `[a-zA-Z_][a-zA-Z0-9_]*`); an invalid name throws
+`std::invalid_argument`.
+
+When the metric to be exposed is the value of an existing variable that is used
+in delicate control logic, `XrdMetrics` can use an *observed* counter or gauge,
+which captures a reference to a variable to read its value only at scrape time,
+without having to change pre-existing code. For example, the number of threads
+in `XrdScheduler` is exposed as a metric by an observed gauge.
+
+All instruments update through relaxed atomics, without locks on the update
+path, so they are safe to increment concurrently from many threads.
+
+## Metric types (instruments)
+
+### Counter — monotonic (`uint64_t` or `double`)
+
+Counters are templated on their underlying type. The examples below show two
+examples for an integer and a floating point counter.
+
+```cpp
+Counter<std::uint64_t>& c = collector.subsystem("ops").counter<std::uint64_t>("requests_total");
+++c;         // pre-increment
+c++;         // post-increment
+c += 5;      // add
+c.value();   // read  -> 7
+
+Counter<double>& cpu = collector.subsystem("proc").counter<double>("cpu_seconds_total", "cpu time");
+cpu += 1.5;  // accumulates fractional amounts
+```
+
+A `Counter` as shown above only exposes a `operator()++` to increment its value,
+resetting and setting to a specific value are not allowed operations on it.
+Monotonicity is enforced by the type itself. This ensure that mistakes in usage
+can become compile-time errors rather than silent bugs.
+
+### Gauge — up/down (`int64_t` or `double`)
+
+`Gauges`, on the other hand, support more operators, so their value can be set
+at will. This type of metric is what you'd use to keep track of memory usage,
+for example, by setting it to the current number of bytes in use.
+
+```cpp
+Gauge<std::int64_t>& g = collector.subsystem("sched").gauge<std::int64_t>("threads");
+g = 8;  g += 2;  g -= 3;  ++g;  --g;   // -> 7
+```
+
+### Histogram — bucketed observations
+
+Buckets are given as upper bounds; a `+Inf` bucket is added implicitly and the
+serializer emits cumulative `_bucket`, plus `_sum` and `_count`:
+
+```cpp
+auto& h = collector.subsystem("io").histogram("size_bytes", {1, 2, 5}, "io sizes");
+h.observe(0.5);  h.observe(1.5);  h.observe(3);  h.observe(10);
+// xrootd_io_size_bytes_bucket{le="1"} 1 ... {le="+Inf"} 4 ; _sum 15 ; _count 4
+```
+
+### Summary — sum + count, no quantiles
+
+Client-side quantiles are intentionally omitted so series stay aggregatable across
+instances; a summary emits only `_sum` and `_count`:
+
+```cpp
+auto& s = collector.subsystem("xrootd").summary("request_bytes", "request sizes");
+s.observe(100);  s.observe(250);  s.observe(50);
+// xrootd_xrootd_request_bytes_sum 400 ; _count 3
+```
+
+## Labels and families
+
+To attach variable labels, create a *family* and pick a series with `.labels({...})`
+(positional, in declared order). The same values return the same cached handle:
+
+```cpp
+auto& fam = collector.subsystem("ops")
+    .counterFamily<std::uint64_t>("requests_total", "requests", {"verb"} /*var labels*/);
+
+fam.labels({"open"}) += 3;
+fam.labels({"read"}) += 5;
+fam.labels({"open"});   // same handle as before
+```
+
+`histogramFamily`, `summaryFamily` and `gaugeFamily` work the same way.
+
+Labels come from three sources and are always emitted in this order — **global**
+(registry-wide), then **family const**, then **variable**:
+
+```cpp
+Collector collector("xrootd", {{"instance", "h1"}});          // global label
+auto& fam = collector.subsystem("ops")
+    .counterFamily<std::uint64_t>("requests_total", "", {"verb"}, {{"proto", "xroot"}});
+fam.labels({"open"});
+// xrootd_ops_requests_total{instance="h1",proto="xroot",verb="open"}
+```
+
+The Prometheus prefix string is built **once** per series at creation and reused on
+every update; values are escaped for you.
+
+### Cardinality cap
+
+Pass `maxKids` to a family to bound its distinct label combinations. Combinations
+past the cap fold into a single `__over_cardinality_limit__` overflow series rather
+than growing memory without bound:
+
+```cpp
+auto& fam = collector.subsystem("g")
+    .counterFamily<std::uint64_t>("c", "", {"k"}, {} /*const labels*/, /*maxKids=*/2);
+fam.labels({"1"});  fam.labels({"2"});   // distinct
+fam.labels({"3"});  fam.labels({"4"});   // both -> __over_cardinality_limit__
+```
+
+## Native vs observed metrics
+
+Two ways to expose a value:
+
+- **Native (owned) instruments** — `counter()`, `gauge()`, `histogram()`,
+  `summary()`. *The metric is the storage*: you increment the atomic directly.
+  Prefer this.
+- **Observed instruments** — `observeCounter<T>()` / `observeGauge<T>()` wrap a
+  value **owned elsewhere** via a reader callback invoked at scrape time. The
+  callback must be cheap and thread-safe.
+
+Both appear side by side in `XrdScheduler`: the event tallies are owned counters,
+while live scheduler state (thread counts, queue depth) stays a plain `int` and is
+surfaced read-only:
+
+```cpp
+sched.observeGauge<std::int64_t>("threads", "worker threads")
+     .add({}, [this]{ return (int64_t)num_Workers; });        // read at scrape time
+```
+
+`.add({labels}, reader)` chains, so one observed family can carry many series:
+
+```cpp
+collector.subsystem("ops").observeCounter<std::uint64_t>("total", "operations", {}, {"op"})
+    .add({"open"}, [&]{ return open; })
+    .add({"read"}, [&]{ return read; });
+```
+
+Rule of thumb: use an owned instrument unless the value is a pre-existing
+control-flow variable you cannot replace with a counter — then observe it.
+
+## Dynamic series (`*Series`)
+
+When label *values* are discovered at runtime (e.g. remote-reported data in
+`xrdmoncollect`), use the get-or-create helpers. They deduplicate the family by
+name and are capped at `kDynamicSeriesCap` (8192) to contain untrusted cardinality:
+
+```cpp
+auto& sub = collector.subsystem("");
+++sub.counterSeries("xrootd_collector_frm_total", "frm", {{"server","s1"},{"op","stage"}});
+sub.gaugeSeries("xrootd_collector_active", "active", {{"server","s1"}}) = 4;
+sub.histogramSeries("xrootd_collector_sz", "sizes", {10,100}, {{"op","read"}}).observe(50);
+```
+
+Requesting an existing name with a different kind throws `std::invalid_argument`.
+
+## Serialization
+
+A `Serializer` is the output seam; families call back into it. Pass one to
+`Collector::serialize()`:
+
+```cpp
+std::string out;                                   // caller owns and may reuse the buffer
+PrometheusTextSerializer ser(out);
+collector.serialize(ser);                          // Prometheus exposition text
+```
+
+```cpp
+OtelJsonSerializer ser(out, "xrootd", {{"service.instance.id", "node-7"}});
+collector.serialize(ser);                          // OTLP/JSON, resourceMetrics/scopeMetrics, schema v1.26.0
+```
+
+The `PrometheusTextSerializer` is allocation-free in steady state; reuse the same
+buffer across scrapes (`out.clear()` between calls). `OtelJsonSerializer` requires
+the framing that `serialize()` provides — do not append raw text into the same
+buffer.
+
+`MetricSnapshot` collects the registry into a name→value map for non-flat legacy
+outputs (e.g. the `<stats>` XML), keyed by the series identity `name{labels}`:
+
+```cpp
+MetricSnapshot snap;
+collector.serialize(snap);
+snap.getInt("xrootd_sched_jobs_total");                       // 7
+snap.getInt("xrootd_proc_cpu_seconds_total{mode=\"user\"}");  // labelled series
+```
+
+### Multiple registries
+
+`CollectorRegistry` walks every registered `Collector` in one pass (one OTLP
+resource each). This is how a plugin such as EOS contributes its own prefixed
+`Collector` alongside `xrootd`:
+
+```cpp
+CollectorRegistry::instance().add(myCollector);   // idempotent; destructor auto-removes
+CollectorRegistry::instance().serialize(ser, filter);
+```
+
+`Collector::serializeBody(ser, filter)` emits without framing and applies a
+`GroupFilter` — a predicate on the subsystem name — to select which subsystems appear.
+
+## Configuration interaction
+
+Directives are parsed by `XrdMetrics::Config` (`metrics.*`, plus `all.role`):
+
+| Directive | Meaning | Default |
+|-----------|---------|---------|
+| `metrics.enable <bool>` | master on/off switch | on |
+| `metrics.subsystems [+s] [-s] s …` | per-subsystem filter (see below) | all on |
+| `metrics.label <key> <val>` | extra global label (repeatable) | — |
+| `metrics.path <path>` | HTTP endpoint path | `/metrics` |
+| `metrics.instance <name>` | `instance` label | hostname |
+| `metrics.pushurl <url>` | Pushgateway base URL (`""` = off) | off |
+| `metrics.pushinterval <sec>` | Pushgateway period | 30 |
+| `metrics.pushjob <name>` | Pushgateway `job` label | `xrootd` |
+| `metrics.otelurl <url>` | OTLP/HTTP metrics URL (`""` = off) | off |
+| `metrics.otelinterval <sec>` | OTLP push period | 30 |
+| `metrics.scrapettl <sec>` | reuse serialized scrape body within TTL (`0` = off) | 10 |
+| `metrics.scraperatelimit <n>` | max scrapes/second, else HTTP 503 (`0` = off) | 100 |
+| `metrics.requireauth <bool>` | require a credential to scrape `/metrics` | off |
+| `metrics.authtoken <token>` | accept `Authorization: Bearer <token>` (`""` = off) | off |
+| `metrics.authpassword <pw>` | accept HTTP Basic Auth password (`""` = off) | off |
+| `all.role <role>` | source for the `role` global label | — |
+
+The `metrics.scrape*` and `metrics.auth*`/`metrics.requireauth` directives govern
+the pull endpoint served by `XrdHttpMetricsExporter`; see that component's README
+for the caching, rate-limiting, and authentication behaviour.
+
+`metrics.subsystems` token syntax: `-name` denies a subsystem, `+name` (or a bare
+`name`) allows it. When any allow token is present the filter is default-deny —
+only listed subsystems are emitted.
+
+The essential mental model:
+
+> **Registration is unconditional; enable/disable is a serialize-time filter.**
+
+Subsystems always create their families and always update their (cheap, atomic)
+counters. `metrics.enable` and `metrics.subsystems` only decide what the exporter
+*emits*, via a `GroupFilter` built from `Config::subsystemEnabled()` and handed to
+`serialize()`. Disabling a subsystem never removes instrumentation from the code
+path, so toggling it has no correctness impact and near-zero cost.
+
+`Config::Load()` is idempotent and runs **early** in daemon startup (e.g.
+`XrdConfig.cc`, before any subsystem registers a family) so that the global labels
+it computes — program name, `role`, and `metrics.label` entries — can be frozen
+onto the default registry in time. See the lifetime rule below.
+
+## Initialization and lifetime constraints
+
+- **Global labels must be frozen before the first family is created.** The prefix
+  string of every series bakes in the global labels, so `setGlobalLabels()` (and
+  `Config::Load()`, which calls it) succeeds only while the registry has no families
+  yet. Set them at startup, not after instrumentation has begun.
+- **Respect the nesting.** `Collector` ⊃ `Subsystem` ⊃ Family ⊃ Series; children
+  hold back-pointers to parents. Do not create a `Collector` with a shorter lifetime
+  than the code registering into it — use `XrdMetrics::Default()` for process-global
+  metrics.
+- **Hold instrument references.** Factory methods return a stable reference to a
+  cached instrument; look it up once at registration and keep the pointer/reference.
+  Re-looking-up on the hot path defeats the purpose.
+- **`CollectorRegistry::instance()` is a leaked singleton** so it outlives static
+  `Collector`s during shutdown; a `Collector` unregisters itself in its destructor.
+- **Thread-safety.** Instrument updates are lock-free. Adding a *new* series to a
+  family (first `.labels({...})` for a value) takes a brief write lock; scrapes take
+  a read lock and serialize a stable snapshot. Observed-metric readers run during a
+  scrape and must be cheap and thread-safe.
+
+## Grafana dashboard
+
+`grafana-dashboard.json` (next to this README) is a ready-to-import dashboard for
+the metrics `xrootd` and `cmsd` expose on the `/metrics` endpoint. Import it in
+Grafana, pick your Prometheus data source, then use the **Job** / **Instance**
+template variables to scope the panels. It groups every native subsystem —
+protocol, OFS, HTTP, links, scheduler, buffers, process, proxy, disk cache, and
+the cmsd cluster view — into collapsible rows. (Metrics from the separate
+`xrdmoncollect` daemon have their own dashboards under `src/XrdApps/XrdMonCollect/`.)
+
+## Where to look
+
+- Instruments: `XrdMetricsInstrument.hh` · Families: `XrdMetricsFamily.hh`
+- Registry (Collector/Subsystem/CollectorRegistry): `XrdMetricsRegistry.hh`
+- Labels: `XrdMetricsLabels.hh` · Serializers: `XrdMetricsSerializer.hh`
+- Configuration: `XrdMetricsConfig.hh`
+- Worked examples: `tests/unit/XrdMetrics/` and `tests/unit/XrdPfc/XrdPfcMetrics.cc`

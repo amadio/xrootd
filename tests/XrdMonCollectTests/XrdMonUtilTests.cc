@@ -136,7 +136,10 @@ TEST(XrdMonUtf8, RepairedStringsSerializeCleanly)
   j["attributes"]["file.path"] = cleaned("/store/user/j\xe9r\xf4me/data.root");
   std::string text;
   ASSERT_NO_THROW(text = XrdMonDump(j));
-  EXPECT_NO_THROW(json::parse(text));
+
+  json back;
+  ASSERT_NO_THROW(back = json::parse(text));
+  EXPECT_EQ(back["attributes"]["file.path"], j["attributes"]["file.path"]);
 }
 
 // And the net behind it: even handed bytes that were never scrubbed, the
@@ -151,5 +154,9 @@ TEST(XrdMonUtf8, DumpSubstitutesRatherThanThrowing)
   std::string text;
   ASSERT_NO_THROW(text = XrdMonDump(j));
   EXPECT_NE(text.find(kFFFD), std::string::npos);
-  EXPECT_NO_THROW(json::parse(text));
+
+  json back;
+  ASSERT_NO_THROW(back = json::parse(text));
+  EXPECT_NE(back["attributes"]["file.path"].get<std::string>().find(kFFFD),
+            std::string::npos);
 }

@@ -1,2 +1,5 @@
 add_bats_test(mirage.bats)
 add_bats_test(mirage_32bits.bats)
+add_bats_test(mirage_wrapper.bats)
+add_bats_test(mirage_wrapper_init.bats)
+add_bats_test(mirage_xattr_wrapper.bats)

@@ -55,7 +55,7 @@ def get_version():
                 version = f.read().strip()
 
             if version.startswith('$'):
-                output = check_output(['git', 'describe'])
+                output = check_output(['git', 'describe', '--match', 'v*'])
                 version = output.decode().strip()
         except:
             version = None

@@ -22,7 +22,7 @@ if(XRootD_VERSION_STRING MATCHES "Format:")
   if(Git_FOUND)
     message(VERBOSE "Determining version with git")
     execute_process(
-      COMMAND "${GIT_EXECUTABLE}" describe
+      COMMAND "${GIT_EXECUTABLE}" describe --match "v*"
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
       RESULT_VARIABLE XRootD_GIT_RESULT
       OUTPUT_VARIABLE XRootD_GIT_VERSION

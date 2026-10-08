@@ -202,8 +202,52 @@ In this case, the structure is a bit different than before::
 As can be seen above, now all client libraries have been installed alongside the
 C++ Python bindings library (``client.cpython-311-x86_64-linux-gnu.so``). When
 installing via ``pip`` by simply calling ``pip install xrootd``, the package that
-gets installed is in this mode which includes the libraries. However, command
-line tools are not included.
+gets installed is in this mode which includes the libraries and native client
+commands. The commands ``xrdfs``, ``xrdcp`` and its alias ``xrdcopy`` are installed
+in the same scripts directory as other Python console commands, for example
+``.venv/bin`` in a virtual environment. They execute the bundled native programs
+and use the matching client libraries and authentication plugins. No system
+XRootD installation is needed::
+
+  $ python3 -m venv .venv
+  $ .venv/bin/python -m pip install xrootd
+  $ .venv/bin/xrdfs --help
+  $ .venv/bin/xrdcp --help
+
+A downstream package such as GFAL can declare ``xrootd`` in its
+``pyproject.toml`` runtime dependencies. Installing that package then installs
+both the bindings and these commands; no separate client package or optional
+extra is needed. Select a release or wheel containing this packaging change,
+since older published wheels contain only the bindings and libraries::
+
+  [project]
+  name = "example-client"
+  version = "0.1.0"
+  dependencies = ["xrootd"]
+
+When the native ``xrdtoken`` implementation is available in the source tree, it
+is included as well. This packaging change does not introduce the token
+implementation. Wheel tests exercise an HTTPS macaroon request when the wheel
+contains ``xrdtoken``.
+
+The full source-distribution build and the main CMake wheel build package the
+same native command set. The bindings-only build from the ``python/`` directory,
+or a CMake build with ``XRDCL_LIB_ONLY=ON``, continues to use an external XRootD
+installation and does not install commands.
+
+Full PyPI builds require libcurl and its development headers for the HTTP
+plugin, together with the dependencies described in INSTALL.md_. PyPI builds
+omit optional readline support. Published Linux and macOS wheels are repaired
+with ``auditwheel`` and ``delocate`` respectively to include required external
+libraries; locally built, unrepaired wheels may still need the non-XRootD
+libraries from the build environment. The supported platforms and Python
+versions are those in the Python wheel CI matrix. Windows wheels are not
+provided.
+
+The bundled HTTP plugin configuration is selected automatically for the
+commands and Python bindings. An explicit ``XRD_PLUGINCONFDIR`` or ``XRD_PLUGIN``
+setting retains precedence. Native authentication settings, including bearer
+tokens and X.509 credentials, continue to work as usual.
 
 Binary wheels are supported as well. They can be built using the ``wheel``
 subcommand instead of ``install``::

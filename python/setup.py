@@ -1,5 +1,5 @@
 import os
-import platform
+import shutil
 import subprocess
 import sys
 
@@ -12,6 +12,7 @@ try:
 except ImportError:
     from distutils.spawn import find_executable as which
 
+
 def get_cmake_args():
     args = os.getenv('CMAKE_ARGS')
 
@@ -20,6 +21,7 @@ def get_cmake_args():
 
     from shlex import split
     return split(args)
+
 
 srcdir = '${CMAKE_CURRENT_SOURCE_DIR}'
 
@@ -46,6 +48,7 @@ else:
 
     cmdline_args += get_cmake_args()
 
+
 def get_version():
     version = '${XRootD_VERSION_STRING}'
 
@@ -57,7 +60,7 @@ def get_version():
             if version.startswith('$'):
                 output = check_output(['git', 'describe', '--match', 'v*'])
                 version = output.decode().strip()
-        except:
+        except (OSError, ValueError, subprocess.CalledProcessError):
             version = None
 
     if version is None:
@@ -76,20 +79,30 @@ def get_version():
 
     return version
 
+
 class CMakeExtension(Extension):
     def __init__(self, name, src=srcdir, sources=[], **kwa):
         Extension.__init__(self, name, sources=sources, **kwa)
         self.src = os.path.abspath(src)
 
+
 class CMakeBuild(build_ext):
     def build_extensions(self):
         for ext in self.extensions:
-            extdir = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.name)))
+            extension_path = self.get_ext_fullpath(ext.name)
+            extdir = os.path.abspath(os.path.dirname(extension_path))
             destdir = os.path.join(extdir, ext.name)
 
             if prebuilt is not None:
-                self.mkpath(destdir)
+                if os.path.isdir(destdir):
+                    shutil.rmtree(destdir)
+                # Recreate directly; distutils caches previously created paths.
+                os.makedirs(destdir)
+                self.copy_file(srcdir + '/src/__init__.py', destdir)
 
+                # The payload includes native executables and client plugins
+                # when built by the main project, or just the standalone
+                # module.
                 for entry in sorted(os.listdir(prebuilt)):
                     self.copy_file(os.path.join(prebuilt, entry), destdir)
 
@@ -98,24 +111,26 @@ class CMakeBuild(build_ext):
             if cmake is None:
                 raise RuntimeError('Cannot find CMake executable')
 
-            # Use relative RPATHs to ensure the correct libraries are picked up.
+            # Use relative RPATHs to locate the matching client libraries.
             # The RPATH below covers most cases where a non-standard path is
             # used for installation. It allows to find libXrdCl with a relative
             # path from the site-packages directory. Build with install RPATH
             # because libraries are installed by Python/pip not CMake, so CMake
-            # cannot fix the install RPATH later on.
+            # cannot fix the RPATH later on.
 
             cmake_args = [
                 '-DPython_EXECUTABLE={}'.format(sys.executable),
                 '-DCMAKE_BUILD_WITH_INSTALL_RPATH=TRUE',
-                '-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}/{}'.format(self.build_temp, ext.name),
+                '-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}/{}'.format(
+                    self.build_temp, ext.name),
                 '-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={}'.format(destdir),
             ]
 
             if sys.platform == 'darwin':
-                cmake_args += [ '-DCMAKE_INSTALL_RPATH=@loader_path/../../..' ]
+                cmake_args += ['-DCMAKE_INSTALL_RPATH=@loader_path/../../..']
             else:
-                cmake_args += [ '-DCMAKE_INSTALL_RPATH=$ORIGIN/../../../../$LIB' ]
+                cmake_args += [
+                    '-DCMAKE_INSTALL_RPATH=$ORIGIN/../../../../$LIB']
 
             cmake_args += cmdline_args
 
@@ -125,6 +140,15 @@ class CMakeBuild(build_ext):
             check_call([cmake, ext.src, '-B', self.build_temp] + cmake_args)
             check_call([cmake, '--build', self.build_temp])
 
+
+# Configured by the enclosing CMake build. Standalone bindings deliberately
+# continue to use the externally installed XRootD commands and libraries.
+client_commands = '${PYXROOTD_COMMANDS}'
+if client_commands.startswith('$'):
+    client_commands = []
+else:
+    client_commands = client_commands.split()
+
 version = get_version()
 
 setup(name='xrootd',
@@ -133,22 +157,27 @@ setup(name='xrootd',
       author='XRootD Developers',
       author_email='xrootd-dev@slac.stanford.edu',
       url='https://xrootd.org',
-      download_url='https://github.com/xrootd/xrootd/archive/v%s.tar.gz' % version,
+      download_url=('https://github.com/xrootd/xrootd/archive/v%s.tar.gz'
+                    % version),
       keywords=['XRootD', 'network filesystem'],
       license='LGPL-3.0-or-later',
       long_description=open(srcdir + '/README.md').read(),
       long_description_content_type='text/plain',
-      packages = ['XRootD', 'XRootD.client', 'pyxrootd'],
-      package_data = {
-        'XRootD.client': ['py.typed'],
+      packages=['XRootD', 'XRootD.client', 'pyxrootd'],
+      package_data={
+          'XRootD.client': ['py.typed'],
       },
-      package_dir = {
-        'pyxrootd'     : srcdir + '/src',
-        'XRootD'       : srcdir + '/libs',
-        'XRootD/client': srcdir + '/libs/client',
+      package_dir={
+          'pyxrootd': srcdir + '/src',
+          'XRootD': srcdir + '/libs',
+          'XRootD/client': srcdir + '/libs/client',
       },
-      ext_modules= [ CMakeExtension('pyxrootd') ],
-      cmdclass={ 'build_ext': CMakeBuild },
+      ext_modules=[CMakeExtension('pyxrootd')],
+      cmdclass={'build_ext': CMakeBuild},
+      entry_points={'console_scripts': [
+          '{}=XRootD._cli:{}'.format(name, name)
+          for name in client_commands
+      ]},
       python_requires='>=3.6',
       zip_safe=False,
       classifiers=[
@@ -160,4 +189,4 @@ setup(name='xrootd',
           "Programming Language :: C++",
           "Programming Language :: Python",
       ]
-     )
+      )

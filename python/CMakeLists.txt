@@ -6,6 +6,10 @@ find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 
 add_subdirectory(src)
 
+if(NOT CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+  include(client-payload.cmake)
+endif()
+
 # When building standalone or for PyPI, setup.py drives the build and takes
 # care of installation, so there is nothing else to do here.
 
@@ -23,9 +27,9 @@ endif()
 set_target_properties(client PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE)
 
 if(APPLE)
-  set_target_properties(client PROPERTIES INSTALL_RPATH "@loader_path/../../..")
+  set_target_properties(client PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../..")
 else()
-  set_target_properties(client PROPERTIES INSTALL_RPATH "\$ORIGIN/../../../../\$LIB")
+  set_target_properties(client PROPERTIES INSTALL_RPATH "\$ORIGIN;\$ORIGIN/../../../../\$LIB")
 endif()
 
 configure_file(setup.py setup.py)
@@ -87,13 +91,15 @@ set(PYXROOTD_SITEDIR ${CMAKE_CURRENT_BINARY_DIR}/site-packages)
 
 message(STATUS "Python bindings wheel: ${PYXROOTD_WHEEL}")
 
-# The C++ dependencies of the wheel are tracked via the module built above.
+# The C++ dependencies are tracked via the native payload targets below.
 # The remaining files it packages have to be listed here, though. README.md
 # is in the list because setup.py reads it for the package description.
 
 set(PYXROOTD_SOURCES
   README.md
+  client-payload.cmake
   libs/__init__.py
+  libs/_cli.py
   libs/client/__init__.py
   libs/client/_asyncio.py
   libs/client/_version.py
@@ -132,7 +138,7 @@ else()
   set(PYXROOTD_PIP_OPTIONS)
 endif()
 
-# Stage exactly the module built above for setup.py to package, recreating
+# Stage the native payload built above for setup.py to package, recreating
 # the staging directory every time so that a wheel can never pick up stale
 # files, such as a module left behind by a build with another Python version.
 # Clear the wheel directory as well, so that it holds exactly one wheel,
@@ -143,16 +149,13 @@ endif()
 
 add_custom_command(
   OUTPUT ${PYXROOTD_WHEEL} ${PYXROOTD_SITEDIR}/pyxrootd/__init__.py
-  COMMAND ${CMAKE_COMMAND} -E rm -rf
-          ${CMAKE_CURRENT_BINARY_DIR}/extension ${CMAKE_CURRENT_BINARY_DIR}/dist
-  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/extension
-  COMMAND ${CMAKE_COMMAND} -E copy
-          $<TARGET_FILE:client> ${CMAKE_CURRENT_BINARY_DIR}/extension
+  COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_CURRENT_BINARY_DIR}/dist
   COMMAND ${PYXROOTD_ENV} ${Python_EXECUTABLE} -m pip wheel --no-deps --no-index
           ${PYXROOTD_PIP_OPTIONS} --disable-pip-version-check --wheel-dir ${CMAKE_CURRENT_BINARY_DIR}/dist .
   COMMAND ${Python_EXECUTABLE} -m pip install --no-deps --no-index --upgrade
           --disable-pip-version-check --target ${PYXROOTD_SITEDIR} ${PYXROOTD_WHEEL}
-  DEPENDS client $<TARGET_FILE:client> ${PYXROOTD_SOURCES}
+  DEPENDS PyXRootDClientPayload ${PYXROOTD_PAYLOAD_TARGETS}
+          ${PYXROOTD_SOURCES}
           ${CMAKE_CURRENT_BINARY_DIR}/setup.py
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   COMMENT "Building Python bindings wheel")
@@ -185,12 +188,27 @@ if(INSTALL_PYTHON_BINDINGS)
 
     execute_process(COMMAND ${Python_EXECUTABLE} -m pip install ${PIP_OPTIONS}
       --no-deps --ignore-installed
-      --prefix \$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX} ${PYXROOTD_WHEEL}
+      --prefix \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}\" ${PYXROOTD_WHEEL}
       RESULT_VARIABLE INSTALL_STATUS COMMAND_ECHO STDOUT)
     if(NOT INSTALL_STATUS EQUAL 0)
       message(FATAL_ERROR \"Failed to install Python bindings\")
     endif()
   ")
+
+  # A prefix installation also installs wheel console scripts into bindir.
+  # Restore the normal CMake executables there: native installations should
+  # remain usable independently of the Python bindings and their interpreter.
+  if(PYXROOTD_COMMANDS)
+    install(TARGETS xrdfs xrdcp RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    if(TARGET xrdtoken)
+      install(TARGETS xrdtoken RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    endif()
+    install(CODE "
+      file(REMOVE \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/xrdcopy\")
+      file(CREATE_LINK xrdcp
+        \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/xrdcopy\" SYMBOLIC)
+    ")
+  endif()
 endif()
 
 if(NOT BUILD_TESTS OR NOT ENABLE_SERVER_TESTS)

@@ -236,6 +236,9 @@ private:
         XrdCl::ResponseHandler *m_active_handler;
         std::condition_variable m_cv;
         std::mutex m_mutex;
+        // The terminal HTTP result, distinct from an acknowledgement that one
+        // write buffer has been consumed. Protected by m_mutex.
+        std::unique_ptr<XrdCl::XRootDStatus> m_final_status;
         std::deque<std::tuple<std::variant<std::pair<const void *, size_t>, XrdCl::Buffer>, XrdCl::ResponseHandler*, struct timespec>> m_pending_writes;
 
         // Start the next pending write operation.
@@ -255,12 +258,12 @@ private:
     // write requests
     class PutDefaultHandler : public XrdCl::ResponseHandler {
     public:
-        PutDefaultHandler(File &file) : m_logger(file.m_logger) {}
+        PutDefaultHandler(File &file) : m_file(file) {}
 
         virtual void HandleResponse(XrdCl::XRootDStatus *status, XrdCl::AnyObject *response);
 
     private:
-        XrdCl::Log *m_logger{nullptr};
+        File &m_file;
     };
 
     // The default object for all put failures

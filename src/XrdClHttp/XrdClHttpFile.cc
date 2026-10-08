@@ -405,28 +405,20 @@ File::Close(XrdCl::ResponseHandler *handler,
     m_is_opened = false;
 
     std::unique_ptr<XrdCl::XRootDStatus> status(new XrdCl::XRootDStatus{});
-    if (m_put_op && !m_put_op->HasFailed()) {
-        auto put_size = m_put_offset.load(std::memory_order_relaxed);
-        if (m_asize >= 0 && put_size == m_asize) {
-            if (put_size == m_asize) {
-                m_logger->Debug(kLogXrdClHttp, "Closing a finished file %s", m_url.c_str());
-            } else {
-                m_logger->Debug(kLogXrdClHttp, "Closing a file %s with partial size (offset %llu, expected %lld)",
-                                m_url.c_str(), static_cast<unsigned long long>(put_size), static_cast<long long>(m_asize));
-                status.reset(new XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errInvalidOp,
-                    0, "Cannot close file with partial size"));
-            }
-        } else {
-            m_logger->Debug(kLogXrdClHttp, "Flushing final write buffer on close");
-            auto put_handler = m_put_handler.load(std::memory_order_acquire);
-            if (put_handler) {
-                return put_handler->QueueWrite(std::make_pair(nullptr, 0), handler, GetHeaderTimeout(timeout));
-            } else {
-                m_logger->Error(kLogXrdClHttp, "Internal state error - put operation ongoing without handle");
-                return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errOSError);
-            }
+    if (m_put_op) {
+        // Consuming every write buffer does not complete the HTTP request.
+        // Close sends EOF and waits for the final PUT response, including any
+        // redirect and errors received after the last Write acknowledgement.
+        auto put_handler = m_put_handler.load(std::memory_order_acquire);
+        if (!put_handler) {
+            return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errInternal,
+                0, "PUT operation has no response handler");
         }
-    } else if (!m_put_op && m_open_flags & XrdCl::OpenFlags::Write) {
+        return put_handler->QueueWrite(std::make_pair(nullptr, 0), handler,
+                                       GetHeaderTimeout(timeout));
+    } else if (m_open_flags & (XrdCl::OpenFlags::Write |
+                              XrdCl::OpenFlags::New |
+                              XrdCl::OpenFlags::Delete)) {
         timespec ts;
         timespec_get(&ts, TIME_UTC);
         ts.tv_sec += timeout;
@@ -893,12 +885,13 @@ File::Write(uint64_t                offset,
             delete handler_wrapper;
             return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errInvalidArgs, 0, "HTTP uploads must start at offset 0");
         }
+        const auto size = buffer.GetSize();
         m_put_op.reset(new XrdClHttp::CurlPutOp(
             handler_wrapper, m_default_put_handler, url, std::move(buffer), ts, m_logger,
             GetConnCallout(), &m_default_header_callout
         ));
         handler_wrapper->SetOp(m_put_op);
-        m_put_offset.fetch_add(buffer.GetSize(), std::memory_order_acq_rel);
+        m_put_offset.fetch_add(size, std::memory_order_acq_rel);
         try {
             m_queue->Produce(m_put_op);
         } catch (...) {
@@ -1257,9 +1250,10 @@ File::PrefetchDefaultHandler::HandleResponse(XrdCl::XRootDStatus *status_raw, Xr
 
 void
 File::PutDefaultHandler::HandleResponse(XrdCl::XRootDStatus *status, XrdCl::AnyObject *response) {
-    delete response;
-    if (status) {
-        m_logger->Warning(kLogXrdClHttp, "Failing future write calls due to error: %s", status->ToStr().c_str());
+    auto handler = m_file.m_put_handler.load(std::memory_order_acquire);
+    if (handler) handler->HandleResponse(status, response);
+    else {
+        delete response;
         delete status;
     }
 }
@@ -1314,13 +1308,27 @@ File::PutResponseHandler::HandleResponse(XrdCl::XRootDStatus *status_raw, XrdCl:
     // callback handlers, which may delete this object or generate work in other threads.
 
     XrdCl::ResponseHandler *current_handler = nullptr;
-    if (!status->IsOK()) {
-        // Fail remaining (pending) handlers with the same error
-        // Any writes attempts by the client after failure are set
-        // are prompty declined
+    if (!status->IsOK() || m_op->IsDone()) {
+        // Publish the terminal result before invoking callbacks. A Close
+        // queued behind the final write receives this result without trying
+        // to resume an already completed curl handle.
         std::vector<XrdCl::ResponseHandler *> pending_handlers;
         {
             std::lock_guard<std::mutex> lg(m_mutex);
+            if (status->IsOK()) {
+                for (const auto &[buf, h, ts] : m_pending_writes) {
+                    const auto size = std::holds_alternative<XrdCl::Buffer>(buf)
+                        ? std::get<XrdCl::Buffer>(buf).GetSize()
+                        : std::get<std::pair<const void *, size_t>>(buf).second;
+                    if (size) {
+                        status.reset(new XrdCl::XRootDStatus(XrdCl::stError,
+                            XrdCl::errInvalidResponse, 0,
+                            "Server completed PUT with pending write buffers"));
+                        break;
+                    }
+                }
+            }
+            m_final_status.reset(new XrdCl::XRootDStatus(*status));
             current_handler = m_active_handler;
             for (auto &[buf, h, ts] : m_pending_writes) {
                 if (h) pending_handlers.push_back(h);
@@ -1352,18 +1360,6 @@ File::PutResponseHandler::HandleResponse(XrdCl::XRootDStatus *status_raw, XrdCl:
 XrdCl::XRootDStatus
 File::PutResponseHandler::QueueWrite(std::variant<std::pair<const void *, size_t>, XrdCl::Buffer> buffer, XrdCl::ResponseHandler *handler, struct timespec timeout)
 {
-    if (m_op->HasFailed()) {
-        auto sc = m_op->GetStatusCode();
-        if (HTTPStatusIsError(sc)){
-            auto httpErr = HTTPStatusConvert(sc);
-            auto err_msg = m_op->GetCurlErrorMessage();
-            if (err_msg.empty()) {
-                err_msg = m_op->GetStatusMessage();
-            }
-            return XrdCl::XRootDStatus(XrdCl::stError, httpErr.first, httpErr.second, err_msg);
-        }
-        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errInvalidOp, 0, "Cannot continue writing to open file after error");
-    }
     // The PUT is one curl operation spanning every write the client makes, but
     // the origin sends no response header until the body is complete.  Without
     // pushing the deadline out per write, the header timeout derived from the
@@ -1372,7 +1368,20 @@ File::PutResponseHandler::QueueWrite(std::variant<std::pair<const void *, size_t
     // slow-transfer detectors.
     m_op->ExtendDeadline(timeout);
 
-    std::lock_guard<std::mutex> lg(m_mutex);
+    std::unique_lock<std::mutex> lg(m_mutex);
+    if (m_final_status) {
+        if (!m_final_status->IsOK()) return *m_final_status;
+        const auto size = std::holds_alternative<XrdCl::Buffer>(buffer)
+            ? std::get<XrdCl::Buffer>(buffer).GetSize()
+            : std::get<std::pair<const void *, size_t>>(buffer).second;
+        if (size) {
+            return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errInvalidOp,
+                0, "Cannot write after the PUT completed");
+        }
+        lg.unlock();
+        if (handler) handler->HandleResponse(new XrdCl::XRootDStatus(), nullptr);
+        return {};
+    }
     if (!m_active) {
         m_active = true;
         m_active_handler = handler;

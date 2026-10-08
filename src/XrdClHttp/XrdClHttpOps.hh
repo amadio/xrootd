@@ -1017,6 +1017,7 @@ public:
     void Fail(uint16_t errCode, uint32_t errNum, const std::string &msg) override;
     bool Setup(CURL *curl, CurlWorker &) override;
     void Success() override;
+    RedirectAction Redirect(std::string &target) override;
     void ReleaseHandle() override;
     bool ContinueHandle() override;
 
@@ -1052,6 +1053,11 @@ private:
 
     // The buffer of data to upload (if the CurlPutOp owns the buffer).
     XrdCl::Buffer m_owned_buffer;
+
+    // Retain the first write until redirects settle. The caller may free its
+    // original buffer immediately after the write acknowledgement.
+    XrdCl::Buffer m_replay_buffer;
+    bool m_can_replay{true};
 
     // The non-owned view of the data to upload.
     // This may reference m_owned_buffer or an externally-owned `const char *`.

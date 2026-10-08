@@ -106,20 +106,6 @@ bool ReadBearerToken(const std::string &path, std::string &token) {
     return token.find_first_of("\r\n") == std::string::npos;
 }
 
-std::pair<std::string, std::string> DefaultCertificateAuthorities() {
-    auto env = XrdCl::DefaultEnv::GetEnv();
-    std::string ca_file;
-    if (!env->GetString("HttpCertFile", ca_file) || ca_file.empty()) {
-        auto value = getenv("X509_CERT_FILE");
-        if (value) ca_file = value;
-    }
-    std::string ca_dir;
-    if (!env->GetString("HttpCertDir", ca_dir) || ca_dir.empty()) {
-        auto value = getenv("X509_CERT_DIR");
-        if (value) ca_dir = value;
-    }
-    return {ca_file, ca_dir};
-}
 
 // For connection callbacks, we don't want to require a real DNS lookup; instead, we
 // will generate a fake address in the 169.254.x.y range and use that for the connection.

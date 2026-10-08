@@ -182,5 +182,5 @@ TEST_F(CurlWriteFixture, PutTimeoutTest)
     fprintf(stderr, "Write failed with error message: %s\n", rv.ToStr().c_str());
 
     rv = fh.Close();
-    ASSERT_TRUE(rv.IsOK());
+    ASSERT_FALSE(rv.IsOK()) << "Close must preserve the PUT timeout";
 }

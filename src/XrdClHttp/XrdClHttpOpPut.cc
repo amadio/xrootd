@@ -28,18 +28,22 @@ CurlPutOp::CurlPutOp(XrdCl::ResponseHandler *handler, std::shared_ptr<XrdCl::Res
     const std::string &url, const char *buffer, size_t buffer_size, struct timespec timeout,
     XrdCl::Log *logger, CreateConnCalloutType callout, HeaderCallout *header_callout)
     : CurlOperation(handler, url, timeout, logger, callout, header_callout),
-    m_data(buffer, buffer_size),
-    m_default_handler(default_handler)
+    m_replay_buffer(buffer_size),
+    m_data(m_replay_buffer.GetBuffer(), buffer_size),
+    m_default_handler(default_handler),
+    m_final(buffer_size == 0)
 {
+    if (buffer_size) memcpy(m_replay_buffer.GetBuffer(), buffer, buffer_size);
 }
 
 CurlPutOp::CurlPutOp(XrdCl::ResponseHandler *handler, std::shared_ptr<XrdCl::ResponseHandler> default_handler,
     const std::string &url, XrdCl::Buffer &&buffer, struct timespec timeout,
     XrdCl::Log *logger, CreateConnCalloutType callout, HeaderCallout *header_callout)
     : CurlOperation(handler, url, timeout, logger, callout, header_callout),
-    m_owned_buffer(std::move(buffer)),
-    m_data(buffer.GetBuffer(), buffer.GetSize()),
-    m_default_handler(default_handler)
+    m_replay_buffer(std::move(buffer)),
+    m_data(m_replay_buffer.GetBuffer(), m_replay_buffer.GetSize()),
+    m_default_handler(default_handler),
+    m_final(m_replay_buffer.GetSize() == 0)
 {
 
 }
@@ -114,15 +118,37 @@ CurlPutOp::Pause()
 void
 CurlPutOp::Success()
 {
-    SetDone(false);
-    if (m_handler == nullptr) {
-        m_logger->Warning(kLogXrdClHttp, "Put operation succeeded with no callback handler");
+    if (!m_data.empty()) {
+        Fail(XrdCl::errInvalidResponse, 0,
+             "Server completed PUT before consuming the write buffer");
         return;
     }
+    SetDone(false);
     auto status = new XrdCl::XRootDStatus();
     auto handle = m_handler;
     m_handler = nullptr;
-    handle->HandleResponse(status, nullptr);
+    if (handle) handle->HandleResponse(status, nullptr);
+    else if (m_default_handler) m_default_handler->HandleResponse(status, nullptr);
+    else delete status;
+}
+
+CurlOperation::RedirectAction
+CurlPutOp::Redirect(std::string &target)
+{
+    // A streaming source cannot rewind arbitrary earlier writes. Never send a
+    // truncated body after a late redirect. The initial write is retained so
+    // redirects issued while routing a PUT can safely replay it.
+    if (!m_can_replay) {
+        Fail(XrdCl::errNotSupported, 0,
+             "Cannot replay a streaming PUT after multiple write buffers");
+        return RedirectAction::Fail;
+    }
+    auto result = CurlOperation::Redirect(target);
+    if (result != RedirectAction::Fail) {
+        m_data = std::string_view(m_replay_buffer.GetBuffer(),
+                                  m_replay_buffer.GetSize());
+    }
+    return result;
 }
 
 bool
@@ -150,6 +176,7 @@ CurlPutOp::Continue(std::shared_ptr<CurlOperation> op, XrdCl::ResponseHandler *h
     }
     m_handler = handler;
     m_data = std::string_view(buffer, buffer_size);
+    if (buffer_size) m_can_replay = false;
     if (!buffer_size)
     {
         m_final = true;
@@ -172,8 +199,10 @@ CurlPutOp::Continue(std::shared_ptr<CurlOperation> op, XrdCl::ResponseHandler *h
         return false;
     }
     m_handler = handler;
-    m_data = std::string_view(buffer.GetBuffer(), buffer.GetSize());
-    if (!buffer.GetSize())
+    if (buffer.GetSize()) m_can_replay = false;
+    m_owned_buffer = std::move(buffer);
+    m_data = std::string_view(m_owned_buffer.GetBuffer(), m_owned_buffer.GetSize());
+    if (m_data.empty())
     {
         m_final = true;
     }

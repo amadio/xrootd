@@ -88,6 +88,9 @@ std::string_view ltrim_view(const std::string_view &input_view);
 std::string_view trim_view(const std::string_view &input_view);
 
 // Apply the common XrdClHttp configuration to a curl handle.
+// Shared defaults for new and pooled handles; explicit trust settings win.
+std::pair<std::string, std::string> DefaultCertificateAuthorities();
+
 void ConfigureHandle(CURL *curl, bool verbose);
 
 // Returns a newly-created curl handle (no internal caching) with the

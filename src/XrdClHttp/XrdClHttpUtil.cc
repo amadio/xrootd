@@ -42,6 +42,7 @@
 
 #include <fcntl.h>
 #include <fstream>
+#include <sys/stat.h>
 #ifdef __APPLE__
 #include <pthread.h>
 #else
@@ -850,14 +851,8 @@ std::string_view XrdClHttp::ltrim_view(const std::string_view &input_view) {
     return "";
 }
 
-void
-XrdClHttp::ConfigureHandle(CURL *curl, bool verbose) {
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "xrdcl-http/" XrdVERSION);
-    curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, DumpHeader);
-    curl_easy_setopt(curl, CURLOPT_DEBUGDATA, XrdCl::DefaultEnv::GetLog());
-    if (verbose)
-        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-
+std::pair<std::string, std::string>
+XrdClHttp::DefaultCertificateAuthorities() {
     auto env = XrdCl::DefaultEnv::GetEnv();
     std::string ca_file;
     if (!env->GetString("HttpCertFile", ca_file) || ca_file.empty()) {
@@ -866,15 +861,37 @@ XrdClHttp::ConfigureHandle(CURL *curl, bool verbose) {
             ca_file = std::string(x509_ca_file);
         }
     }
-    if (!ca_file.empty()) {
-        curl_easy_setopt(curl, CURLOPT_CAINFO, ca_file.c_str());
-    }
     std::string ca_dir;
     if (!env->GetString("HttpCertDir", ca_dir) || ca_dir.empty()) {
         char *x509_ca_dir = getenv("X509_CERT_DIR");
         if (x509_ca_dir) {
             ca_dir = std::string(x509_ca_dir);
         }
+    }
+    if (ca_dir.empty() && ca_file.empty()) {
+        // Grid CA packages install hashed certificates here. Preserve explicit
+        // trust settings and libcurl's normal CA bundle on other systems.
+        constexpr auto grid_ca_dir = "/etc/grid-security/certificates";
+        struct stat info;
+        if (stat(grid_ca_dir, &info) == 0 && S_ISDIR(info.st_mode)
+            && access(grid_ca_dir, R_OK | X_OK) == 0) {
+            ca_dir = grid_ca_dir;
+        }
+    }
+    return {ca_file, ca_dir};
+}
+
+void
+XrdClHttp::ConfigureHandle(CURL *curl, bool verbose) {
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "xrdcl-http/" XrdVERSION);
+    curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, DumpHeader);
+    curl_easy_setopt(curl, CURLOPT_DEBUGDATA, XrdCl::DefaultEnv::GetLog());
+    if (verbose)
+        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+
+    auto [ca_file, ca_dir] = DefaultCertificateAuthorities();
+    if (!ca_file.empty()) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, ca_file.c_str());
     }
     if (!ca_dir.empty()) {
         curl_easy_setopt(curl, CURLOPT_CAPATH, ca_dir.c_str());

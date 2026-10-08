@@ -115,3 +115,34 @@ teardown() {
     run -1 xrdfs --ipv4 --ipv6 stat root://$HOST//$F
     assert_output 'xrdfs: -4 and -6 are mutually exclusive'
 }
+
+@test "cat accepts byte aliases" {
+    run -0 xrdfs cat -b root://$HOST//$F
+    assert_output 'full URL test'
+}
+
+@test "cat -o writes to stdout with dash" {
+    run -0 xrdfs cat -o - root://$HOST//$F
+    assert_output 'full URL test'
+}
+
+@test "ls accepts formatting and stat options" {
+    run -0 xrdfs ls -lH root://$HOST//
+    assert_output --partial "$F"
+}
+
+@test "xattr accepts shorthand queries" {
+    run -0 xrdfs xattr root://$HOST//$F xroot.cksum
+    assert_output --partial 'xroot.cksum'
+}
+
+@test "mkdir accepts -p and -m options" {
+    run -0 xrdfs mkdir -p -m 0755 root://$HOST//newdir/subdir
+    run -0 xrdfs stat root://$HOST//newdir/subdir
+}
+
+@test "chmod accepts octal modes" {
+    run -0 xrdfs chmod 0755 root://$HOST//$F
+    run -0 xrdfs stat root://$HOST//$F
+}
+

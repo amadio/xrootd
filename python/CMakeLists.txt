@@ -233,7 +233,7 @@ list(APPEND ENVIRON "XROOTD=$<TARGET_FILE:xrootd>")
 list(APPEND ENVIRON "XRDFS=$<TARGET_FILE:xrdfs>")
 list(APPEND ENVIRON "PYTHONDONTWRITEBYTECODE=1")
 
-set(PYXROOTD_TESTS auth copy file filesystem filesystem_helpers glob storage storage_http stream threads
+set(PYXROOTD_TESTS auth copy copyprocess_arguments file file_readlines filesystem filesystem_helpers glob storage storage_http stream threads
                   url version_policy)
 
 if(Python_VERSION VERSION_GREATER_EQUAL 3.11)

@@ -193,8 +193,8 @@ class CopyProcess(object):
     self.__process.add_job(source, target, sourcelimit, force, posc,
                            coerce, mkdir, thirdparty, checksummode, checksumtype,
                            checksumpreset, dynamicsource, chunksize, parallelchunks, inittimeout,
-                           tpctimeout, rmBadCksum, cptimeout, retry, xrateThreshold,
-                           xrate, cont, rtrplc )
+                           tpctimeout, rmBadCksum, cptimeout, xrateThreshold, xrate,
+                           retry, cont, rtrplc )
 
   def prepare(self):
     """Prepare the copy jobs. **Must be called before** ``run()``."""

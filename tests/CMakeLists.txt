@@ -13,6 +13,7 @@ add_subdirectory(XrdMonCollectTests)
 
 add_subdirectory( XrdSsiTests )
 add_subdirectory(XrdOfsTests)
+add_subdirectory(XrdOfsPrep)
 
 if(NOT ENABLE_SERVER_TESTS)
   return()

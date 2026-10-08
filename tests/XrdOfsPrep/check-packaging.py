@@ -11,12 +11,13 @@ for name in ('XrdOfsPrepPersist.hh', 'XrdOfsPrepStorage.hh',
              'XrdOfsPrepBackend.hh', 'XrdOfsPrepare.hh'):
     assert (prefix / 'include/xrootd/XrdOfs' / name).is_file(), name
 for name in ('libXrdOfsPrepPersist.so', 'libXrdOfsPrepPersist.so.1',
-             'libXrdOfsPrepPersist-6.so'):
+             'libXrdOfsPrepPersist-6.so', 'libXrdHttpTapeApi-6.so'):
     assert (lib / name).exists(), name
 spec = (source / 'xrootd.spec').read_text()
 for section, entry in (
         ('server-libs', '%{_libdir}/libXrdOfsPrepPersist.so.*'),
         ('server-libs', '%{_libdir}/libXrdOfsPrepPersist-6.so'),
+        ('server-libs', '%{_libdir}/libXrdHttpTapeApi-6.so'),
         ('server-devel', '%{_libdir}/libXrdOfsPrepPersist.so'),
         ('server-devel', '%{_includedir}/%{name}/XrdOfs')):
     body = spec.split('%files ' + section + '\n', 1)[1].split('%files', 1)[0]
@@ -25,6 +26,7 @@ for package, entry in (
         ('libxrdserver6', '/usr/lib/*/libXrdOfsPrepPersist.so.*'),
         ('libxrdserver6t64', '/usr/lib/*/libXrdOfsPrepPersist.so.*'),
         ('xrootd-server-plugins', '/usr/lib/*/libXrdOfsPrepPersist-6.so'),
+        ('xrootd-server-plugins', '/usr/lib/*/libXrdHttpTapeApi-6.so'),
         ('libxrootd-server-dev', '/usr/lib/*/libXrdOfsPrepPersist.so'),
         ('libxrootd-server-dev', '/usr/include/xrootd/XrdOfs')):
     entries = (source / 'debian' / (package + '.install')).read_text()

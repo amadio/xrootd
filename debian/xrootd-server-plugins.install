@@ -3,6 +3,7 @@
 /usr/lib/*/libXrdCmsRedirectLocal-6.so
 /usr/lib/*/libXrdFileCache-6.so
 /usr/lib/*/libXrdHttp-6.so
+/usr/lib/*/libXrdHttpTapeApi-6.so
 /usr/lib/*/libXrdHttpCors-6.so
 /usr/lib/*/libXrdHttpMetricsExporter-6.so
 /usr/lib/*/libXrdHttpTPC-6.so

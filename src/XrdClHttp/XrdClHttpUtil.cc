@@ -53,6 +53,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cctype>
+#include <charconv>
 #include <cstdlib>
 #include <ctime>
 #include <sstream>
@@ -448,6 +449,7 @@ bool HeaderParser::Parse(const std::string &header_line)
 
     if (!m_recv_status_line) {
         m_recv_status_line = true;
+        m_unsatisfied_range_length.reset();
 
         std::stringstream ss(header_line);
         std::string item;
@@ -561,7 +563,19 @@ bool HeaderParser::Parse(const std::string &header_line)
         if (found == std::string::npos) {
             return false;
         }
+        m_unsatisfied_range_length.reset();
         auto incl_range = range_resp.substr(0, found);
+        if (incl_range == "*") {
+            auto complete_length = range_resp.substr(found + 1);
+            uint64_t length;
+            auto result = std::from_chars(complete_length.data(),
+                complete_length.data() + complete_length.size(), length);
+            if (result.ec != std::errc() || result.ptr != complete_length.data() + complete_length.size()) {
+                return false;
+            }
+            m_unsatisfied_range_length = length;
+            return true;
+        }
         found = incl_range.find("-");
         if (found == std::string::npos) {
             return false;

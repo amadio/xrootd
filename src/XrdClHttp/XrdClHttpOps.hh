@@ -778,7 +778,6 @@ private:
     void DeliverResponse();
 
     static size_t WriteCallback(char *buffer, size_t size, size_t nitems, void *this_ptr);
-    size_t Write(char *buffer, size_t size);
 
     // Extra response data from curl that overflowed the last buffer
     //
@@ -799,6 +798,9 @@ private:
     std::shared_ptr<XrdCl::ResponseHandler> m_default_handler;
 
 protected:
+    // Invoke the body callback; protected to allow operation regression tests.
+    size_t Write(char *buffer, size_t size);
+
     std::pair<uint64_t, uint64_t> m_op;
     uint64_t m_written{0}; // Bytes written into the current client-provided buffer
     char *m_buffer{nullptr}; // Buffer passed by XrdCl; we do not own it.

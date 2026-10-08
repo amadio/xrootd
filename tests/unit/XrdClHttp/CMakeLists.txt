@@ -10,6 +10,7 @@ add_unit_tests(
     ClientConfigTest.cc
     CopyResponseTest.cc
     OptionsCacheTest.cc
+    ReadResponseTest.cc
     RedirectTest.cc
     SpaceResponseTest.cc
     WebDavParserTest.cc

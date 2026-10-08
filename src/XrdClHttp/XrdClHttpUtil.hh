@@ -31,6 +31,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -109,6 +110,9 @@ public:
 
     uint64_t GetOffset() const {return m_response_offset;}
 
+    // Object length reported by an unsatisfied Content-Range: bytes */N.
+    std::optional<uint64_t> GetUnsatisfiedRangeLength() const {return m_unsatisfied_range_length;}
+
     static bool Canonicalize(std::string &headerName);
 
     bool HeadersDone() const {return m_recv_all_headers;}
@@ -170,6 +174,7 @@ private:
     int64_t m_content_length{-1};
     time_t m_modtime{-1};
     uint64_t m_response_offset{0};
+    std::optional<uint64_t> m_unsatisfied_range_length;
 
     XrdClHttp::ChecksumInfo m_checksums;
 

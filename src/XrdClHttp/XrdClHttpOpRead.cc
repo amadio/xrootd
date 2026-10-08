@@ -136,6 +136,15 @@ CurlReadOp::Setup(CURL *curl, CurlWorker &worker)
 void
 CurlReadOp::Fail(uint16_t errCode, uint32_t errNum, const std::string &msg)
 {
+    // Only a completed HTTP 416 with a known object length can confirm EOF.
+    // Transport and callback failures must still be reported as failures.
+    auto length = m_headers.GetUnsatisfiedRangeLength();
+    if (errCode == XrdCl::errErrorResponse && errNum == kXR_InvalidRequest &&
+        m_headers.GetStatusCode() == 416 && length && m_op.first >= *length &&
+        m_written == 0 && GetError() == OpError::ErrNone) {
+        Success();
+        return;
+    }
     std::string custom_msg = msg;
     SetDone(true);
     if (m_handler == nullptr && m_default_handler == nullptr) {return;}
@@ -225,12 +234,6 @@ size_t
 CurlReadOp::Write(char *buffer, size_t length)
 {
     //m_logger->Debug(kLogXrdClHttp, "Received a write of size %ld with offset %lld; total received is %ld; remaining is %ld", static_cast<long>(length), static_cast<long long>(m_op.first), static_cast<long>(length + m_written), static_cast<long>(m_op.second - length - m_written));
-    if (m_headers.IsMultipartByterange()) {
-        return FailCallback(kXR_ServerError, "Server responded with a multipart byterange which is not supported");
-    }
-    if (m_written == 0 && (m_headers.GetOffset() != m_op.first)) {
-        return FailCallback(kXR_ServerError, "Server did not return content with correct offset");
-    }
     // If the operation failed, do not copy the body of the response into the buffer; it is likely
     // an error message and not what we want to provide to the consumer buffer.
     if (m_headers.GetStatusCode() > 299) {
@@ -241,6 +244,12 @@ CurlReadOp::Write(char *buffer, size_t length)
         }
         UpdateBytes(length);
         return length;
+    }
+    if (m_headers.IsMultipartByterange()) {
+        return FailCallback(kXR_ServerError, "Server responded with a multipart byterange which is not supported");
+    }
+    if (m_written == 0 && (m_headers.GetOffset() != m_op.first)) {
+        return FailCallback(kXR_ServerError, "Server did not return content with correct offset");
     }
     // The write callback is "all or nothing".  Either you accept the whole thing (buffering
     // in m_prefetch_buffer any data that the client-provided buffer is too small to accept)

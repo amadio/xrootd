@@ -33,7 +33,7 @@ from XRootD.client.responses import XRootDNotFoundError, raise_as_oserror
 from XRootD.client.responses import checksum_query_path, parse_checksum
 from XRootD.client.responses import LocationInfo, DirectoryList, ProtocolInfo
 from XRootD.client.responses import ChecksumInfo
-from XRootD.client.utils import CallbackWrapper
+from XRootD.client.utils import CallbackWrapper, _xattr_mapping, _xattr_value
 from XRootD.client.url import URL
 from XRootD.client.flags import AccessMode, DirListFlags, MkDirFlags
 from XRootD.client.flags import QueryCode, StatInfoFlags
@@ -621,8 +621,8 @@ class FileSystem(object):
     """Get extended file attributes.
     :param path:  path to the file
     :type  path:  string
-    :param attrs: extended attributes to be set on the file
-    :type  attrs: list of tuples of name/value pairs
+    :param attrs: list of extended attribute names to be retrieved
+    :type  attrs: list of strings
     :returns:     tuple containing :mod:`XRootD.client.responses.XRootDStatus`
                   object and :mod:`list of touples (name, value, XRootD.client.responses.XRootDStatus)` object
     """
@@ -650,11 +650,9 @@ class FileSystem(object):
     return XRootDStatus(status), response
 
   def list_xattr(self, path, timeout=0, callback=None):
-    """Delete extended file attributes.
+    """List all extended file attributes.
     :param path:  path to the file
     :type  path:  string
-    :param attrs: extended attributes to be set on the file
-    :type  attrs: list of tuples of name/value pairs
     :returns:     tuple containing :mod:`XRootD.client.responses.XRootDStatus`
                   object and :mod:`list of touples (name, value, XRootD.client.responses.XRootDStatus)` object
     """
@@ -664,3 +662,57 @@ class FileSystem(object):
 
     status, response = self.__fs.list_xattr(path, timeout)
     return XRootDStatus(status), response
+
+  def xattrs(self, path, timeout=0, callback=None):
+    """Get all extended file attributes as a mapping.
+    :param path:  path to the file
+    :type  path:  string
+    :returns:     tuple containing :mod:`XRootD.client.responses.XRootDStatus`
+                  object and dict mapping xattr names to values
+    """
+    if callback:
+      def handle_xattrs(status, response, hostlist):
+        if status.ok:
+          item_status, response = _xattr_mapping(response)
+          if item_status:
+            status, response = item_status, None
+        else:
+          response = None
+        callback(status, response, hostlist)
+      return self.list_xattr(path, timeout, handle_xattrs)
+
+    status, response = self.list_xattr(path, timeout)
+    if not status.ok:
+      return status, None
+    item_status, response = _xattr_mapping(response)
+    if item_status:
+      return item_status, None
+    return status, response
+
+  def xattr(self, path, attr, timeout=0, callback=None):
+    """Get one extended file attribute value.
+    :param path:  path to the file
+    :type  path:  string
+    :param attr:  extended attribute name
+    :type  attr:  string
+    :returns:     tuple containing :mod:`XRootD.client.responses.XRootDStatus`
+                  object and the attribute value
+    """
+    if callback:
+      def handle_xattr(status, response, hostlist):
+        if status.ok:
+          item_status, response = _xattr_value(response)
+          if item_status:
+            status, response = item_status, None
+        else:
+          response = None
+        callback(status, response, hostlist)
+      return self.get_xattr(path, [attr], timeout, handle_xattr)
+
+    status, response = self.get_xattr(path, [attr], timeout)
+    if not status.ok:
+      return status, None
+    item_status, response = _xattr_value(response)
+    if item_status:
+      return item_status, None
+    return status, response

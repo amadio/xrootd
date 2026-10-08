@@ -23,11 +23,13 @@
 #include "XrdClHttpOps.hh"
 #include "XrdClHttpResponses.hh"
 #include "XrdClHttpTokenFileParser.hh"
+#include "XrdClHttpToken.hh"
 
 #include "XrdCl/XrdClAnyObject.hh"
 #include "XrdCl/XrdClDefaultEnv.hh"
 #include "XrdCl/XrdClPropertyList.hh"
 #include "XProtocol/XProtocol.hh"
+#include <XrdOuc/XrdOucJson.hh>
 
 #include <algorithm>
 #include <cerrno>
@@ -39,6 +41,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <new>
 
 namespace {
 
@@ -214,6 +217,336 @@ private:
 };
 
 }
+
+namespace {
+
+std::chrono::steady_clock::time_point
+TokenWorkflowExpiry(struct timespec timeout)
+{
+    // Match CurlOperation's zero-timeout default, but calculate it only once
+    // so discovery and all fallback requests share one operation deadline.
+    auto now = std::chrono::steady_clock::now();
+    if (timeout.tv_sec == 0 && timeout.tv_nsec == 0) {
+        return now + std::chrono::seconds(30);
+    }
+    return now + std::chrono::seconds(timeout.tv_sec) +
+        std::chrono::nanoseconds(timeout.tv_nsec);
+}
+
+struct TokenWorkflowQueueError {};
+struct TokenWorkflowExpired {};
+
+bool NormalizeIssuerEndpoint(std::string_view input, std::string &url)
+{
+    if (!NormalizeTokenUrl(input, url)) return false;
+    const auto authority_start = url.find("://") + 3;
+    const auto authority_end = url.find_first_of("/?#", authority_start);
+    if (url.substr(authority_start, authority_end - authority_start).find('@') !=
+        std::string::npos) {
+        url.clear();
+        return false;
+    }
+    return true;
+}
+
+// Coordinate the issuer workflow without blocking a curl worker.  Each step is
+// a regular CurlTokenOp queued through the same worker pool as any other HTTP
+// filesystem request; this handler only interprets the step result and queues
+// its successor.
+class TokenIssuerWorkflow final
+    : public XrdCl::ResponseHandler,
+      public std::enable_shared_from_this<TokenIssuerWorkflow> {
+public:
+    TokenIssuerWorkflow(std::shared_ptr<HandlerQueue> queue,
+                        XrdCl::ResponseHandler *handler,
+                        TokenRequest request,
+                        struct timespec timeout, XrdCl::Log *logger,
+                        CreateConnCalloutType callout)
+        : m_queue(std::move(queue)), m_handler(handler),
+          m_request(std::move(request)),
+          m_expiry(TokenWorkflowExpiry(timeout)), m_logger(logger),
+          m_callout(callout)
+    {}
+
+    // Queue the first stage.  A false return means nothing was queued and the
+    // caller should return an immediate error without invoking the handler.
+    bool Start()
+    {
+        try {
+            if (m_request.type == TokenRequest::Type::DeviceStart &&
+                !m_request.device_endpoint.empty()) {
+                std::string endpoint;
+                if (!NormalizeIssuerEndpoint(m_request.device_endpoint, endpoint) ||
+                    !NormalizeIssuerEndpoint(m_request.token_endpoint,
+                                       m_token_endpoint)) return false;
+                QueueDeviceRequest(endpoint);
+            } else {
+                BeginOAuthDiscovery();
+            }
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    void HandleResponse(XrdCl::XRootDStatus *status_raw,
+                        XrdCl::AnyObject *response_raw) override
+    {
+        std::unique_ptr<XrdCl::XRootDStatus> status(status_raw);
+        std::unique_ptr<XrdCl::AnyObject> response(response_raw);
+
+        try {
+            bool success = status && status->IsOK();
+            std::string value;
+            if (success) {
+                XrdCl::Buffer *buffer = nullptr;
+                if (response) response->Get(buffer);
+                if (buffer) {
+                    value = buffer->ToString();
+                } else {
+                    success = false;
+                }
+            }
+
+            if (std::chrono::steady_clock::now() > m_expiry) {
+                FinishError(XrdCl::errOperationExpired, 0,
+                            "Token issuer workflow expired");
+                return;
+            }
+
+            switch (m_stage) {
+            case Stage::OAuthDiscovery:
+                if (success && m_request.type == TokenRequest::Type::DeviceStart) {
+                    if (BeginDeviceRequest(value)) return;
+                } else if (success) {
+                    BeginOAuthRequest(value);
+                    return;
+                }
+                BeginOpenIdDiscovery();
+                return;
+            case Stage::OpenIdDiscovery:
+                if (success && m_request.type == TokenRequest::Type::DeviceStart) {
+                    if (BeginDeviceRequest(value)) return;
+                } else if (success) {
+                    BeginOAuthRequest(value);
+                    return;
+                }
+                FinishError(XrdCl::errInvalidResponse, 0,
+                            "Issuer discovery did not provide token endpoints");
+                return;
+            case Stage::OAuthRequest:
+                if (success) {
+                    Finish(std::move(status), std::move(response));
+                } else if (status && !status->IsOK()) {
+                    Finish(std::move(status), std::move(response));
+                } else {
+                    FinishError(XrdCl::errInvalidResponse, 0,
+                                "Token request returned an invalid response");
+                }
+                return;
+            case Stage::DeviceRequest:
+                if (!success) {
+                    Finish(std::move(status), std::move(response));
+                    return;
+                }
+                {
+                    auto parsed = nlohmann::json::parse(value, nullptr, false);
+                    if (parsed.is_object() &&
+                        !parsed.contains("verification_uri") &&
+                        parsed.contains("verification_url") &&
+                        parsed["verification_url"].is_string()) {
+                        parsed["verification_uri"] = parsed["verification_url"];
+                    }
+                    if (parsed.is_discarded() || !parsed.is_object() ||
+                        !parsed.contains("device_code") ||
+                        !parsed["device_code"].is_string() ||
+                        !parsed.contains("user_code") ||
+                        !parsed["user_code"].is_string() ||
+                        !parsed.contains("verification_uri") ||
+                        !parsed["verification_uri"].is_string() ||
+                        !parsed.contains("expires_in") ||
+                        !parsed["expires_in"].is_number_unsigned()) {
+                        FinishError(XrdCl::errInvalidResponse, 0,
+                                    "Invalid device authorization response");
+                        return;
+                    }
+                    std::string verification_url;
+                    if (!NormalizeTokenUrl(parsed["verification_uri"].get<std::string>(),
+                                           verification_url)) {
+                        FinishError(XrdCl::errInvalidResponse, 0,
+                                    "Device verification URL must use HTTPS");
+                        return;
+                    }
+                    parsed["token_endpoint"] = m_token_endpoint;
+                    auto result = std::make_unique<XrdCl::AnyObject>();
+                    auto buffer = new XrdCl::Buffer();
+                    buffer->FromString(parsed.dump());
+                    result->Set(buffer);
+                    Finish(std::move(status), std::move(result));
+                }
+                return;
+            }
+        } catch (const TokenWorkflowExpired &) {
+            FinishError(XrdCl::errOperationExpired, 0,
+                        "Token issuer workflow expired");
+        } catch (...) {
+            FinishError(XrdCl::errOSError, 0,
+                        "Failed to queue the next token request stage");
+        }
+    }
+
+private:
+    enum class Stage {
+        OAuthDiscovery,
+        OpenIdDiscovery,
+        OAuthRequest,
+        DeviceRequest
+    };
+
+    using HttpVerb = CurlOperation::HttpVerb;
+    using HeaderList = CurlOperation::HeaderList;
+
+    void Queue(Stage stage, const std::string &url, HttpVerb verb,
+               HeaderList headers, const std::string &body,
+               const std::string &response_key)
+    {
+        if (std::chrono::steady_clock::now() > m_expiry) {
+            throw TokenWorkflowExpired{};
+        }
+        m_stage = stage;
+        auto self = shared_from_this();
+        std::unique_ptr<CurlTokenOp> operation(new CurlTokenOp(
+            this, std::move(self), url, verb, std::move(headers), body,
+            response_key, m_expiry, m_logger, m_callout));
+        // Start() runs on the caller thread and follows the normal queue
+        // backpressure behavior. Successor stages run from a curl worker
+        // callback, where blocking behind a full queue could stall every
+        // worker.
+        if (m_first_stage) {
+            m_first_stage = false;
+            m_queue->Produce(std::move(operation));
+        } else if (!m_queue->TryProduce(std::move(operation))) {
+            if (std::chrono::steady_clock::now() > m_expiry) {
+                throw TokenWorkflowExpired{};
+            }
+            throw TokenWorkflowQueueError{};
+        }
+    }
+
+    void BeginOAuthDiscovery()
+    {
+        std::string url;
+        if (!BuildOAuthAuthorizationServerUrl(m_request.issuer, url)) {
+            BeginOpenIdDiscovery();
+            return;
+        }
+        Queue(Stage::OAuthDiscovery, url, HttpVerb::GET, {}, {},
+              m_request.type == TokenRequest::Type::DeviceStart ?
+                  "$json" : "token_endpoint");
+    }
+
+    void BeginOpenIdDiscovery()
+    {
+        std::string url;
+        if (!BuildOpenIdConfigurationUrl(m_request.issuer, url)) {
+            FinishError(XrdCl::errInvalidArgs, 0, "Invalid issuer URL");
+            return;
+        }
+        Queue(Stage::OpenIdDiscovery, url, HttpVerb::GET, {}, {},
+              m_request.type == TokenRequest::Type::DeviceStart ?
+                  "$json" : "token_endpoint");
+    }
+
+    bool BeginDeviceRequest(const std::string &metadata)
+    {
+        auto parsed = nlohmann::json::parse(metadata, nullptr, false);
+        if (parsed.is_discarded() || !parsed.is_object() ||
+            !parsed.contains("token_endpoint") ||
+            !parsed["token_endpoint"].is_string() ||
+            !parsed.contains("device_authorization_endpoint") ||
+            !parsed["device_authorization_endpoint"].is_string()) return false;
+        std::string device_url;
+        if (!NormalizeIssuerEndpoint(parsed["token_endpoint"].get<std::string>(),
+                               m_token_endpoint) ||
+            !NormalizeIssuerEndpoint(
+                parsed["device_authorization_endpoint"].get<std::string>(),
+                device_url)) return false;
+        QueueDeviceRequest(device_url);
+        return true;
+    }
+
+    void QueueDeviceRequest(const std::string &device_url)
+    {
+        Queue(Stage::DeviceRequest, device_url, HttpVerb::POST,
+              {{"Content-Type", "application/x-www-form-urlencoded"},
+               {"Accept", "application/json"}},
+              BuildDeviceAuthorizationRequest(m_request.scope,
+                                              m_request.client_id), "$json");
+    }
+
+    void BeginOAuthRequest(const std::string &endpoint)
+    {
+        std::string url;
+        std::string body;
+        std::string error;
+        if (!NormalizeIssuerEndpoint(endpoint, url)) {
+            if (m_stage == Stage::OAuthDiscovery) {
+                BeginOpenIdDiscovery();
+            } else {
+                FinishError(XrdCl::errInvalidResponse, 0,
+                            "Issuer returned an invalid token endpoint");
+            }
+            return;
+        }
+        if (m_request.type == TokenRequest::Type::OAuth) {
+            body = BuildOAuthRequest(m_request.scope, m_request.client_id,
+                                     m_request.client_secret);
+        } else {
+            if (!BuildOAuthMacaroonRequest(m_request.path, m_request.validity,
+                                           m_request.activities,
+                                           m_request.client_id,
+                                           m_request.client_secret,
+                                           body, error)) {
+                FinishError(XrdCl::errInvalidArgs, 0, error);
+                return;
+            }
+        }
+        Queue(Stage::OAuthRequest, url, HttpVerb::POST,
+              {{"Content-Type", "application/x-www-form-urlencoded"},
+               {"Accept", "application/json"}},
+              body, "access_token");
+    }
+
+    void Finish(std::unique_ptr<XrdCl::XRootDStatus> status,
+                std::unique_ptr<XrdCl::AnyObject> response)
+    {
+        auto handler = m_handler;
+        m_handler = nullptr;
+        if (handler) {
+            handler->HandleResponse(status.release(), response.release());
+        }
+    }
+
+    void FinishError(uint16_t err_code, uint32_t err_num,
+                     const std::string &message)
+    {
+        auto status = std::make_unique<XrdCl::XRootDStatus>(
+            XrdCl::stError, err_code, err_num, message);
+        Finish(std::move(status), {});
+    }
+
+    std::shared_ptr<HandlerQueue> m_queue;
+    XrdCl::ResponseHandler *m_handler{nullptr};
+    TokenRequest m_request;
+    std::string m_token_endpoint;
+    std::chrono::steady_clock::time_point m_expiry;
+    XrdCl::Log *m_logger{nullptr};
+    CreateConnCalloutType m_callout{nullptr};
+    Stage m_stage{Stage::OAuthDiscovery};
+    bool m_first_stage{true};
+};
+
+} // anonymous namespace
 
 Filesystem::Filesystem(const std::string &url, std::shared_ptr<HandlerQueue> queue, XrdCl::Log *log)
     : m_queue(queue),
@@ -466,6 +799,86 @@ XrdCl::XRootDStatus Filesystem::Query(XrdCl::QueryCode::Code  queryCode,
                 handler, url, ts, m_logger, GetConnCallout(),
                 m_header_callout.load(std::memory_order_acquire));
             description = "space query operation";
+            break;
+        }
+        case XrdCl::QueryCode::Visa:
+        {
+            std::size_t size = arg.GetSize();
+            if (size && arg.GetBuffer()[size - 1] == '\0') --size;
+            std::string input;
+            if (size) input.assign(arg.GetBuffer(), size);
+
+            TokenRequest request;
+            std::string error;
+            if (!ParseTokenRequest(input, request, error)) {
+                return XrdCl::XRootDStatus(
+                    XrdCl::stError, XrdCl::errInvalidArgs, 0, error
+                );
+            }
+
+            std::string target_url;
+            if (!NormalizeTokenUrl(GetCurrentURL(request.path), target_url)) {
+                return XrdCl::XRootDStatus(
+                    XrdCl::stError, XrdCl::errNotSupported, 0,
+                    "Token requests require an HTTPS or DAVS filesystem URL"
+                );
+            }
+
+            if (request.type == TokenRequest::Type::DevicePoll) {
+                std::string endpoint;
+                if (!NormalizeIssuerEndpoint(request.token_endpoint, endpoint)) {
+                    return XrdCl::XRootDStatus(
+                        XrdCl::stError, XrdCl::errInvalidArgs, 0,
+                        "Device token endpoint must use HTTPS");
+                }
+                operation = std::make_unique<CurlTokenOp>(
+                    handler, std::shared_ptr<XrdCl::ResponseHandler>{},
+                    endpoint, CurlOperation::HttpVerb::POST,
+                    CurlOperation::HeaderList{
+                        {"Content-Type", "application/x-www-form-urlencoded"},
+                        {"Accept", "application/json"}},
+                    BuildDeviceTokenRequest(request.device_code,
+                                            request.client_id,
+                                            request.client_secret),
+                    "$poll", ts, m_logger, GetConnCallout());
+                description = "device token poll";
+                break;
+            }
+            if (request.type != TokenRequest::Type::Macaroon) {
+                std::string normalized_issuer;
+                if (!NormalizeTokenUrl(request.issuer, normalized_issuer)) {
+                    return XrdCl::XRootDStatus(
+                        XrdCl::stError, XrdCl::errNotSupported, 0,
+                        "Token issuers require an HTTPS or DAVS URL"
+                    );
+                }
+                std::string discovery_url;
+                if (!BuildOAuthAuthorizationServerUrl(request.issuer,
+                                                      discovery_url)) {
+                    return XrdCl::XRootDStatus(
+                        XrdCl::stError, XrdCl::errInvalidArgs, 0,
+                        "Invalid token issuer URL"
+                    );
+                }
+                auto workflow = std::make_shared<TokenIssuerWorkflow>(
+                    m_queue, handler, std::move(request), ts,
+                    m_logger, GetConnCallout());
+                if (!workflow->Start()) {
+                    m_logger->Warning(kLogXrdClHttp,
+                        "Failed to add issuer token workflow to queue");
+                    return XrdCl::XRootDStatus(XrdCl::stError,
+                                               XrdCl::errOSError);
+                }
+                return XrdCl::XRootDStatus();
+            }
+
+            operation = std::make_unique<CurlTokenOp>(
+                handler, target_url,
+                BuildMacaroonRequest(request.validity,
+                                     request.activities),
+                ts, m_logger, GetConnCallout()
+            );
+            description = "token operation";
             break;
         }
         default:

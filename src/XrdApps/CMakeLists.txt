@@ -33,6 +33,15 @@ target_link_libraries(${XrdClRecorder} PRIVATE XrdCl)
 
 add_executable(xrdreplay XrdClRecordPlugin/XrdClReplay.cc)
 
+if(ENABLE_XRDCL AND NOT XRDCL_LIB_ONLY)
+  add_executable(xrdtoken XrdToken.cc XrdToken.hh)
+  target_link_libraries(xrdtoken PRIVATE XrdCl XrdUtils)
+  if(nlohmann_json_FOUND)
+    target_link_libraries(xrdtoken PRIVATE nlohmann_json::nlohmann_json)
+  endif()
+  install(TARGETS xrdtoken RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
 target_link_libraries(xrdreplay
   XrdCl
   XrdUtils 

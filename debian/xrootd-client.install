@@ -4,6 +4,7 @@
 /usr/bin/xrdcp
 /usr/bin/xrdcrc32c
 /usr/bin/xrdfs
+/usr/bin/xrdtoken
 /usr/bin/xrdgsiproxy
 /usr/bin/xrdgsitest
 /usr/bin/xrdmapc
@@ -13,6 +14,7 @@
 /usr/share/man/man1/xrdcopy.1
 /usr/share/man/man1/xrdcp.1
 /usr/share/man/man1/xrdfs.1
+/usr/share/man/man1/xrdtoken.1
 /usr/share/man/man1/xrdgsiproxy.1
 /usr/share/man/man1/xrdgsitest.1
 /usr/share/man/man1/xrdmapc.1

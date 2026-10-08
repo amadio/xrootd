@@ -9,10 +9,12 @@ add_unit_tests(
   SOURCES
     ClientConfigTest.cc
     CopyResponseTest.cc
+    HandlerQueueTest.cc
     OptionsCacheTest.cc
     ReadResponseTest.cc
     RedirectTest.cc
     SpaceResponseTest.cc
+    TokenTest.cc
     WebDavParserTest.cc
     XrdClHttpHeaderBuilderAppendMissing.cc
     XrdClHttpHeaderBuilderEntrySeparation.cc

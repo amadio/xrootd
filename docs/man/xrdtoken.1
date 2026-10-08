@@ -1,0 +1,49 @@
+.TH XRDTOKEN 1 "2026" "XRootD" "XRootD Commands"
+.SH NAME
+xrdtoken \- request storage macaroons and OAuth access tokens
+.SH SYNOPSIS
+.B xrdtoken macaroon
+[\fB--write\fR] [\fB--validity\fR \fIminutes\fR]
+[\fB--activity\fR \fIname\fR] \fIhttps-or-davs-url\fR
+.br
+.B xrdtoken oauth
+\fB--issuer\fR \fIurl\fR \fB--scope\fR \fIscope\fR
+\fB--client-id\fR \fIid\fR
+.br
+.B xrdtoken id
+\fB--issuer\fR \fIurl\fR \fB--scope\fR \fIopenid-scope\fR
+\fB--client-id\fR \fIid\fR
+[\fB--device-endpoint\fR \fIurl\fR \fB--token-endpoint\fR \fIurl\fR]
+.br
+.B xrdtoken oauth-device
+\fB--issuer\fR \fIurl\fR \fB--scope\fR \fIscope\fR
+\fB--client-id\fR \fIid\fR
+[\fB--device-endpoint\fR \fIurl\fR \fB--token-endpoint\fR \fIurl\fR]
+.br
+.B xrdtoken oauth-macaroon
+\fB--issuer\fR \fIurl\fR [\fB--client-id\fR \fIid\fR]
+[\fB--write\fR] [\fB--validity\fR \fIminutes\fR]
+[\fB--activity\fR \fIname\fR] \fIhttps-or-davs-url\fR
+.SH DESCRIPTION
+Print a token to standard output. Direct macaroon requests POST to the storage
+URL. OAuth requests use issuer discovery. The \fBoauth\fR and
+\fBoauth-macaroon\fR forms use the client credentials grant. They can
+authenticate with a client certificate or the
+\fBXRD_TOKEN_CLIENT_SECRET\fR environment variable. The \fBid\fR and
+\fBoauth-device\fR forms use device authorization and print a verification
+URL and code to standard error. They output only the requested token after
+authorization completes.
+For providers that do not advertise device authorization metadata, pass
+both endpoint options explicitly. The endpoints must use HTTPS.
+The \fBoauth-macaroon\fR form derives activity scopes from the storage path.
+Issuer discovery tries RFC 8414 metadata and then OpenID Connect metadata.
+An issuer failure does not change the requested token type.
+Use \fB--timeout\fR \fIseconds\fR to set the deadline for each request
+workflow; the default uses the client timeout.
+.SH ENVIRONMENT
+.TP
+.B XRD_TOKEN_CLIENT_SECRET
+Optional client secret for OAuth. Keep it out of command arguments.
+.SH SEE ALSO
+.BR xrdfs (1),
+.BR xrdcp (1)

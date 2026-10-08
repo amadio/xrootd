@@ -43,6 +43,14 @@ bool ParseResponseProperties(const char *xml,
         document.RootElement(), properties);
 }
 
+bool ParseResponseQuota(const char *xml, XrdClHttp::WebDavQuota &quota)
+{
+    TiXmlDocument document;
+    document.Parse(xml);
+    return !document.Error() && XrdClHttp::ParseWebDavResponseQuota(
+        document.RootElement(), quota);
+}
+
 }
 
 TEST(WebDavParser, ParsesWhitespaceSeparatedAllowMethods)
@@ -143,6 +151,29 @@ TEST(WebDavParser, RequiresSuccessfulPropstatEntry)
         "</d:response>", properties));
 }
 
+TEST(WebDavParser, ParsesQuotaWithArbitraryPrefix)
+{
+    XrdClHttp::WebDavQuota quota;
+    ASSERT_TRUE(ParseResponseQuota(
+        "<x:response xmlns:x=\"DAV:\"><x:propstat>"
+        "<x:status>HTTP/1.1 200 OK</x:status><x:prop>"
+        "<x:quota-used-bytes>17</x:quota-used-bytes>"
+        "<x:quota-available-bytes>83</x:quota-available-bytes>"
+        "</x:prop></x:propstat></x:response>", quota));
+    EXPECT_EQ(quota.m_used, 17);
+    EXPECT_EQ(quota.m_available, 83);
+}
+
+TEST(WebDavParser, RequiresBothQuotaProperties)
+{
+    XrdClHttp::WebDavQuota quota;
+    EXPECT_FALSE(ParseResponseQuota(
+        "<d:response xmlns:d=\"DAV:\"><d:propstat>"
+        "<d:status>HTTP/1.1 200 OK</d:status><d:prop>"
+        "<d:quota-used-bytes>17</d:quota-used-bytes>"
+        "</d:prop></d:propstat></d:response>", quota));
+}
+
 TEST(WebDavParser, TrimsEmptyAndWhitespaceOnlyValuesSafely)
 {
     for (const auto value : {"", " ", "\t\r\n", "  \t  "})
@@ -199,4 +230,50 @@ TEST(WebDavParser, RejectsWhitespaceOnlyStatusAndContentLength)
     EXPECT_FALSE(ParseProperties(
         "<d:prop xmlns:d=\"DAV:\"><d:getcontentlength> \t </d:getcontentlength>"
         "</d:prop>", properties));
+}
+
+TEST(WebDavParser, CombinesQuotaGroupsAndIgnoresUnrelatedProperties)
+{
+    const std::string available =
+        "<d:propstat><d:status>HTTP/1.1 200 OK</d:status><d:prop>"
+        "<d:quota-available-bytes>83</d:quota-available-bytes>"
+        "<d:displayname>storage</d:displayname></d:prop></d:propstat>";
+    const std::string used =
+        "<d:propstat><d:status>HTTP/1.1 200 OK</d:status><d:prop>"
+        "<d:quota-used-bytes>17</d:quota-used-bytes></d:prop></d:propstat>";
+    for (const auto &groups : {available + used, used + available}) {
+        const auto xml = "<d:response xmlns:d=\"DAV:\">" + groups +
+            "<d:propstat><d:status>HTTP/1.1 404 Not Found</d:status><d:prop>"
+            "<d:quota-used-bytes>999</d:quota-used-bytes></d:prop>"
+            "</d:propstat></d:response>";
+        XrdClHttp::WebDavQuota quota;
+        ASSERT_TRUE(ParseResponseQuota(xml.c_str(), quota));
+        EXPECT_EQ(quota.m_available, 83);
+        EXPECT_EQ(quota.m_used, 17);
+    }
+}
+
+TEST(WebDavParser, RejectsWhitespaceOnlyQuotaValue)
+{
+    XrdClHttp::WebDavQuota quota;
+    EXPECT_FALSE(ParseResponseQuota(
+        "<d:response xmlns:d=\"DAV:\"><d:propstat>"
+        "<d:status>HTTP/1.1 200 OK</d:status><d:prop>"
+        "<d:quota-used-bytes> \t </d:quota-used-bytes>"
+        "<d:quota-available-bytes>83</d:quota-available-bytes>"
+        "</d:prop></d:propstat></d:response>", quota));
+}
+
+TEST(WebDavParser, RejectsExplicitEmptyQuotaStatus)
+{
+    for (const auto status : {"", " \t "}) {
+        const std::string xml =
+            "<d:response xmlns:d=\"DAV:\"><d:propstat><d:status>" +
+            std::string(status) + "</d:status><d:prop>"
+            "<d:quota-used-bytes>17</d:quota-used-bytes>"
+            "<d:quota-available-bytes>83</d:quota-available-bytes>"
+            "</d:prop></d:propstat></d:response>";
+        XrdClHttp::WebDavQuota quota;
+        EXPECT_FALSE(ParseResponseQuota(xml.c_str(), quota));
+    }
 }

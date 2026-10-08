@@ -175,6 +175,7 @@ private:
     // The flags used to open the file
     XrdCl::OpenFlags::Flags m_open_flags{XrdCl::OpenFlags::None};
 
+    std::string m_client_query; // Client-only authentication parameters.
     std::string m_url; // The URL as given to the Open() method.
     std::string m_last_url; // The last server the file was connected to after Open() (potentially after redirections)
     mutable std::string m_url_current; // The URL to use for future HTTP requests; may be the last URL plus additional query parameters.

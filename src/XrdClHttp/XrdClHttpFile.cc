@@ -338,7 +338,8 @@ File::Open(const std::string      &url,
         parsed_url.SetParams(pm);
     }
 
-    m_url = parsed_url.GetURL();
+    HttpClientConfig client_config;
+    m_url = ExtractHttpClientConfig(parsed_url.GetURL(), client_config, &m_client_query);
     m_last_url = "";
     m_url_current = "";
 
@@ -1076,7 +1077,8 @@ File::GetCurrentURL() const {
 
     auto iter = m_properties.find("XrdClHttpQueryParam");
     if (iter == m_properties.end()) {
-        return m_last_url.empty() ? m_url : m_last_url;
+        CalculateCurrentURL("");
+        return m_url_current;
     }
     CalculateCurrentURL(iter->second);
 
@@ -1110,6 +1112,10 @@ File::CalculateCurrentURL(const std::string &value) const {
             }
             m_url_current = last_url.substr(0, loc) + ss.str();
         }
+    }
+    if (!m_client_query.empty()) {
+        m_url_current += (m_url_current.find('?') == std::string::npos ? '?' : '&');
+        m_url_current += m_client_query;
     }
 }
 

@@ -47,6 +47,10 @@ gtest() {
     gtest xrdcl-test
 }
 
+@test "CurlMoveFixture.RenameWithinEndpoint" {
+    gtest xrdcl-test
+}
+
 @test "CurlReadFixture.SerialTest" {
     gtest xrdcl-test
 }

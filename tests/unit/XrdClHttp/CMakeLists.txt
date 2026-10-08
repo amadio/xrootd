@@ -7,7 +7,9 @@ find_package(CURL REQUIRED)
 
 add_unit_tests(
   SOURCES
+    ClientConfigTest.cc
     OptionsCacheTest.cc
+    SpaceResponseTest.cc
     WebDavParserTest.cc
     XrdClHttpHeaderBuilderAppendMissing.cc
     XrdClHttpHeaderBuilderEntrySeparation.cc

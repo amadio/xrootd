@@ -22,6 +22,7 @@
 #define XRDCLHTTP_CURLOPS_HH
 
 #include "XrdClHttpConnectionCallout.hh"
+#include "XrdClHttpCopyResponse.hh"
 #include "XrdClHttpHeaderCallout.hh"
 #include "XrdClHttpResponseInfo.hh"
 #include "XrdClHttpTape.hh"
@@ -965,6 +966,7 @@ public:
     virtual ~CurlCopyOp() {}
 
     bool Setup(CURL *curl, CurlWorker &) override;
+    void Fail(uint16_t errCode, uint32_t errNum, const std::string &msg) override;
     void Success() override;
     void ReleaseHandle() override;
 
@@ -983,25 +985,13 @@ private:
     // Callback for writing the response body to the internal buffer.
     static size_t WriteCallback(char *buffer, size_t size, size_t nitems, void *this_ptr);
 
-    // Handle a line of information in the control channel.
-    void HandleLine(std::string_view line);
-
-    // Returns true if the control channel has not gotten data recently enough.
-    bool ControlChannelTimeoutExpired() const;
-
-    // Buffer of current response line
-    std::string m_line_buffer;
+    CopyResponse m_response;
 
     // Handler notified when a performance marker is received; not owned.
     XrdCl::ProgressHandler *m_progress_handler{nullptr};
 
-    // The performance marker indication of bytes processed.
-    off_t m_bytemark{-1};
-
-    // Whether the COPY operation indicated a success status in the control channel:
+    // The terminal result remains available to the filesystem TPC wrapper.
     bool m_sent_success{false};
-
-    // Failure string sent back in the control channel:
     std::string m_failure;
 };
 

@@ -8,6 +8,7 @@ find_package(CURL REQUIRED)
 add_unit_tests(
   SOURCES
     ClientConfigTest.cc
+    CopyResponseTest.cc
     OptionsCacheTest.cc
     RedirectTest.cc
     SpaceResponseTest.cc

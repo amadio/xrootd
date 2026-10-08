@@ -31,6 +31,10 @@ CurlCopyOp::CurlCopyOp(XrdCl::ResponseHandler *handler, const std::string &sourc
         CurlOperation(handler, mode == TpcMode::Pull ? dest_url : source_url, timeout, logger, callout, nullptr)
     {
         m_minimum_rate = 1;
+        m_response.SetCallback([this](off_t bytes) {
+            if (m_progress_handler)
+                m_progress_handler->HandleProgress(static_cast<std::size_t>(bytes));
+        });
 
         // The headers of the endpoint the client contacts go on the request
         // itself. The headers of the remote endpoint are forwarded by that
@@ -67,6 +71,12 @@ CurlCopyOp::CurlCopyOp(XrdCl::ResponseHandler *handler, const std::string &sourc
     void
     CurlCopyOp::Success()
     {
+        const auto result = m_response.Finish();
+        if (!result.IsOK()) {
+            Fail(result.code, result.errNo, result.GetErrorMessage());
+            return;
+        }
+        m_sent_success = true;
         SetDone(false);
         if (m_handler == nullptr) {return;}
         auto status = new XrdCl::XRootDStatus();
@@ -76,6 +86,14 @@ CurlCopyOp::CurlCopyOp(XrdCl::ResponseHandler *handler, const std::string &sourc
         handle->HandleResponse(status, obj);
     }
     
+    void
+    CurlCopyOp::Fail(uint16_t errCode, uint32_t errNum, const std::string &msg)
+    {
+        m_sent_success = false;
+        m_failure = msg;
+        CurlOperation::Fail(errCode, errNum, msg);
+    }
+
     void
     CurlCopyOp::ReleaseHandle()
     {
@@ -99,57 +117,14 @@ CurlCopyOp::CurlCopyOp(XrdCl::ResponseHandler *handler, const std::string &sourc
     {
         auto me = reinterpret_cast<CurlCopyOp*>(this_ptr);
         me->UpdateBytes(size * nitems);
-        std::string_view str_data(buffer, size * nitems);
-        size_t end_line;
-        while ((end_line = std::min(str_data.size(), str_data.find('\n'))) > 0) {
-
-            auto cur_line = str_data.substr(0, end_line);
-
-            if (me->m_line_buffer.empty()) {
-                me->HandleLine(cur_line);
-            } else {
-                me->m_line_buffer += cur_line;
-                me->HandleLine(me->m_line_buffer);
-                me->m_line_buffer.clear();
-            }
-
-            if (end_line == str_data.size())
-                break;
-
-            str_data = str_data.substr(end_line + 1);
+        // Redirect and error bodies are not the TPC control channel. Preserve
+        // the HTTP status and let the worker handle those responses.
+        const auto status_code = me->m_headers.GetStatusCode();
+        if (status_code < 200 || status_code >= 300) return size * nitems;
+        if (!me->m_response.Feed(std::string_view(buffer, size * nitems))) {
+            const auto &status = me->m_response.Status();
+            return me->FailCallback(static_cast<XErrorCode>(status.errNo), status.GetErrorMessage());
         }
-        me->m_line_buffer = str_data;
-    
         return size * nitems;
     }
-    
-    void
-    CurlCopyOp::HandleLine(std::string_view line)
-    {
-        if (line == "Perf Marker") {
-            m_bytemark = -1;
-        } else if (line == "End") {
-            if (m_bytemark > -1 && m_progress_handler) {
-                m_progress_handler->HandleProgress(static_cast<std::size_t>(m_bytemark));
-            }
-        } else {
-            auto key_end_pos = line.find(':');
-            if (key_end_pos == line.npos) {
-                return; // All the other callback lines should be of key: value format
-            }
-            auto key = line.substr(0, key_end_pos);
-            auto value = ltrim_view(line.substr(key_end_pos + 1));
-            if (key == "Stripe Bytes Transferred") {
-                try {
-                    m_bytemark = std::stoll(std::string(value));
-                } catch (...) {
-                    // TODO: Log failure
-                }
-            } else if (key == "success") {
-                m_sent_success = true;
-            } else if (key == "failure") {
-                m_failure = value;
-            }
-        }
-    }
-    
+

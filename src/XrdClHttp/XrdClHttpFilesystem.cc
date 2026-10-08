@@ -147,28 +147,25 @@ namespace
 class SyncResponseHandler final : public XrdCl::ResponseHandler
 {
 public:
-    // The operation gives the ownership of both objects to this handler. The
-    // result of the operation comes from the operation itself, thus this
-    // handler reads neither of them and releases them immediately.
+    // Keep the terminal status until the caller has observed completion.
+    // Discard the returned response object after taking ownership of it.
     void HandleResponse(XrdCl::XRootDStatus *status,
                         XrdCl::AnyObject    *response) override
     {
-        if (status != nullptr)
-        {
-            const std::unique_ptr<XrdCl::XRootDStatus> owned_status{status};
-        }
-
-        if (response != nullptr)
-        {
-            const std::unique_ptr<XrdCl::AnyObject> owned_response{response};
-        }
-
+        const std::unique_ptr<XrdCl::XRootDStatus> owned_status{status};
+        const std::unique_ptr<XrdCl::AnyObject> owned_response{response};
         {
             const std::lock_guard<std::mutex> lock{mutex};
+            if (owned_status) final_status = *owned_status;
             is_ready = true;
         }
-
         is_ready_changed.notify_all();
+    }
+
+    XrdCl::XRootDStatus Status()
+    {
+        const std::lock_guard<std::mutex> lock{mutex};
+        return final_status;
     }
 
     // Return false when the wait takes more than the timeout.
@@ -192,6 +189,8 @@ private:
     std::mutex mutex{};
     std::condition_variable is_ready_changed{};
     bool is_ready{false};
+    XrdCl::XRootDStatus final_status{XrdCl::stError, XrdCl::errInvalidResponse,
+        0, "HTTP operation completed without a status"};
 };
 
 // Adds fixed headers, such as the Authorization header of one endpoint, to
@@ -701,6 +700,9 @@ XrdCl::XRootDStatus Filesystem::ThirdPartyCopy( const std::string            &so
 
     if (!rh->wait(std::chrono::seconds(tpc_timeout)))
         return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errOperationExpired, 0, "Operation expired: Operation timed out"s);
+
+    const auto status = rh->Status();
+    if (!status.IsOK()) return status;
 
     if (op->IsDone() && !op->IsSentSuccessfully())
         return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errPipelineFailed, 0, op->GetSendingFailureMessage());

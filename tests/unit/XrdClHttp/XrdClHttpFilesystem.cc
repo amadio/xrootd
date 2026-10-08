@@ -98,7 +98,7 @@ protected:
         XrdClHttp::CopyOp::AddOperation([](auto *mock)
         {
             ON_CALL(*mock, ctor).WillByDefault(Invoke([](XrdCl::ResponseHandler *rh, auto&&...) {
-                    rh->HandleResponse(nullptr, nullptr);
+                    rh->HandleResponse(new XrdCl::XRootDStatus(), nullptr);
                 }));
         });
     }

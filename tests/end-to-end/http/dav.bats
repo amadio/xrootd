@@ -105,3 +105,20 @@ teardown() {
     xrdfs "$DAV" rm "$D.txt"
     run ! test -e "$SERVER_DATA$D.txt"
 }
+
+@test "recursive download over dav copies the directory hierarchy" {
+    mkdir -p "$SERVER_DATA$D/multi-upload/nested"
+    echo "first" > "$SERVER_DATA$D/multi-upload/multi-one.ref"
+    echo "second" > "$SERVER_DATA$D/multi-upload/multi-two.ref"
+    echo "third" > "$SERVER_DATA$D/multi-upload/nested/multi-three.ref"
+
+    xrdcp --recursive "$DAV$D/multi-upload" "$BATS_TEST_TMPDIR/download"
+    run -0 cmp "$SERVER_DATA$D/multi-upload/multi-one.ref" "$BATS_TEST_TMPDIR/download/multi-upload/multi-one.ref"
+    run -0 cmp "$SERVER_DATA$D/multi-upload/multi-two.ref" "$BATS_TEST_TMPDIR/download/multi-upload/multi-two.ref"
+    run -0 cmp "$SERVER_DATA$D/multi-upload/nested/multi-three.ref" "$BATS_TEST_TMPDIR/download/multi-upload/nested/multi-three.ref"
+}
+
+@test "xrdcp recursive directory copy handles URL parameters and server errors" {
+    run -0 python3 "$BATS_TEST_DIRNAME/http-directory.py" "$(command -v xrdcp)"
+}
+

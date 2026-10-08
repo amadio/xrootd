@@ -5,6 +5,7 @@ add_unit_tests(
     XrdClLocalFileHandler.cc
     XrdClPlugInManager.cc
     XrdClProtocolResp.cc
+    XrdClReadRangesTest.cc
     XrdClTPFallBackCopyJob.cc
     XrdClURL.cc
     XrdClUtils.cc

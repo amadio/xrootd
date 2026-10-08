@@ -601,6 +601,27 @@ namespace XrdCl
                                XRD_WARN_UNUSED_RESULT;
 
       //------------------------------------------------------------------------
+      //! Read complete ranges, splitting requests to the data server's limits.
+      //!
+      //! Unlike VectorRead, this operation accepts chunks larger than the
+      //! server's readv limit and assembles them directly in the supplied
+      //! buffers. At most parallel requests are outstanding. All submitted
+      //! requests finish before the final callback, including on error.
+      //! A short range is an error; callers should clamp ranges to EOF first.
+      //! Keep this File and every buffer alive until completion. The callback
+      //! receives status only (a null response). A nonzero timeout bounds the
+      //! whole operation, including server-limit discovery.
+      //------------------------------------------------------------------------
+      XRootDStatus ReadRanges( const ChunkList &chunks,
+                               ResponseHandler *handler,
+                               uint16_t parallel = 4,
+                               time_t timeout = 0 ) XRD_WARN_UNUSED_RESULT;
+
+      XRootDStatus ReadRanges( const ChunkList &chunks,
+                               uint16_t parallel = 4,
+                               time_t timeout = 0 ) XRD_WARN_UNUSED_RESULT;
+
+      //------------------------------------------------------------------------
       //! Write scattered data chunks in one operation - async
       //!
       //! @param chunks    list of the chunks to be written.

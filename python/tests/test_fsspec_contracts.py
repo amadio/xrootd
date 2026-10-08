@@ -14,6 +14,7 @@ pytest.importorskip('fsspec', minversion='2024.2.0')
 from XRootD import client  # noqa: E402
 from XRootD.client import aio  # noqa: E402
 from XRootD.client.flags import StatInfoFlags  # noqa: E402
+from XRootD.client.responses import XRootDStatus, raise_on_error  # noqa: E402
 from XRootD.client.fsspec import XRootDFileSystem  # noqa: E402
 from XRootD.client.fsspec import _ReadHandleCache  # noqa: E402
 from XRootD.client.fsspec import _statinfo_to_info  # noqa: E402
@@ -281,8 +282,12 @@ def test_metadata_for_older_servers(flags, kind, permissions):
     assert stat.S_IMODE(result['mode']) == 0o640
 
 
-@pytest.mark.parametrize('malformed', ['count', 'offset', 'size'])
-def test_invalid_vector_responses_release_handles(malformed):
+@pytest.mark.parametrize('code, error', [
+    (XRootDStatus.errInvalidResponse, OSError),
+    (XRootDStatus.errErrorResponse, OSError),
+    (XRootDStatus.errNotFound, FileNotFoundError),
+])
+def test_native_range_errors_release_handles(code, error):
     async def run():
         closed = []
 
@@ -290,13 +295,11 @@ def test_invalid_vector_responses_release_handles(malformed):
             async def stat(self, force):
                 return SimpleNamespace(size=4)
 
-            async def vector_read(self, chunks, timeout):
-                if malformed == 'count':
-                    return []
-                offset = 1 if malformed == 'offset' else 0
-                return [SimpleNamespace(offset=offset,
-                                        buffer=b'x' if malformed == 'size'
-                                        else b'data')]
+            async def read_ranges(self, chunks, timeout, parallel):
+                assert chunks == [(0, 4)]
+                raise_on_error(XRootDStatus(dict(
+                    ok=False, code=code, errno=0,
+                    message='native range error')))
 
             async def close(self, timeout):
                 closed.append(True)
@@ -304,16 +307,12 @@ def test_invalid_vector_responses_release_handles(malformed):
         async def open_file(url, timeout):
             return File()
 
-        async def limits(file):
-            return 1, 4
-
         fs = XRootDFileSystem(hostid='example', asynchronous=True,
                               skip_instance_cache=True,
                               filehandle_cache_size=0, filehandle_cache_ttl=0)
         fs._read_handles.open_file = open_file
-        fs._vector_limits = limits
         try:
-            with pytest.raises(OSError, match='wrong chunk count|incomplete'):
+            with pytest.raises(error, match='native range error'):
                 await fs._vector_read_ranges('/data', [(0, 4)])
             assert closed == [True]
         finally:
@@ -547,31 +546,40 @@ def test_range_failure_waits_for_other_files_to_finish():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('reply', [b'0 4', '4 0', b'garbage', b'\xff', '8 16'])
-def test_vector_limits_validate_and_cache_server_reply(monkeypatch, reply):
+@pytest.mark.parametrize('configured, requested, parallel', [
+    (None, None, 4), (7, None, 7), (7, 2, 2), (7, 0, 7),
+    (None, -1, 4), (-1, None, 4),
+])
+def test_native_ranges_normalize_once_and_preserve_batch_setting(
+        configured, requested, parallel):
     async def run():
         calls = []
 
-        class Server:
-            def __init__(self, endpoint):
+        class File:
+            async def stat(self, force):
+                return SimpleNamespace(size=16)
+
+            async def read_ranges(self, chunks, timeout, parallel):
+                calls.append((chunks, timeout, parallel))
+                return [b'x' * length for offset, length in chunks]
+
+            async def close(self, timeout):
                 pass
 
-            async def query(self, *args):
-                calls.append(args)
-                return reply
+        async def open_file(url, timeout):
+            return File()
 
         fs = XRootDFileSystem(hostid='example', asynchronous=True,
-                              skip_instance_cache=True)
-        monkeypatch.setattr(aio, 'FileSystem', Server)
-        file = SimpleNamespace(native=SimpleNamespace(
-            get_property=lambda key: 'root://server:1094/'))
-        expected = (8, 16) if reply == '8 16' else (1024, 2097136)
-        assert await fs._vector_limits(file) == expected
-        assert await fs._vector_limits(file) == expected
-        assert len(calls) == 1
-        file.native.get_property = lambda key: ''
-        assert await fs._vector_limits(file) == (1024, 2097136)
-        await fs.close_async()
+                              skip_instance_cache=True, batch_size=configured)
+        fs._read_handles.open_file = open_file
+        try:
+            ranges = [(None, None), (-4, None), (14, 40), (20, 30), (5, 3)]
+            result = await fs._vector_read_ranges('/data', ranges, requested)
+            assert result == [b'x' * 16, b'x' * 4, b'xx', b'', b'']
+            assert calls == [([(0, 16), (12, 4), (14, 2), (16, 0), (5, 0)],
+                              fs.timeout, parallel)]
+        finally:
+            await fs.close_async()
 
     asyncio.run(run())
 

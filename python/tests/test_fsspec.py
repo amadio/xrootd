@@ -288,7 +288,7 @@ def test_fsspec_checksum_requests_algorithm():
     asyncio.run(run())
 
 
-def test_fsspec_vector_ranges_and_read_handle_invalidation():
+def test_fsspec_native_ranges_and_read_handle_invalidation(monkeypatch):
     fs = filesystem()
     path = '/tmp/fsspec-vector-%s' % uuid.uuid4().hex
     second = path + '-second'
@@ -298,15 +298,22 @@ def test_fsspec_vector_ranges_and_read_handle_invalidation():
         assert fs.cat_ranges([path, path], [0, 10], [3, 13]) == [
             b'abc', b'klm']
 
-        async def small_limits(file):
-            return 2, 3
+        calls = []
+        original = aio.File.read_ranges
 
-        fs._vector_limits = small_limits
+        async def read_ranges(file, chunks, timeout=0, parallel=4):
+            calls.append((chunks, parallel))
+            return await original(file, chunks, timeout, parallel)
+
+        monkeypatch.setattr(aio.File, 'read_ranges', read_ranges)
         paths = [path, path, second, path, path]
         starts = [0, 3, 1, 12, 1]
         ends = [2, 12, 8, 12, 5]
         assert fs.cat_ranges(paths, starts, ends) == [
             b'ab', b'defghijkl', b'1234567', b'', b'bcde']
+        assert len(calls) == 2
+        assert sorted(chunks for chunks, _ in calls) == sorted([
+            [(0, 2), (3, 9), (12, 0), (1, 4)], [(1, 7)]])
         assert fs.cat_ranges([path, second], 1, 3) == [b'bc', b'12']
         assert fs.cat_ranges([path] * 5,
                              [None, -4, 24, 100, 5],
@@ -596,34 +603,27 @@ def test_read_handle_cache_close_waits_for_idle_pruning():
     asyncio.run(run())
 
 
-def test_fsspec_vector_limits_fall_back_for_older_servers(monkeypatch):
-    class FakeClient:
-        async def query(self, *args):
-            return b'readv_iov_max readv_ior_max'
-
-    class FakeNative:
-        def get_property(self, name):
-            return 'root://server.example:1094/'
-
-    fs = XRootDFileSystem(hostid='server.example:1094',
-                          asynchronous=True)
-    monkeypatch.setattr(aio, 'FileSystem', lambda endpoint: FakeClient())
-    file = SimpleNamespace(native=FakeNative())
-    assert asyncio.run(fs._vector_limits(file)) == (1024, 2097136)
-
-
-@pytest.mark.parametrize('operation', ['open', 'read'])
+@pytest.mark.parametrize('operation', ['open', 'read', 'read_ranges'])
 def test_cancelled_cached_read_retains_handle(monkeypatch, operation):
     async def run():
         started, resume = asyncio.Event(), asyncio.Event()
         closed = []
 
         class File:
+            async def stat(self, force):
+                return SimpleNamespace(size=4)
+
             async def read(self, offset, size, timeout):
                 if operation == 'read':
                     started.set()
                     await resume.wait()
                 return b'data'
+
+            async def read_ranges(self, chunks, timeout, parallel):
+                assert chunks == [(0, 4)]
+                started.set()
+                await resume.wait()
+                return [b'data']
 
             async def close(self, timeout):
                 closed.append(True)
@@ -638,7 +638,10 @@ def test_cancelled_cached_read_retains_handle(monkeypatch, operation):
                               filehandle_cache_size=0, filehandle_cache_ttl=0,
                               skip_instance_cache=True)
         fs._read_handles.open_file = open_file
-        task = asyncio.create_task(fs._cat_file('/data', 0, 4))
+        operation_call = (fs._vector_read_ranges('/data', [(0, 4)])
+                          if operation == 'read_ranges'
+                          else fs._cat_file('/data', 0, 4))
+        task = asyncio.create_task(operation_call)
         await asyncio.wait_for(started.wait(), 2)
         task.cancel()
         await asyncio.sleep(0)
@@ -656,7 +659,7 @@ def test_cancelled_cached_read_retains_handle(monkeypatch, operation):
     asyncio.run(run())
 
 
-def test_vector_failure_drains_other_batches_before_release():
+def test_native_range_failure_releases_handle_after_completion():
     async def run():
         from types import SimpleNamespace
 
@@ -667,13 +670,11 @@ def test_vector_failure_drains_other_batches_before_release():
             async def stat(self, force):
                 return SimpleNamespace(size=8)
 
-            async def vector_read(self, batch, timeout):
-                if batch[0][0] == 0:
-                    await started.wait()
-                    raise OSError('first batch failed')
+            async def read_ranges(self, chunks, timeout, parallel):
+                assert chunks == [(0, 8)]
                 started.set()
                 await resume.wait()
-                return [SimpleNamespace(offset=4, buffer=b'data')]
+                raise OSError('native range failed after draining')
 
             async def close(self, timeout):
                 closed.append(True)
@@ -681,14 +682,10 @@ def test_vector_failure_drains_other_batches_before_release():
         async def open_file(url, timeout):
             return File()
 
-        async def limits(file):
-            return 1, 4
-
         fs = XRootDFileSystem(hostid='example', asynchronous=True,
                               filehandle_cache_size=0, filehandle_cache_ttl=0,
                               skip_instance_cache=True)
         fs._read_handles.open_file = open_file
-        fs._vector_limits = limits
         task = asyncio.create_task(fs._vector_read_ranges('/data', [(0, 8)]))
         await asyncio.wait_for(started.wait(), 2)
         for _ in range(5):
@@ -696,7 +693,7 @@ def test_vector_failure_drains_other_batches_before_release():
         assert not task.done()
         assert not closed
         resume.set()
-        with pytest.raises(OSError, match='first batch failed'):
+        with pytest.raises(OSError, match='native range failed'):
             await asyncio.wait_for(task, 2)
         assert closed == [True]
         await fs.close_async()

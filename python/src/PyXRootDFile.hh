@@ -52,6 +52,7 @@ namespace PyXRootD
       static PyObject* Sync( File *self, PyObject *args, PyObject *kwds );
       static PyObject* Truncate( File *self, PyObject *args, PyObject *kwds );
       static PyObject* VectorRead( File *self, PyObject *args, PyObject *kwds );
+      static PyObject* ReadRanges( File *self, PyObject *args, PyObject *kwds );
       static PyObject* Fcntl( File *self, PyObject *args, PyObject *kwds );
       static PyObject* Visa( File *self, PyObject *args, PyObject *kwds );
       static PyObject* IsOpen( File *self, PyObject *args, PyObject *kwds );

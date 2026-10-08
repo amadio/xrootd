@@ -252,7 +252,7 @@ list(APPEND ENVIRON "XRDFS=$<TARGET_FILE:xrdfs>")
 list(APPEND ENVIRON "PYTHONDONTWRITEBYTECODE=1")
 
 set(PYXROOTD_TESTS auth copy copyprocess_arguments file file_readlines filesystem filesystem_helpers glob storage storage_http stream threads
-                  url version_policy xattr_helpers)
+                  read_ranges url version_policy xattr_helpers)
 
 if(Python_VERSION VERSION_GREATER_EQUAL 3.11)
   list(APPEND PYXROOTD_TESTS aio aio_helpers asyncstream)

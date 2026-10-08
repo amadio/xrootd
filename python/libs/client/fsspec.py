@@ -27,8 +27,6 @@ from XRootD.client.stream import RemoteFile
 
 
 _CHUNK_SIZE = 4 * 1024 * 1024
-_DEFAULT_VECTOR_CHUNKS = 1024
-_DEFAULT_VECTOR_SIZE = 2097136
 
 
 async def _to_thread(function, *args):
@@ -489,7 +487,6 @@ class XRootDFileSystem(AsyncFileSystem):
             self._open_read_file,
             max_items=kwargs.get('filehandle_cache_size', 256),
             ttl=kwargs.get('filehandle_cache_ttl', 30))
-        self._server_vector_limits = {}
         self._invalidation_tasks = set()
         self._invalidation_error = None
 
@@ -616,28 +613,6 @@ class XRootDFileSystem(AsyncFileSystem):
             error = task.exception()
             if error is not None and self._invalidation_error is None:
                 self._invalidation_error = error
-
-    async def _vector_limits(self, file):
-        server = file.native.get_property('DataServer')
-        if not server:
-            return _DEFAULT_VECTOR_CHUNKS, _DEFAULT_VECTOR_SIZE
-        url = client.URL(server)
-        endpoint = '%s://%s/' % (url.protocol, url.hostid)
-        if endpoint not in self._server_vector_limits:
-            fs = aio.FileSystem(endpoint)
-            try:
-                response = await fs.query(QueryCode.CONFIG,
-                                          'readv_iov_max readv_ior_max',
-                                          self.timeout)
-                if isinstance(response, bytes):
-                    response = response.decode('ascii')
-                chunks, size = (int(part) for part in response.split())
-                if chunks <= 0 or size <= 0:
-                    raise ValueError('invalid XRootD vector-read limits')
-            except (XRootDError, ValueError, UnicodeError):
-                chunks, size = _DEFAULT_VECTOR_CHUNKS, _DEFAULT_VECTOR_SIZE
-            self._server_vector_limits[endpoint] = chunks, size
-        return self._server_vector_limits[endpoint]
 
     @staticmethod
     def _get_kwargs_from_urls(url):
@@ -842,7 +817,6 @@ class XRootDFileSystem(AsyncFileSystem):
 
     async def _vector_read_ranges(self, path, ranges, batch_size=None):
         async with self._read_file(path) as file:
-            max_chunks, max_size = await self._vector_limits(file)
             size = (await _native(file.stat(force=True), path)).size
             normalized = []
             for start, end in ranges:
@@ -852,47 +826,19 @@ class XRootDFileSystem(AsyncFileSystem):
                     start = max(0, size + start)
                 if end < 0:
                     end = max(0, size + end)
-                normalized.append((min(start, size), min(end, size)))
-            requests = []
-            counts = []
-            for start, end in normalized:
-                if end <= start:
-                    counts.append(0)
-                    continue
-                count = 0
-                while start < end:
-                    length = min(end - start, max_size)
-                    requests.append((start, length))
-                    count += 1
-                    start += length
-                counts.append(count)
-            if not requests:
-                return [b'' for _ in ranges]
-
-            batches = [requests[i:i + max_chunks]
-                       for i in range(0, len(requests), max_chunks)]
-            responses = await _native(_run_coros_in_chunks(
-                [file.vector_read(batch, self.timeout) for batch in batches],
-                batch_size=batch_size or self.batch_size, nofiles=True,
-                return_exceptions=True), path)
-            for response in responses:
-                if isinstance(response, BaseException):
-                    _raise_fsspec_error(response, path)
-            chunks = [chunk for response in responses for chunk in response]
-            if len(chunks) != len(requests):
-                raise OSError('XRootD vector read returned the wrong chunk '
-                              'count')
-            for (offset, length), chunk in zip(requests, chunks):
-                if chunk.offset != offset or len(chunk.buffer) != length:
-                    raise OSError('XRootD vector read returned an incomplete '
-                                  'range')
-            pieces = iter(chunk.buffer for chunk in chunks)
-            return [b''.join(next(pieces) for _ in range(count))
-                    for count in counts]
+                start, end = min(start, size), min(end, size)
+                normalized.append((start, max(0, end - start)))
+            parallel = batch_size or self.batch_size or 4
+            # fsspec uses -1 for unlimited concurrency. Native range reads
+            # always bound concurrent requests, including in that case.
+            if parallel < 0:
+                parallel = 4
+            return await _native(file.read_ranges(
+                normalized, self.timeout, parallel=parallel), path)
 
     async def _cat_ranges(self, paths, starts, ends, max_gap=None,
                           batch_size=None, on_error='return', **kwargs):
-        """Read multiple ranges with XRootD vector reads per remote file."""
+        """Read multiple ranges through one native operation per file."""
         if not isinstance(paths, list):
             raise TypeError('paths must be a list')
         if not isinstance(starts, Iterable):

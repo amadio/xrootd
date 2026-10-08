@@ -33,7 +33,8 @@ NEEDS_SERVER = {'test_aio.py', 'test_aio_helpers.py', 'test_asyncstream.py',
                 'test_file.py',
                 'test_filesystem.py', 'test_filesystem_helpers.py',
                 'test_fsspec.py', 'test_fsspec_contracts.py',
-                'test_glob.py', 'test_stream.py', 'test_threads.py'}
+                'test_glob.py', 'test_read_ranges.py', 'test_stream.py',
+                'test_threads.py'}
 
 TIMEOUT = 30
 

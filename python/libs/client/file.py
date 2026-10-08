@@ -275,6 +275,34 @@ class File(object):
     if response: response = VectorReadInfo(response)
     return XRootDStatus(status), response
 
+  def read_ranges(self, chunks, timeout=0, callback=None, parallel=4):
+    """Read arbitrary ranges through one native operation.
+
+    :param chunks: list of (offset, size) pairs, in the desired result order
+    :param timeout: deadline in seconds for the whole operation, including
+                    server-limit discovery. Zero uses each native request's
+                    configured default, without a whole-operation deadline.
+    :param parallel: maximum number of simultaneous native vector requests
+    :returns: tuple of :mod:`XRootD.client.responses.XRootDStatus` and an
+              ordered list of bytes, or None on failure. With a callback,
+              return the submission status and deliver the same result once
+              through callback(status, result, hostlist).
+
+    The native client discovers server limits, splits oversized ranges and
+    assembles their results. Empty ranges produce empty bytes; non-empty
+    ranges extending past EOF fail. Output buffers and the open native File
+    remain owned until completion. Callers must wait for completion before
+    closing the File. Offsets and lengths must be non-negative integers;
+    timeout is in 0..65535 and parallel is in 1..65535.
+    """
+    if callback is not None:
+      callback = CallbackWrapper(callback, None)
+      return XRootDStatus(self.__file.read_ranges(
+        chunks, timeout, callback, parallel))
+
+    status, response = self.__file.read_ranges(chunks, timeout, None, parallel)
+    return XRootDStatus(status), response
+
   def fcntl(self, arg, timeout=0, callback=None):
     """Perform a custom operation on an open file.
 

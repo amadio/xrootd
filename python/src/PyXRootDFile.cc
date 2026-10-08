@@ -31,6 +31,9 @@
 #include "XrdCl/XrdClFile.hh"
 #include "XrdCl/XrdClFileSystem.hh"
 
+#include <limits>
+#include <new>
+
 namespace PyXRootD
 {
 
@@ -58,7 +61,9 @@ namespace PyXRootD
   //----------------------------------------------------------------------------
   static void File_dealloc( File *self )
   {
-    delete self->file;
+    // Native destruction can close the handle. Completion workers must be able
+    // to acquire the GIL while releasing the final asynchronous file reference.
+    async( delete self->file );
     Py_TYPE(self)->tp_free( (PyObject*) self );
   }
 
@@ -145,6 +150,8 @@ namespace PyXRootD
        (PyCFunction) PyXRootD::File::Truncate,            METH_VARARGS | METH_KEYWORDS, NULL },
     { "vector_read",
        (PyCFunction) PyXRootD::File::VectorRead,          METH_VARARGS | METH_KEYWORDS, NULL },
+    { "read_ranges",
+       (PyCFunction) PyXRootD::File::ReadRanges,          METH_VARARGS | METH_KEYWORDS, NULL },
     { "fcntl",
        (PyCFunction) PyXRootD::File::Fcntl,               METH_VARARGS | METH_KEYWORDS, NULL },
     { "visa",
@@ -859,6 +866,196 @@ namespace PyXRootD
     Py_DECREF( pystatus );
     Py_XDECREF( pyresponse );
     return o;
+  }
+
+  // Own the destination bytes independently of Python's callback closure. The
+  // native coordinator drains every submitted vector request before invoking
+  // this handler, so cancellation cannot release a buffer still being written.
+  class RangeReadHandler : public XrdCl::ResponseHandler
+  {
+    public:
+      RangeReadHandler( File *file, PyObject *callback, PyObject *data ):
+        file( file ), callback( callback ), data( data )
+      {
+        Py_INCREF( file );
+        Py_INCREF( callback );
+        Py_INCREF( data );
+      }
+
+      // Construction, failed-submission cleanup and completion hold the GIL.
+      ~RangeReadHandler() override
+      {
+        Py_DECREF( data );
+        Py_DECREF( callback );
+        Py_DECREF( file );
+      }
+
+      void HandleResponse( XrdCl::XRootDStatus *status,
+                           XrdCl::AnyObject *response ) override
+      {
+        if( status->IsOK() && status->code == XrdCl::suContinue )
+        {
+          delete status;
+          delete response;
+          return;
+        }
+        if( !Py_IsInitialized()
+#if PY_VERSION_HEX >= 0x030D0000
+            || Py_IsFinalizing()
+#endif
+          )
+        {
+          // Acquiring the GIL during interpreter teardown can never complete.
+          // Retain Python references for process teardown rather than touch
+          // objects whose interpreter can no longer run this callback.
+          delete status;
+          delete response;
+          return;
+        }
+        auto gil = PyGILState_Ensure();
+        PyObject *pystatus = ConvertType( status );
+        if( !pystatus )
+        {
+          // A conversion failure must still attempt to complete the waiter.
+          PyErr_Clear();
+          *status = XrdCl::XRootDStatus( XrdCl::stError, XrdCl::errInternal );
+          pystatus = ConvertType( status );
+        }
+        PyObject *called = pystatus ? PyObject_CallFunctionObjArgs(
+          callback, pystatus, status->IsOK() ? data : Py_None, nullptr ) : nullptr;
+        if( !called ) PyErr_WriteUnraisable( callback );
+        Py_XDECREF( called );
+        Py_XDECREF( pystatus );
+        delete status;
+        delete response;
+        delete this;
+        PyGILState_Release( gil );
+      }
+
+    private:
+      File *file;
+      PyObject *callback;
+      PyObject *data;
+  };
+
+  static bool RangeNumber( PyObject *value, unsigned long long &number,
+                           const char *name )
+  {
+    if( !PyLong_Check( value ) || PyBool_Check( value ) )
+    {
+      PyErr_Format( PyExc_TypeError, "%s must be an integer", name );
+      return false;
+    }
+    number = PyLong_AsUnsignedLongLong( value );
+    return !PyErr_Occurred();
+  }
+
+  //----------------------------------------------------------------------------
+  //! Read complete ranges using the native bounded vector-read coordinator
+  //----------------------------------------------------------------------------
+  PyObject* File::ReadRanges( File *self, PyObject *args, PyObject *kwds )
+  {
+    static const char *keys[] = { "chunks", "timeout", "callback", "parallel", nullptr };
+    PyObject *input = nullptr, *pytimeout = nullptr, *callback = nullptr;
+    PyObject *pyparallel = nullptr;
+    unsigned long long timeout = 0, parallel = 4;
+    if( !self->file->IsOpen() ) return FileClosedError();
+    if( !PyArg_ParseTupleAndKeywords( args, kwds, "O|OOO:read_ranges", (char **)keys,
+          &input, &pytimeout, &callback, &pyparallel ) ||
+        (pytimeout && !RangeNumber( pytimeout, timeout, "timeout" )) ||
+        (pyparallel && !RangeNumber( pyparallel, parallel, "parallel" )) ) return nullptr;
+    if( timeout > 65535 || parallel > 65535 )
+    {
+      PyErr_SetString( PyExc_OverflowError, "timeout and parallel must fit in 16 bits" );
+      return nullptr;
+    }
+    if( !parallel )
+    {
+      PyErr_SetString( PyExc_ValueError, "parallel must be greater than zero" );
+      return nullptr;
+    }
+    if( callback && callback != Py_None && !PyCallable_Check( callback ) )
+    {
+      PyErr_SetString( PyExc_TypeError, "callback must be callable" );
+      return nullptr;
+    }
+    if( !PyList_Check( input ) )
+    {
+      PyErr_SetString( PyExc_TypeError, "chunks must be a list" );
+      return nullptr;
+    }
+    PyObject *data = PyList_New( PyList_Size( input ) );
+    if( !data ) return nullptr;
+    XrdCl::ChunkList chunks;
+    try
+    {
+      for( Py_ssize_t i = 0; i < PyList_Size( input ); ++i )
+      {
+        PyObject *item = PyList_GET_ITEM( input, i );
+        unsigned long long offset = 0, size = 0;
+        if( !PyTuple_Check( item ) || PyTuple_Size( item ) != 2 )
+        {
+          PyErr_SetString( PyExc_TypeError, "chunks must contain (offset, length) tuples" );
+          Py_DECREF( data );
+          return nullptr;
+        }
+        if( !RangeNumber( PyTuple_GET_ITEM( item, 0 ), offset, "offset" ) ||
+            !RangeNumber( PyTuple_GET_ITEM( item, 1 ), size, "length" ) )
+        {
+          Py_DECREF( data );
+          return nullptr;
+        }
+        if( size > static_cast<uint64_t>( PY_SSIZE_T_MAX ) ||
+            offset > std::numeric_limits<uint64_t>::max() - size )
+        {
+          PyErr_SetString( PyExc_OverflowError, "range exceeds offset or buffer limits" );
+          Py_DECREF( data );
+          return nullptr;
+        }
+        PyObject *buffer = PyBytes_FromStringAndSize( nullptr, size );
+        if( !buffer ) { Py_DECREF( data ); return nullptr; }
+        PyList_SET_ITEM( data, i, buffer );
+        // ChunkInfo has a 32-bit length. Split only at that representation
+        // boundary; ReadRanges discovers server limits and schedules requests.
+        uint64_t start = 0;
+        do
+        {
+          auto length = std::min<uint64_t>( size - start, std::numeric_limits<uint32_t>::max() );
+          chunks.emplace_back( offset + start, length, PyBytes_AS_STRING( buffer ) + start );
+          start += length;
+        } while( start < size );
+      }
+    }
+    catch( const std::bad_alloc & )
+    {
+      Py_DECREF( data );
+      return PyErr_NoMemory();
+    }
+
+    XrdCl::XRootDStatus status;
+    if( callback && callback != Py_None )
+    {
+      auto handler = new( std::nothrow ) RangeReadHandler( self, callback, data );
+      Py_DECREF( data );
+      if( !handler ) return PyErr_NoMemory();
+      async( status = self->file->ReadRanges( chunks, handler, parallel, timeout ) );
+      // Successful submissions may have completed inline and deleted handler.
+      // A rejected submission never invokes it; release its references here.
+      if( !status.IsOK() ) delete handler;
+      return ConvertType( &status );
+    }
+    Py_INCREF( self );
+    async( status = self->file->ReadRanges( chunks, parallel, timeout ) );
+    Py_DECREF( self );
+    PyObject *pystatus = ConvertType( &status );
+    if( !pystatus ) { Py_DECREF( data ); return nullptr; }
+    if( !status.IsOK() )
+    {
+      Py_DECREF( data );
+      data = Py_None;
+      Py_INCREF( data );
+    }
+    return Py_BuildValue( "NN", pystatus, data );
   }
 
   //----------------------------------------------------------------------------

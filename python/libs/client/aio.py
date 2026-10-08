@@ -101,6 +101,18 @@ class File:
     async def vector_read(self, chunks, timeout=0):
         return await request(self.native.vector_read, chunks, timeout)
 
+    async def read_ranges(self, chunks, timeout=0, parallel=4):
+        """Return ordered bytes from one native range operation.
+
+        Native code discovers server limits, splits requests and owns their
+        output buffers. Cancellation waits for final native completion, even
+        after repeated cancellation, before propagating CancelledError.
+        """
+        # Import locally: asyncstream also builds on this low-level module.
+        from XRootD.client.asyncstream import _finish
+        return await _finish(request(self.native.read_ranges, chunks, timeout,
+                                     parallel=parallel))
+
     async def sync(self, timeout=0):
         await request(self.native.sync, timeout)
 

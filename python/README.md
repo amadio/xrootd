@@ -191,6 +191,36 @@ Python 3.11 or later.
 
 #### Concurrent ranges and bounded-memory iteration
 
+For scattered ranges, `client.File.read_ranges` and `aio.File.read_ranges`
+submit one binding operation. Native code discovers the server's vector-read
+limits, splits large ranges, bounds concurrent requests and writes directly
+into owned result buffers. Results are an ordered list of `bytes`, including
+empty bytes for zero-length ranges. A non-empty range extending past EOF fails;
+fsspec clamps ranges to EOF to preserve its slicing contract.
+
+```python
+from XRootD.client import aio
+
+async def read_scattered(url):
+    file = await aio.File().open(url)
+    try:
+        return await file.read_ranges(
+            [(0, 1024), (4096, 8 * 1024 * 1024)], timeout=10, parallel=4)
+    finally:
+        await file.close()
+```
+
+The classic `client.File.read_ranges(chunks, timeout=0, callback=None,
+parallel=4)` returns `(status, results)`, or a submission status when a callback
+receives `(status, results, hostlist)` once. `aio.File.read_ranges` returns the
+results and raises a typed native error on failure. Its cancellation waits for
+the final native callback, including after repeated cancellation. Keep the File
+open until completion. A positive timeout bounds the whole native range
+operation, including limit discovery. Zero uses the configured default for each
+native request without a whole-operation deadline. `parallel` bounds
+simultaneous vector requests. The output allocation is proportional to the
+requested data size.
+
 Previously, concurrent ranges required manually managing the lifetime of a
 low-level `aio.File`, supplying offsets to every read, and ensuring pending
 callbacks completed before close. The stream now owns that lifecycle:
@@ -242,7 +272,7 @@ share the same implementation and cancellation contract:
 | Opening | Wait for completion, then close a successfully opened handle. |
 | Reading or writing | Finish the current native request before releasing the handle. Earlier chunks may already have advanced the cursor; writes are not rolled back. |
 | Closing or leaving `async with` | Complete cleanup even if cancellation is requested again. |
-| Cached fsspec reads | Retain the cache reference until native completion; vector batches also drain before an error is propagated. |
+| Cached fsspec reads | Retain the cache reference until native completion; a native range operation drains before cancellation or an error is propagated. |
 
 `asyncio.wait_for` cancels the Python task. It cannot abort an XrdCl request,
 so cleanup may outlast the asyncio deadline. A positive native `timeout`
@@ -252,7 +282,7 @@ its cleanup. `timeout=0` uses XrdCl's configured default.
 interpreters. `asyncio.timeout` and `TaskGroup` follow the same native resource
 ownership requirements.
 
-The low-level `aio.request` and `aio.File` APIs remain available for callers
+The low-level `aio.request` and other `aio.File` APIs remain available for callers
 which manage native request ownership themselves. Their cancellation stops
 waiting immediately; arguments are retained until the callback arrives, but
 callers must not close or reuse a handle with outstanding requests. Prefer
@@ -318,8 +348,12 @@ are synchronous and should not be used directly inside an event loop. Python
 argument handling, request submission, and result handling still run on the
 calling thread, so this does not promise zero event-loop latency.
 
-The fsspec adapter now batches scattered ranges through XRootD vector reads,
-reuses bounded read handles, and can locate an alternate source if an open fails.
+The fsspec adapter reads scattered ranges through one native binding operation
+per remote file, with splitting and result assembly performed by XRootD,
+and reuses bounded read handles. It can locate an alternate source if an open
+fails. Positive `batch_size` values bound native requests within each file as
+well as fsspec's concurrent file operations. A missing setting or fsspec's
+unlimited setting (`-1`) uses four simultaneous native requests per file.
 It also supports common metadata, `touch`, `chmod`, checksum queries, append,
 and in-place updates. Cached idle read handles are closed after their TTL, and
 `invalidate_cache(path)` discards listings and read handles after another client

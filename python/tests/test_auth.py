@@ -100,6 +100,88 @@ def test_non_xrootd_urls_are_unchanged():
     context.close()
 
 
+def test_http_bearer_is_object_scoped_and_preserves_signed_query():
+  context = AuthContext.bearer(token_file='/tmp/token file',
+                               ca_file='/tmp/custom ca.pem')
+  authenticated = context.apply(
+    'davs://storage.example/data?X-Amz-Signature=abc+def==&empty=')
+  query = _query(authenticated)
+
+  assert 'X-Amz-Signature=abc+def==' in authenticated
+  assert 'empty=' in authenticated
+  assert query['xrdcl.http.bearertokenfile'] == ['/tmp/token file']
+  assert query['xrdcl.http.cafile'] == ['/tmp/custom ca.pem']
+  assert 'xrd.wantprot' not in query
+
+
+def test_http_x509_and_anonymous_contexts():
+  x509 = AuthContext.x509(proxy='/tmp/proxy', verify=False)
+  anonymous = AuthContext.anonymous()
+
+  x509_query = _query(x509.apply('https://storage.example/data'))
+  anonymous_query = _query(anonymous.apply('https://storage.example/data'))
+  assert x509_query['xrdcl.http.clientcert'] == ['/tmp/proxy']
+  assert x509_query['xrdcl.http.clientkey'] == ['/tmp/proxy']
+  assert x509_query['xrdcl.http.noverify'] == ['1']
+  assert anonymous_query['xrdcl.http.noauth'] == ['1']
+
+
+def test_environment_context_prefers_explicit_token(tmp_path):
+  proxy = tmp_path / 'proxy'
+  proxy.write_text('proxy')
+  context = AuthContext.from_environment(
+    token='explicit-token',
+    environ={'X509_USER_PROXY': str(proxy), 'X509_CERT_DIR': '/missing'})
+  try:
+    query = _query(context.apply('root://localhost//data'))
+    assert query['xrd.wantprot'] == ['ztn']
+    with open(query['xrd.ztn'][0]) as token_file:
+      assert token_file.read() == 'explicit-token'
+  finally:
+    context.close()
+
+
+def test_environment_context_uses_proxy_and_tls_snapshot(tmp_path):
+  proxy = tmp_path / 'proxy'
+  ca_dir = tmp_path / 'certificates'
+  proxy.write_text('proxy')
+  ca_dir.mkdir()
+  context = AuthContext.from_environment(environ={
+    'X509_USER_PROXY': str(proxy),
+    'X509_CERT_DIR': str(ca_dir),
+  })
+
+  query = _query(context.apply('davs://storage.example/data'))
+  assert query['xrdcl.http.clientcert'] == [str(proxy)]
+  assert query['xrdcl.http.cadir'] == [str(ca_dir)]
+
+
+def test_environment_context_fails_closed_without_credentials():
+  context = AuthContext.from_environment(
+    environ={}, fallback='none', use_defaults=False)
+
+  root_query = _query(context.apply('root://localhost//data'))
+  http_query = _query(context.apply('https://storage.example/data'))
+  assert root_query['xrd.wantprot'] == ['none']
+  assert http_query['xrdcl.http.noauth'] == ['1']
+
+
+def test_environment_context_can_require_credentials():
+  with pytest.raises(ValueError, match='no usable authentication'):
+    AuthContext.from_environment(
+      environ={}, fallback='error', use_defaults=False)
+
+
+def test_environment_context_rejects_selected_empty_proxy():
+  with pytest.raises(ValueError, match='must not be empty'):
+    AuthContext.from_environment(environ={'X509_USER_PROXY': ''})
+
+
+def test_anonymous_context_rejects_root_protocol():
+  with pytest.raises(ValueError):
+    AuthContext.anonymous().apply('root://storage.example//data')
+
+
 def test_xroots_url_is_authenticated():
   context = AuthContext.x509(proxy='/tmp/proxy')
   assert _query(context.apply('xroots://localhost//data'))['xrd.wantprot'] == ['gsi']
@@ -197,3 +279,28 @@ def test_copy_process_retains_per_job_contexts(monkeypatch):
   token_file = _query(jobs[0][0])['xrd.ztn'][0]
   gc.collect()
   assert os.path.exists(token_file)
+
+
+def test_explicit_proxy_overrides_ambient_bearer():
+  context = AuthContext.from_environment(
+    proxy='/tmp/explicit-proxy', environ={'BEARER_TOKEN': 'ambient'})
+  query = parse_qs(urlsplit(context.apply('https://example/a')).query)
+  assert query['xrdcl.http.clientcert'] == ['/tmp/explicit-proxy']
+  assert 'xrdcl.http.bearertokenfile' not in query
+
+
+def test_context_replaces_conflicting_url_credentials():
+  with AuthContext.bearer(token='selected') as context:
+    query = parse_qs(urlsplit(context.apply(
+      'https://example/a?xrdcl.http.noauth=1&'
+      'xrdcl.http.clientcert=/tmp/other&authz=opaque')).query)
+    assert 'xrdcl.http.noauth' not in query
+    assert 'xrdcl.http.clientcert' not in query
+    assert query['authz'] == ['opaque']
+    assert query['xrdcl.http.bearertokenfile']
+
+
+@pytest.mark.parametrize('token', ['a\r\nb', 'a\x00b'])
+def test_reject_token_control_characters(token):
+  with pytest.raises(ValueError, match='control'):
+    AuthContext.bearer(token=token)

@@ -40,7 +40,9 @@ CurlOptionsOp::Setup(CURL *curl, CurlWorker &worker) {
     curl_easy_setopt(m_curl.get(), CURLOPT_CUSTOMREQUEST, "OPTIONS");
     curl_easy_setopt(m_curl.get(), CURLOPT_NOBODY, 1L);
 
-    return true;
+    // OPTIONS is scheduled internally rather than through the regular worker
+    // setup path, so it must finalize the inherited authentication headers.
+    return FinishSetup(curl);
 }
 
 void

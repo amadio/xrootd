@@ -9,6 +9,9 @@ from .url import URL
 from .copyprocess import CopyProcess
 from .tape import TapeClient
 from .auth import AuthContext
+from .storage import StorageClient
+from .storage import StorageInfo
+from .storage import STORAGE_CLIENT_API_VERSION
 from .env import EnvPutString
 from .env import EnvGetString
 from .env import EnvDelString
@@ -24,8 +27,13 @@ from .responses import XRootDNotFoundError
 from .responses import XRootDAuthorizationError
 from .responses import XRootDTimeoutError
 from .responses import XRootDChecksumError
+from .responses import XRootDAlreadyExistsError
+from .responses import XRootDQuotaError
+from .responses import XRootDTemporaryError
+from .responses import XRootDUnsupportedError
 from .responses import XRootDOperationError
 from .responses import raise_on_error
+from .responses import ChecksumInfo
 
 import XRootD.client.finalize
 

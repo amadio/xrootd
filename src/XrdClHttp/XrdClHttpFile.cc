@@ -323,7 +323,14 @@ File::Open(const std::string      &url,
     auto iter = pm.find("xrdclhttp.timeout");
     std::string timeout_string = (iter == pm.end()) ? "" : iter->second;
     m_header_timeout = ParseHeaderTimeout(timeout_string, m_logger);
-    pm["xrdclhttp.timeout"] = XrdClHttp::MarshalDuration(m_header_timeout);
+    // Do not append server parameters to a potentially signed query. The
+    // operation still uses the local header timeout calculated above.
+    const bool opaque_query = std::any_of(pm.begin(), pm.end(), [](const auto &param) {
+        return param.first.compare(0, 6, "xrdcl.") != 0 &&
+               param.first != "oss.asize" && param.first != "xrdclhttp.timeout";
+    });
+    if (!opaque_query || iter != pm.end())
+        pm["xrdclhttp.timeout"] = XrdClHttp::MarshalDuration(m_header_timeout);
     parsed_url.SetParams(pm);
     iter = pm.find("oss.asize");
     if (iter != pm.end()) {

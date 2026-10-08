@@ -98,6 +98,7 @@ set(PYXROOTD_SOURCES
   libs/client/_asyncio.py
   libs/client/_version.py
   libs/client/aio.py
+  libs/client/auth.py
   libs/client/asyncstream.py
   libs/client/copyprocess.py
   libs/client/env.py
@@ -109,6 +110,7 @@ set(PYXROOTD_SOURCES
   libs/client/glob_funcs.py
   libs/client/py.typed
   libs/client/responses.py
+  libs/client/storage.py
   libs/client/stream.py
   libs/client/url.py
   libs/client/utils.py
@@ -231,7 +233,7 @@ list(APPEND ENVIRON "XROOTD=$<TARGET_FILE:xrootd>")
 list(APPEND ENVIRON "XRDFS=$<TARGET_FILE:xrdfs>")
 list(APPEND ENVIRON "PYTHONDONTWRITEBYTECODE=1")
 
-set(PYXROOTD_TESTS auth copy file filesystem filesystem_helpers glob stream threads
+set(PYXROOTD_TESTS auth copy file filesystem filesystem_helpers glob storage storage_http stream threads
                   url version_policy)
 
 if(Python_VERSION VERSION_GREATER_EQUAL 3.11)

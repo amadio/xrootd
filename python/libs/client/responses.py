@@ -52,6 +52,22 @@ class XRootDChecksumError(XRootDError):
   """The request failed checksum validation."""
 
 
+class XRootDAlreadyExistsError(XRootDError):
+  """The destination already exists or conflicts with another resource."""
+
+
+class XRootDQuotaError(XRootDError):
+  """The operation exceeded the storage quota."""
+
+
+class XRootDTemporaryError(XRootDError):
+  """The service is overloaded, locked, or temporarily unavailable."""
+
+
+class XRootDUnsupportedError(XRootDError):
+  """The requested operation is not supported by the endpoint."""
+
+
 class XRootDOperationError(XRootDError):
   """Generic unsuccessful XRootD operation."""
 
@@ -200,10 +216,16 @@ class XRootDStatus(Struct):
   # XRootD protocol error numbers carried by errErrorResponse statuses.
   _SERVER_NOT_AUTHORIZED = 3010
   _SERVER_NOT_FOUND = 3011
+  _SERVER_UNSUPPORTED = 3013
+  _SERVER_ALREADY_EXISTS = 3018
   _SERVER_CHECKSUM_ERROR = 3019
+  _SERVER_OVER_QUOTA = 3021
+  _SERVER_OVERLOADED = 3024
   _SERVER_AUTH_FAILED = 3030
+  _SERVER_CONFLICT = 3032
   _SERVER_REQUEST_TIMED_OUT = 3034
   _SERVER_TIMER_EXPIRED = 3035
+  _SERVER_FILE_LOCKED = 3003
 
   def __init__(self, status):
     super(XRootDStatus, self).__init__(status)
@@ -237,6 +259,18 @@ class XRootDStatus(Struct):
     if code == self.errCheckSumError or (
         server_error and errno == self._SERVER_CHECKSUM_ERROR):
       return XRootDChecksumError(self)
+    if server_error and errno in (
+        self._SERVER_ALREADY_EXISTS, self._SERVER_CONFLICT):
+      return XRootDAlreadyExistsError(self)
+    if server_error and errno == self._SERVER_OVER_QUOTA:
+      return XRootDQuotaError(self)
+    if code == self.errRetry or (server_error and errno in (
+        self._SERVER_FILE_LOCKED, self._SERVER_OVERLOADED)):
+      return XRootDTemporaryError(self)
+    if code in (self.errNotSupported, self.errNotImplemented,
+                self.errQueryNotSupported) or (
+        server_error and errno == self._SERVER_UNSUPPORTED):
+      return XRootDUnsupportedError(self)
     return XRootDOperationError(self)
 
   def raise_on_error(self):
@@ -279,6 +313,13 @@ def raise_as_oserror(status, path):
     result = PermissionError(errno.EACCES, status.message, path)
   elif isinstance(error, XRootDTimeoutError):
     result = TimeoutError(errno.ETIMEDOUT, status.message, path)
+  elif (status.code == status.errErrorResponse and status.errno == 3013) or \
+      status.code in (
+      status.errNotSupported, status.errQueryNotSupported,
+      status.errNotImplemented):
+    result = OSError(errno.ENOTSUP, status.message, path)
+  elif status.code == status.errInvalidArgs:
+    result = OSError(errno.EINVAL, status.message, path)
   else:
     result = OSError(errno.EIO, status.message, path)
   result.xrootd_status = status
@@ -292,12 +333,16 @@ def parse_checksum(response, algorithm=None):
   reject a different one rather than silently returning an unexpected digest.
   """
   if isinstance(response, bytes):
-    response = response.decode('ascii')
+    try:
+      response = response.decode('ascii')
+    except UnicodeDecodeError as error:
+      raise OSError(errno.EPROTO, 'Invalid XRootD checksum response') from error
   parts = response.strip('\x00').strip().split()
   if len(parts) != 2:
-    raise OSError('Invalid XRootD checksum response: %r' % response)
+    raise OSError(errno.EPROTO, 'Invalid XRootD checksum response')
   if algorithm is not None and parts[0].lower() != algorithm.lower():
-    raise OSError('Expected %s checksum, server returned %s' %
+    raise OSError(errno.EINPROGRESS,
+                  'Expected %s checksum, server returned %s' %
                   (algorithm, parts[0]))
   return parts[0], parts[1]
 
@@ -314,7 +359,7 @@ def checksum_query_path(path, algorithm=None):
     params = '&'.join(part for part in params.split('&')
                       if part.partition('=')[0] != 'cks.type')
   return base + '?' + (params + '&' if params else '') + \
-      'cks.type=' + algorithm
+      'cks.type=' + algorithm.lower()
 
 
 class TapeEndpoint(Struct):
@@ -415,6 +460,26 @@ class ProtocolInfo(Struct):
   """
   def __init__(self, info):
     super(ProtocolInfo, self).__init__(info)
+
+
+class ChecksumInfo(Struct):
+  """Structured checksum response.
+
+  :param response: raw response returned by ``QueryCode.CHECKSUM``
+  :type  response: string
+  :var algorithm: checksum algorithm name, for example ``adler32``
+  :var value:     checksum value
+  """
+
+  def __init__(self, response):
+    try:
+      algorithm, value = parse_checksum(response)
+    except OSError:
+      raise ValueError('Invalid checksum response')
+    super(ChecksumInfo, self).__init__({
+      'algorithm': algorithm,
+      'value': value,
+    })
 
 class StatInfo(Struct):
   """Status information for files and directories.

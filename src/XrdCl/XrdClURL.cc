@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -353,6 +354,61 @@ namespace XrdCl
   //------------------------------------------------------------------------
   std::string URL::GetParamsAsString( bool filter ) const
   {
+    // HTTP query strings can be signed: retain spelling, ordering, duplicate
+    // keys and empty values while reconciling explicit ParamsMap updates.
+    if( pProtocol == "http" || pProtocol == "https" ||
+        pProtocol == "dav" || pProtocol == "davs" )
+    {
+      const auto path = pURL.find( '/', pURL.find( "://" ) + 3 );
+      const auto query = pURL.find( '?', path );
+      if( query != std::string::npos )
+      {
+        std::vector<std::string> parts;
+        ParamsMap original;
+        size_t begin = query + 1;
+        while( begin <= pURL.size() )
+        {
+          auto end = pURL.find( '&', begin );
+          if( end == std::string::npos ) end = pURL.size();
+          auto part = pURL.substr( begin, end - begin );
+          auto equals = part.find( '=' );
+          if( !part.empty() )
+            original[part.substr( 0, equals )] = equals == std::string::npos
+              ? "" : part.substr( equals + 1 );
+          parts.push_back( part );
+          if( end == pURL.size() ) break;
+          begin = end + 1;
+        }
+
+        std::vector<std::string> retained;
+        std::set<std::string> emitted;
+        for( const auto &part : parts )
+        {
+          if( part.empty() ) { retained.push_back( part ); continue; }
+          auto key = part.substr( 0, part.find( '=' ) );
+          auto current = pParams.find( key );
+          if( current == pParams.end() ||
+              ( filter && key.compare( 0, 6, "xrdcl." ) == 0 ) ) continue;
+          if( current->second == original[key] ) retained.push_back( part );
+          else if( emitted.find( key ) == emitted.end() )
+            retained.push_back( key + '=' + current->second );
+          emitted.insert( key );
+        }
+        for( const auto &param : pParams )
+          if( emitted.find( param.first ) == emitted.end() &&
+              !( filter && param.first.compare( 0, 6, "xrdcl." ) == 0 ) )
+            retained.push_back( param.first + '=' + param.second );
+
+        std::string result;
+        for( const auto &part : retained )
+        {
+          result += result.empty() ? '?' : '&';
+          result += part;
+        }
+        return result == "?" ? "" : result;
+      }
+    }
+
     if( pParams.empty() )
       return "";
 
@@ -380,11 +436,21 @@ namespace XrdCl
     pParams.clear();
     std::string p = params;
 
+    const bool http = pProtocol == "http" || pProtocol == "https" ||
+                      pProtocol == "dav" || pProtocol == "davs";
+    if( http )
+      pURL = GetLocation();
+
     if( p.empty() )
+    {
+      if( http ) ComputeURL();
       return;
+    }
 
     if( p[0] == '?' )
       p.erase( 0, 1 );
+
+    if( http && !p.empty() ) pURL += '?' + p;
 
     std::vector<std::string>           paramsVect;
     std::vector<std::string>::iterator it;
@@ -393,7 +459,7 @@ namespace XrdCl
     {
       if( it->empty() ) continue;
       size_t qpos = it->find( '?' );
-      if( qpos != std::string::npos ) // we have login token
+      if( !http && qpos != std::string::npos ) // we have login token
       {
         pParams["xrd.logintoken"] = it->substr( qpos + 1 );
         it->erase( qpos );
@@ -404,6 +470,7 @@ namespace XrdCl
       else
         pParams[it->substr(0, pos)] = it->substr( pos+1, it->length() );
     }
+    if( http ) ComputeURL();
   }
 
   //----------------------------------------------------------------------------

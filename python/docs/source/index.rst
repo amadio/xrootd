@@ -33,6 +33,7 @@ API Reference
    modules/client/aio
    modules/client/copyprocess
    modules/client/auth
+   modules/client/storage
    modules/client/responses
    modules/client/env
    modules/client/flags

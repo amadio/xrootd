@@ -32,6 +32,7 @@ from XRootD.client.responses import XRootDStatus, StatInfo, StatInfoVFS
 from XRootD.client.responses import XRootDNotFoundError, raise_as_oserror
 from XRootD.client.responses import checksum_query_path, parse_checksum
 from XRootD.client.responses import LocationInfo, DirectoryList, ProtocolInfo
+from XRootD.client.responses import ChecksumInfo
 from XRootD.client.utils import CallbackWrapper
 from XRootD.client.url import URL
 from XRootD.client.flags import AccessMode, DirListFlags, MkDirFlags
@@ -99,6 +100,14 @@ class FileSystem(object):
     if auth is not None:
       url = auth.apply(url)
     self.__fs = client.FileSystem(url)
+
+  def __enter__(self):
+    """Return this filesystem instance for use in a ``with`` statement."""
+    return self
+
+  def __exit__(self, exc_type, exc_value, traceback):
+    """Exit a ``with`` statement without suppressing exceptions."""
+    return None
 
   @property
   def url(self):
@@ -203,6 +212,23 @@ class FileSystem(object):
     status, response = self.__fs.query(querycode, arg, timeout)
     return XRootDStatus(status), response
 
+  def checksum_info(self, path, timeout=0, callback=None):
+    """Obtain a structured checksum for a path.
+
+    :param path: path to the file
+    :type  path: string
+    :returns:    tuple containing :mod:`XRootD.client.responses.XRootDStatus`
+                 object and :mod:`XRootD.client.responses.ChecksumInfo` object
+    """
+    if callback:
+      callback = CallbackWrapper(callback, ChecksumInfo)
+      return XRootDStatus(self.__fs.query(QueryCode.CHECKSUM, path, timeout,
+                                          callback))
+
+    status, response = self.__fs.query(QueryCode.CHECKSUM, path, timeout)
+    if response: response = ChecksumInfo(response)
+    return XRootDStatus(status), response
+
   def truncate(self, path, size, timeout=0, callback=None):
     """Truncate a file.
 
@@ -258,6 +284,22 @@ class FileSystem(object):
 
     status, response = self.__fs.mkdir(path, flags, mode, timeout)
     return XRootDStatus(status), None
+
+  def mkdir_p(self, path, flags=0, mode=0, timeout=0, callback=None):
+    """Create a directory and any missing parent directories.
+
+    This is a convenience wrapper around :meth:`mkdir` using
+    :data:`XRootD.client.flags.MkDirFlags.MAKEPATH`.
+
+    :param  path: path to the directory to create
+    :type   path: string
+    :param flags: Additional `ORed` flags from
+                  :mod:`XRootD.client.flags.MkDirFlags`
+    :param  mode: the initial file access mode, an `ORed` combination of
+                  :mod:`XRootD.client.flags.AccessMode`
+    """
+    return self.mkdir(path, flags | MkDirFlags.MAKEPATH, mode, timeout,
+                      callback)
 
   def rmdir(self, path, timeout=0, callback=None):
     """Remove a directory.

@@ -247,6 +247,9 @@ TEST_P(CurlCopyResponseTest, RequiresSuccessfulTerminalMarker)
     if (std::get<2>(GetParam()) == 403) {
         EXPECT_EQ(status->errNo, kXR_NotAuthorized);
     }
+    if (std::get<2>(GetParam()) == 500) {
+        EXPECT_EQ(status->errNo, kXR_IOError);
+    }
     if (body.find("Transferred: 42") != std::string::npos) {
         EXPECT_EQ(progress, std::vector<off_t>{42});
     } else {
@@ -305,7 +308,8 @@ INSTANTIATE_TEST_SUITE_P(ControlBody, CurlCopyResponseTest, testing::Values(
     std::make_tuple("Perf Marker\nEnd\n", false, 201),
     std::make_tuple("success: Created\nfailure: checksum mismatch\n", false, 201),
     std::make_tuple("failure: checksum mismatch\nsuccess: Created\n", false, 201),
-    std::make_tuple("failure: ignore this HTTP error body\n", false, 403)
+    std::make_tuple("failure: ignore this HTTP error body\n", false, 403),
+    std::make_tuple("Internal Server Error", false, 500)
 ));
 
 TEST(CopyResponseParser, ParsesEverySplitAndSingleByteDelivery)

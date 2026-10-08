@@ -316,7 +316,8 @@ std::pair<uint16_t, uint32_t> XrdClHttp::HTTPStatusConvert(unsigned status) {
         case 451: // Unavailable For Legal Reasons
             return std::make_pair(XrdCl::errErrorResponse, kXR_Impossible);
         case 500: // Internal Server Error
-            return std::make_pair(XrdCl::errErrorResponse, kXR_ServerError);
+            // This is a failed storage operation, not EFAULT (Bad address).
+            return std::make_pair(XrdCl::errErrorResponse, kXR_IOError);
         case 501: // Not Implemented
             return std::make_pair(XrdCl::errErrorResponse, kXR_Unsupported);
         case 502: // Bad Gateway

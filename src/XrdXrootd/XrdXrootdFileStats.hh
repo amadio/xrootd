@@ -50,6 +50,12 @@ struct {double      read;     // sum(read_size[i] **2) i = 1 to Ops.read
         double      write;    // sum(write_size[i]**2) i = 1 to Ops.write
        }            ssq;
 
+// The first error of the file. Only an error writes these fields, and only the
+// close record reads them, so they come last to keep the fields above dense.
+//
+int                 errCode;  // kXR error code of the first error
+char                errCat;   // monErrCat of the first error, 0 if none
+
 enum monLevel {monOff = 0, monOn = 1, monOps = 2, monSsq = 3};
 
        void Init()
@@ -60,7 +66,14 @@ enum monLevel {monOff = 0, monOn = 1, monOps = 2, monSsq = 3};
                  ops.rsMin = 0x7fff;
                  ops.rdMin = ops.rvMin = ops.wrMin = 0x7fffffff;
                  ssq.read  = ssq.readv = ssq.write = ssq.rsegs = 0.0;
+                 errCat = 0; errCode = 0;
                 };
+
+// Record the first error of a file for the f-stream close record. A later
+// error is often only a result of the first one, so it does not replace it.
+//
+inline void setErr(int code, char cat)
+                  {if (MonEnt != -1 && !errCat) {errCode = code; errCat = cat;}}
 
 inline void pgrOps(int rsz, bool isRetry=false)
                   {if (monLvl)

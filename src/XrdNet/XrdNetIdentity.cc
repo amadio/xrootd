@@ -175,8 +175,8 @@ done:
    return true;
 }
 
-// True if the FQN is configured for this host
-static bool FQN_DNS = getMyFQN();
+// Run getMyFQN() once during static initialization
+static const bool FQN_DNS = getMyFQN();
 
 /******************************************************************************/
 /*                                D o m a i n                                 */
@@ -206,5 +206,4 @@ void XrdNetIdentity::SetFQN(const char *fqn)
 {
    strlcpy(DNS_FQN, fqn, sizeof(DNS_FQN));
    if (!(DNS_Domain = index(DNS_FQN, '.'))) DNS_Domain = "";
-   FQN_DNS = false;
 }

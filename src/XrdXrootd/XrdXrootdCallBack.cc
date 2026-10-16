@@ -41,6 +41,7 @@
 #include "XrdSfs/XrdSfsInterface.hh"
 #include "XrdXrootd/XrdXrootdCallBack.hh"
 #include "XrdXrootd/XrdXrootdFile.hh"
+#include "XrdXrootd/XrdXrootdMonData.hh"
 #include "XrdXrootd/XrdXrootdMonFile.hh"
 #include "XrdXrootd/XrdXrootdMonitor.hh"
 #include "XrdXrootd/XrdXrootdProtocol.hh"
@@ -197,6 +198,18 @@ XrdXrootdFile *XrdXrootdCBJob::DoClose(XrdOucErrInfo *eInfo)
        eDest->Emsg("DoClose", buff, Path);
        Result = SFS_ERROR;
        eInfo->setErrInfo(kXR_FSError, "Internal error; file close forced");
+      }
+
+// XrdXrootdFileTable::Del() did not send the f-stream close record, because
+// the result was not known. Keep a close error and send the record now.
+//
+   if (fP->Stats.MonEnt != -1)
+      {if (Result == SFS_ERROR)
+          {int ecode;
+           eInfo->getErrText(ecode);
+           fP->Stats.setErr(XProtocol::mapError(ecode), monErrClose);
+          }
+       XrdXrootdMonFile::Close(&fP->Stats, false);
       }
 
 // Send appropriate response (OK or error)

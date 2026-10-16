@@ -711,7 +711,8 @@ int XrdXrootdProtocol::do_Close()
 // while the response is sent.
 //
    int retval = 0;
-   if (SFS_OK != rc) retval = fsError(rc, 0, fp->XrdSfsp->error, 0, 0);
+   if (SFS_OK != rc)
+      retval = fsError(rc, 0, fp->XrdSfsp->error, 0, 0, fp, monErrClose);
 
 // Delete the file from the file table. If the file object is deleted then it
 // will unlock the file In all cases, final monitoring records will be produced.
@@ -2679,7 +2680,8 @@ int XrdXrootdProtocol::do_ReadAll()
        if (rc == SFS_OK)
           {if (!IO.IOLen)    return 0;
            if (IO.IOLen < 0) return -1;  // Otherwise retry using read()
-          } else return fsError(rc, 0, IO.File->XrdSfsp->error, 0, 0);
+          } else return fsError(rc, 0, IO.File->XrdSfsp->error, 0, 0,
+                                IO.File, monErrRead);
       }
 
 // Make sure we have a large enough buffer
@@ -2703,7 +2705,8 @@ int XrdXrootdProtocol::do_ReadAll()
 // Determine why we ended here
 //
    if (xframt == 0) return Response.Send();
-   return fsError(xframt, 0, IO.File->XrdSfsp->error, 0, 0);
+   return fsError(xframt, 0, IO.File->XrdSfsp->error, 0, 0,
+                  IO.File, monErrRead);
 }
 
 /******************************************************************************/
@@ -2906,7 +2909,8 @@ int XrdXrootdProtocol::do_ReadV()
           {xfrSZ = SFS_ERROR;
            IO.File->XrdSfsp->error.setErrInfo(-ENODATA,"readv past EOF");
           }
-       return fsError(xfrSZ, 0, IO.File->XrdSfsp->error, 0, 0);
+       return fsError(xfrSZ, 0, IO.File->XrdSfsp->error, 0, 0,
+                      IO.File, monErrRead);
       }
 
 // All done, return result of the last segment or just zero
@@ -3557,7 +3561,9 @@ int XrdXrootdProtocol::do_WriteNoneMsg()
       return Response.Send((XErrorCode)IO.EInfo[1],
                            IO.File->XrdSfsp->error.getErrText());
 
-   if (IO.EInfo[0]) return fsError(IO.EInfo[0], 0, IO.File->XrdSfsp->error, 0, 0);
+   if (IO.EInfo[0])
+      return fsError(IO.EInfo[0], 0, IO.File->XrdSfsp->error, 0, 0,
+                     IO.File, monErrWrite);
 
    return Response.Send(kXR_FSError, IO.File->XrdSfsp->error.getErrText());
 }
@@ -3836,7 +3842,8 @@ do{if (IO.IOLen > 0)
 // If we got here then there was a write error (file pointer is valid).
 //
    if (wvInfo) {free(wvInfo); wvInfo = 0;}
-   return fsError((int)xfrSZ, 0, IO.File->XrdSfsp->error, 0, 0);
+   return fsError((int)xfrSZ, 0, IO.File->XrdSfsp->error, 0, 0,
+                  IO.File, monErrWrite);
 }
 
 /******************************************************************************/
@@ -3895,8 +3902,12 @@ void XrdXrootdProtocol::SetFD(int fildes)
 /*                               f s E r r o r                                */
 /******************************************************************************/
 
+// When fP and errCat are given, a file system error is also kept as the
+// first error of the file, for the f-stream close record.
+//
 int XrdXrootdProtocol::fsError(int rc, char opC, XrdOucErrInfo &myError,
-                               const char *Path, char *Cgi)
+                               const char *Path, char *Cgi,
+                               XrdXrootdFile *fP, char errCat)
 {
    int ecode, popt, rs;
    const char *eMsg = myError.getErrText(ecode);
@@ -3906,6 +3917,7 @@ int XrdXrootdProtocol::fsError(int rc, char opC, XrdOucErrInfo &myError,
    if (rc == SFS_ERROR)
       {SI->errorCnt++;
        rc = XProtocol::mapError(ecode);
+       if (fP && errCat) fP->Stats.setErr(rc, errCat);
 
        if (Path && (rc == kXR_Overloaded) && (opC == XROOTD_MON_OPENR
                 || opC == XROOTD_MON_OPENW || opC == XROOTD_MON_OPENC))

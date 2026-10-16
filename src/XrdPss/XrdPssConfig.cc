@@ -116,7 +116,7 @@ bool         XrdPssSys::reProxy   = false;
 
 namespace XrdProxy
 {
-static XrdPosixXrootd  *Xroot;
+[[maybe_unused]] static XrdPosixXrootd *Xroot; // set only for ctor side effects
 
 extern XrdSysError      eDest;
 

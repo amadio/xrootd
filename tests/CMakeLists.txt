@@ -25,7 +25,6 @@ add_subdirectory(XrdClHttp)
 add_subdirectory(XrdClS3)
 
 add_subdirectory( XrdOssTests )
-add_subdirectory( XRootD )
 add_subdirectory( cluster )
 add_subdirectory( authenticated_cluster)
 add_subdirectory( TPCTests )

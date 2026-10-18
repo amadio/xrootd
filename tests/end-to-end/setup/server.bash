@@ -268,13 +268,14 @@ server_is_up() {
 
 # stop_servers
 #
-# Stop all servers of the current context, remove the admin directories
+# Stop all servers and daemons of the current context, remove the admin directories
 # outside of it, and fail if a process of a server survives.
 stop_servers() {
     local tmp pidfile link survivors
     tmp=$(_setup_tmpdir)
 
-    for pidfile in "$tmp"/*/xrootd.pid; do
+    # the servers, and daemons of the setup like the KDC
+    for pidfile in "$tmp"/*/*.pid; do
         [[ -s "$pidfile" ]] && stop_pid "$(<"$pidfile")"
         rm -f "$pidfile"
     done

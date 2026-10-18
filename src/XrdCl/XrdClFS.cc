@@ -49,6 +49,8 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <memory>
+#include <unistd.h>
 
 #ifdef HAVE_READLINE
 #include <readline/history.h>
@@ -1678,6 +1680,13 @@ XRootDStatus DoCat( FileSystem                      *fs,
     props[i].Set( "source", remoteUrls[i].GetURL() );
     if( !local.empty() )
     {
+      // a file URL needs an absolute path, else the path becomes its host
+      if( local[0] != '/' )
+      {
+        std::unique_ptr<char, decltype( &free )> cwd( getcwd( nullptr, 0 ), free );
+        if( cwd )
+          local = std::string( cwd.get() ) + "/" + local;
+      }
       props[i].Set( "target", std::string( "file://" ) + local );
       handler = &d;
     }

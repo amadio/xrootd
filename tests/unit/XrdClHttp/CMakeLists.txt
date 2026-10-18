@@ -67,3 +67,17 @@ endif()
 
 gtest_discover_tests(xrdclhttp-tpc-tests-unit
   PROPERTIES DISCOVERY_TIMEOUT 10)
+
+add_executable(xrdcl-http-unit-tests
+  HeaderParserTest.cc
+  ParseTimeoutTest.cc
+  TapeTest.cc
+)
+
+target_link_libraries(xrdcl-http-unit-tests
+  XrdClHttpObj XrdCl CURL::libcurl GTest::gtest_main)
+target_include_directories(xrdcl-http-unit-tests
+  PRIVATE "${PROJECT_SOURCE_DIR}/src")
+
+gtest_discover_tests(xrdcl-http-unit-tests TEST_PREFIX XrdClHttp::
+  PROPERTIES DISCOVERY_TIMEOUT 10)

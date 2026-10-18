@@ -76,16 +76,18 @@ _setup_admin_dir() {
     echo "$dir"
 }
 
-# Start xrootd with the configuration in the run directory, on the given
-# port, and wait until its initialization completes. Write the port which
-# it bound to the run directory.
-_setup_run_xrootd() {
-    local name=$1 port=$2
+# _setup_run <program> <name> <port>
+#
+# Start the program, xrootd or cmsd, with the configuration in the run
+# directory, on the given port, and wait until its initialization completes.
+# For xrootd, write the port which it bound to the run directory.
+_setup_run() {
+    local prog=$1 name=$2 port=$3
     local rundir admin log pidfile line
     rundir="$(_setup_tmpdir)/$name"
     admin=$(readlink -f "$rundir/admin")
-    log="$rundir/xrootd.log"
-    pidfile="$rundir/xrootd.pid"
+    log="$rundir/$prog.log"
+    pidfile="$rundir/$prog.pid"
 
     (
         cd "$rundir" &&
@@ -93,17 +95,17 @@ _setup_run_xrootd() {
         SETUP_BINDIR=$(dirname "$(command -v xrootd)") \
         SETUP_CREDENTIALS=${CREDENTIALS:-} SETUP_TESTDIR=${BATS_TEST_DIRNAME:-} \
         SETUP_SETUPDIR=$SETUP_DIR \
-            XDG_CACHE_HOME="$rundir/cache" xrootd -b -c "$rundir/$name.cfg" -l "$log" -s "$pidfile"
+            XDG_CACHE_HOME="$rundir/cache" "$prog" -b -c "$rundir/$name.cfg" -l "$log" -s "$pidfile"
     )
 
-    # xrootd logs this line at the end of its configuration; the components
-    # log similar lines before it, thus match the whole line
+    # the daemon logs this line at the end of its configuration; the
+    # components log similar lines before it, thus match the whole line
     for _ in {1..200}; do
-        line=$(grep -asE '^------ xrootd .*:[0-9]+ initialization (completed|failed)' "$log")
+        line=$(grep -asE "^------ $prog .*:[0-9]+ initialization (completed|failed)" "$log")
 
         if [[ "$line" == *completed* ]]; then
             line=${line% initialization completed.}
-            echo "${line##*:}" > "$rundir/port"
+            [[ "$prog" == xrootd ]] && echo "${line##*:}" > "$rundir/port"
             return 0
         fi
 
@@ -117,10 +119,14 @@ _setup_run_xrootd() {
         sleep 0.05
     done
 
-    echo "xrootd '$name' failed to start" >&2
+    echo "$prog '$name' failed to start" >&2
     [[ -f "$log" ]] && sed "s|^|[$name] |" "$log" >&2
     [[ -s "$pidfile" ]] && stop_pid "$(<"$pidfile")"
     return 1
+}
+
+_setup_run_xrootd() {
+    _setup_run xrootd "$@"
 }
 
 # start_server <name> <role> [snippet...]
@@ -142,12 +148,20 @@ _setup_run_xrootd() {
 #   <NAME>_DATA  the data directory of the server (oss.localroot)
 #   <NAME>_LOG   the server log
 start_server() {
+    _setup_compose "$@" || return 1
+    _setup_run_xrootd "$1" any || return 1
+    _setup_export "$1"
+}
+
+# _setup_compose <name> <role> [snippet...]
+#
+# Make the run directory of the server and write its configuration.
+_setup_compose() {
     local name=$1 role=$2
     shift 2
 
-    local rundir var snippet port
+    local rundir snippet
     rundir="$(_setup_tmpdir)/$name"
-    var=$(_setup_var "$name")
 
     if [[ -e "$rundir" ]]; then
         echo "start_server: server '$name' exists already" >&2
@@ -167,9 +181,15 @@ start_server() {
         fi
         { echo; cat "$snippet"; } >> "$rundir/$name.cfg" || return 1
     done
+}
 
-    _setup_run_xrootd "$name" any || return 1
-
+# _setup_export <name>
+#
+# Export the variables of a running server (see start_server).
+_setup_export() {
+    local name=$1 rundir var port
+    rundir="$(_setup_tmpdir)/$name"
+    var=$(_setup_var "$name")
     port=$(<"$rundir/port")
 
     export "${var}_PORT=$port"

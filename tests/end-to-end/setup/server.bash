@@ -85,13 +85,17 @@ _setup_admin_dir() {
     echo "$dir"
 }
 
-# Start xrootd with the configuration in the run directory, on the given
-# port, or on a random port for "any". The options are those of the systemd
-# units: the instance name is the server name, thus xrootd has its home in
-# the run directory, and logs to xrootd.log there. Write the port to the run
-# directory.
-_setup_run_xrootd() {
-    local name=$1 port=$2
+# _setup_run <program> <name> <port> [argument...]
+#
+# Start the program, xrootd or cmsd, with the configuration in the run
+# directory, on the given port, or on a random port for "any", and with the
+# extra arguments. The options are those of the systemd units: the instance
+# name is the server name, thus the program has its home in the run
+# directory, and logs to <program>.log there. For xrootd, write the port to
+# the run directory.
+_setup_run() {
+    local prog=$1 name=$2 port=$3
+    shift 3
     local rundir admin log bind=$port
     rundir="$(_setup_tmpdir)/$name"
     admin="$rundir/admin"
@@ -99,7 +103,7 @@ _setup_run_xrootd() {
     if [[ -L "$admin" ]]; then
         admin=$(readlink "$admin")
     fi
-    log="$rundir/xrootd.log"
+    log="$rundir/$prog.log"
 
     # For "any", a random port above the fixed ports of the old test suites
     # (up to 20972), and below the ephemeral ports of Linux (32768) and macOS
@@ -119,12 +123,13 @@ _setup_run_xrootd() {
             SETUP_BINDIR=$(dirname "$(command -v xrootd)") \
             SETUP_CREDENTIALS=${CREDENTIALS:-} SETUP_TESTDIR=${BATS_TEST_DIRNAME:-} \
             SETUP_SETUPDIR=$SETUP_DIR \
-                XDG_CACHE_HOME="$rundir/cache" xrootd -b -k fifo -n "$name" -a "$admin" -w "${rundir%/*}" \
-                    -c "$rundir/$name.cfg" -l "${rundir%/*}/xrootd.log" \
-                    -s "$rundir/xrootd.pid" \
-                    < /dev/null > "$rundir/xrootd.out" 2>&1 3>&- 4>&-
+                XDG_CACHE_HOME="$rundir/cache" $prog -b -k fifo -n "$name" -a "$admin" -w "${rundir%/*}" \
+                    -c "$rundir/$name.cfg" -l "${rundir%/*}/$prog.log" \
+                    -s "$rundir/$prog.pid" "$@" \
+                    < /dev/null > "$rundir/$prog.out" 2>&1 3>&- 4>&-
         ); then
-            echo "$bind" > "$rundir/port"
+            [[ "$prog" == xrootd ]] && echo "$bind" > "$rundir/port"
+            [[ "$prog" == cmsd ]] && echo "$bind" > "$rundir/cmsd.port"
             return 0
         fi
 
@@ -135,11 +140,15 @@ _setup_run_xrootd() {
         fi
     done
 
-    echo "xrootd '$name' failed to start" >&2
-    [[ -s "$rundir/xrootd.out" ]] && sed "s|^|[$name] |" "$rundir/xrootd.out" >&2
+    echo "$prog '$name' failed to start" >&2
+    [[ -s "$rundir/$prog.out" ]] && sed "s|^|[$name] |" "$rundir/$prog.out" >&2
     [[ -f "$log" ]] && sed "s|^|[$name] |" "$log" >&2
-    [[ -s "$rundir/xrootd.pid" ]] && stop_pid "$(<"$rundir/xrootd.pid")"
+    [[ -s "$rundir/$prog.pid" ]] && stop_pid "$(<"$rundir/$prog.pid")"
     return 1
+}
+
+_setup_run_xrootd() {
+    _setup_run xrootd "$@"
 }
 
 # _setup_snippet <snippet.cfg>
@@ -183,6 +192,30 @@ _setup_snippet() {
 #   <NAME>_DATA  the data directory of the server (oss.localroot)
 #   <NAME>_LOG   the server log
 start_server() {
+    local name
+    name=$(_setup_name "$@")
+    _setup_compose "$@" || return 1
+    _setup_run_xrootd "$name" any || return 1
+    _setup_export "$name"
+}
+
+# _setup_name [name] [role] [snippet.cfg...]: print the name of the server
+_setup_name() {
+    local arg
+
+    for arg in "$@"; do
+        if [[ "$arg" != *.cfg ]]; then
+            echo "$arg"
+            return
+        fi
+    done
+    echo server
+}
+
+# _setup_compose [name] [role] [snippet.cfg...]
+#
+# Make the run directory of the server and write its configuration.
+_setup_compose() {
     local name=server role=server arg n=0
     local snippets=()
     for arg in "$@"; do
@@ -198,9 +231,8 @@ start_server() {
         fi
     done
 
-    local rundir var snippet port
+    local rundir snippet
     rundir="$(_setup_tmpdir)/$name"
-    var=$(_setup_var "$name")
 
     if [[ -e "$rundir" ]]; then
         echo "start_server: server '$name' exists already" >&2
@@ -216,9 +248,15 @@ start_server() {
         snippet=$(_setup_snippet "$snippet") || return 1
         { echo; cat "$snippet"; } >> "$rundir/$name.cfg" || return 1
     done
+}
 
-    _setup_run_xrootd "$name" any || return 1
-
+# _setup_export <name>
+#
+# Export the variables of a running server (see start_server).
+_setup_export() {
+    local name=$1 rundir var port
+    rundir="$(_setup_tmpdir)/$name"
+    var=$(_setup_var "$name")
     port=$(<"$rundir/port")
 
     export "${var}_PORT=$port"

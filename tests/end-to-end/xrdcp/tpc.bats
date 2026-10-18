@@ -6,7 +6,7 @@
 load ../setup/server.bash
 
 setup_file() {
-    start_server server server "$SETUP_DIR/tpc.cfg"
+    start_server server server tpc
     start_server gone server
     stop_server gone
 

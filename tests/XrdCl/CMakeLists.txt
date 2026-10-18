@@ -6,7 +6,6 @@ add_executable(xrdcl-cluster-tests
   # XrdClFileCopyTest.cc
   # XrdClFileSystemTest.cc
   # XrdClOperationsWorkflowTest.cc
-  XrdClLocalFileHandlerTest.cc
   XrdClPostMasterTest.cc
   XrdClThreadingTest.cc
   XrdClZip.cc

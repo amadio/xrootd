@@ -26,7 +26,7 @@ setup() {
 # time between them, longer than the data server TTL of 1 s.
 stat_twice() {
     { echo 'stat /file'; sleep 3; echo 'stat /file'; } |
-        XRD_DATASERVERTTL=1 timeout 30 xrdfs "$SERVER_URL" "$@"
+        XRD_DATASERVERTTL=1 with_timeout 30 xrdfs "$SERVER_URL" "$@"
 }
 
 @test "a client connects to the server by the name of the host" {
@@ -64,6 +64,6 @@ stat_twice() {
     # each user has 17 sockets; the default limit of macOS is 256 files
     (( $(ulimit -n) >= 1024 )) || ulimit -n 1024 || skip 'cannot open 1024 files'
     XRD_SUBSTREAMSPERCHANNEL=16 XRD_DATASERVERTTL=1 XRD_CONNECTIONRETRY=0 \
-        run -0 timeout 60 xrdcl-api open-users "localhost:$SERVER_PORT" /missing 20 4
+        run -0 with_timeout 60 xrdcl-api open-users "localhost:$SERVER_PORT" /missing 20 4
     assert_equal "$(grep -c '^3011$' <<< "$output")" 20
 }

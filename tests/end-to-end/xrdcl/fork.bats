@@ -20,19 +20,19 @@ setup() {
 }
 
 @test "children read a file which their parent opened" {
-    run -0 timeout 60 xrdcl-api fork "$SERVER_URL//ref.dat" 5
+    run -0 with_timeout 60 xrdcl-api fork "$SERVER_URL//ref.dat" 5
 }
 
 @test "children read a file which their parent opened over 4 substreams" {
-    XRD_SUBSTREAMSPERCHANNEL=4 run -0 timeout 60 xrdcl-api fork "$SERVER_URL//ref.dat" 5
+    XRD_SUBSTREAMSPERCHANNEL=4 run -0 with_timeout 60 xrdcl-api fork "$SERVER_URL//ref.dat" 5
 }
 
 @test "a parent which forked exits after the TTL of its idle connection" {
     # regression test for a deadlock between the fork handler and the TTL
-    XRD_DATASERVERTTL=2 run -0 timeout 60 xrdcl-api fork "$SERVER_URL//ref.dat" 3 5
+    XRD_DATASERVERTTL=2 run -0 with_timeout 60 xrdcl-api fork "$SERVER_URL//ref.dat" 3 5
 }
 
 @test "the idle connection of a parent which forked closes after its TTL" {
-    XRD_DATASERVERTTL=2 timeout 60 xrdcl-api fork "$SERVER_URL//ref.dat" 3 5
+    XRD_DATASERVERTTL=2 with_timeout 60 xrdcl-api fork "$SERVER_URL//ref.dat" 3 5
     run -0 grep -F 'Stream TTL elapsed, disconnecting' "$XRD_LOGFILE"
 }

@@ -92,19 +92,19 @@ status() {
 
 @test "an upload with XrdClHttp beyond the space quota fails" {
     make_random_file local.dat $(( 50 * 1024 * 1024 ))
-    run ! timeout 120 xrdcp local.dat "$SERVER_HTTP/dir/$N/out_of_space_quota.txt"
+    run ! with_timeout 120 xrdcp local.dat "$SERVER_HTTP/dir/$N/out_of_space_quota.txt"
 }
 
 @test "an upload with XrdClHttp of several chunks succeeds" {
     make_random_file local.dat $(( 50 * 1024 * 1024 ))
-    run -0 timeout 120 xrdcp local.dat "$SERVER_HTTP/dir/$N/upload.dat"
+    run -0 with_timeout 120 xrdcp local.dat "$SERVER_HTTP/dir/$N/upload.dat"
 }
 
 @test "a download with XrdClHttp of a file which fails to read fails" {
-    run ! timeout 120 xrdcp "$SERVER_HTTP/fail_read.txt" copy.txt
+    run ! with_timeout 120 xrdcp "$SERVER_HTTP/fail_read.txt" copy.txt
 }
 
 @test "a download with XrdClHttp of a file of 5 MiB keeps the content" {
-    timeout 120 xrdcp "$SERVER_HTTP/5mb.dat" copy.dat
+    with_timeout 120 xrdcp "$SERVER_HTTP/5mb.dat" copy.dat
     run -0 cmp "$BATS_FILE_TMPDIR/5mb.dat" copy.dat
 }

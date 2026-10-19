@@ -7,18 +7,19 @@ load ../setup/cluster.bash
 
 GTEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-# The test files of 16 MiB of random data, and the data servers with a copy
-declare -gA GTEST_COPIES=(
-    [1db882c8-8cd6-4df1-941f-ce669bad3458.dat]="srv2 srv3 srv4"
-    [3c9a9dd8-bc75-422c-b12c-f00604486cc1.dat]="srv2 srv3"
-    [7235b5d1-cede-4700-a8f9-596506b4cc38.dat]="srv2"
-    [7e480547-fe1a-4eaf-a210-0f3927751a43.dat]="srv2 srv4"
-    [89120cec-5244-444c-9313-703e4bee72de.dat]="srv2 srv3 srv4"
-    [a048e67f-4397-4bb8-85eb-8d7e40d90763.dat]="srv1"
-    [b3d40b3f-1d15-4ad3-8cb5-a7516acb2bab.dat]="srv1"
-    [b74d025e-06d6-43e8-91e1-a862feb03c84.dat]="srv1 srv3 srv4"
-    [cb4aacf1-6f28-42f2-b68a-90a73460f424.dat]="srv1"
-    [cef4d954-936f-4945-ae49-60ec715b986e.dat]="srv1 srv3 srv4"
+# The test files of 16 MiB of random data, each with the data servers which
+# have a copy
+GTEST_COPIES=(
+    "1db882c8-8cd6-4df1-941f-ce669bad3458.dat srv2 srv3 srv4"
+    "3c9a9dd8-bc75-422c-b12c-f00604486cc1.dat srv2 srv3"
+    "7235b5d1-cede-4700-a8f9-596506b4cc38.dat srv2"
+    "7e480547-fe1a-4eaf-a210-0f3927751a43.dat srv2 srv4"
+    "89120cec-5244-444c-9313-703e4bee72de.dat srv2 srv3 srv4"
+    "a048e67f-4397-4bb8-85eb-8d7e40d90763.dat srv1"
+    "b3d40b3f-1d15-4ad3-8cb5-a7516acb2bab.dat srv1"
+    "b74d025e-06d6-43e8-91e1-a862feb03c84.dat srv1 srv3 srv4"
+    "cb4aacf1-6f28-42f2-b68a-90a73460f424.dat srv1"
+    "cef4d954-936f-4945-ae49-60ec715b986e.dat srv1 srv3 srv4"
 )
 
 # start_gtest_cluster
@@ -55,7 +56,7 @@ start_gtest_cluster() {
 # Make the files of the tests below /data of the nodes.
 make_gtest_data() {
     local tmp=$BATS_FILE_TMPDIR rand=$BATS_FILE_TMPDIR/random
-    local file node ml i
+    local entry file nodes node ml i
 
     mkdir -p "$rand" "$tmp/local"
     for node in metaman man1 man2 srv1 srv2 srv3 srv4; do
@@ -63,9 +64,10 @@ make_gtest_data() {
         ln -s "$tmp/$node/data" "$tmp/local/$node"
     done
 
-    for file in "${!GTEST_COPIES[@]}"; do
+    for entry in "${GTEST_COPIES[@]}"; do
+        read -r file nodes <<< "$entry"
         openssl rand -out "$rand/$file" $(( 1 << 24 ))
-        for node in ${GTEST_COPIES[$file]}; do
+        for node in $nodes; do
             cp "$rand/$file" "$tmp/$node/data/data/$file"
         done
     done
@@ -95,7 +97,7 @@ make_gtest_data() {
 # Print the metalink with the ports of the nodes, and with the size and the
 # crc32c checksum of the test file which it names.
 _gtest_metalink() {
-    local ml=$1 rand=$2 file script
+    local ml=$1 rand=$2 entry file script
 
     script="s/localhost:10940/localhost:$METAMAN_PORT/g
 s/localhost:10941/localhost:$MAN1_PORT/g
@@ -105,7 +107,8 @@ s/localhost:10944/localhost:$SRV2_PORT/g
 s/localhost:10945/localhost:$SRV3_PORT/g
 s/localhost:10946/localhost:$SRV4_PORT/g"
 
-    for file in "${!GTEST_COPIES[@]}"; do
+    for entry in "${GTEST_COPIES[@]}"; do
+        file=${entry%% *}
         grep -q "$file" "$ml" || continue
         script+="
 s|<size>.*</size>|<size>$(wc -c < "$rand/$file" | tr -d ' ')</size>|

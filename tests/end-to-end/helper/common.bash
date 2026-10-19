@@ -86,6 +86,18 @@ wait_for() {
     done
 }
 
+# with_timeout <seconds> <command...>
+#
+# Run the command, and kill it when it runs longer than the given time. GNU
+# timeout is not on macOS, thus use perl when it is missing.
+with_timeout() {
+    if command -v timeout > /dev/null; then
+        timeout "$@"
+    else
+        perl -e 'alarm shift; exec @ARGV or die "$ARGV[0]: $!\n"' "$@"
+    fi
+}
+
 # Skip the test (or all tests of the file, in setup_file) when the build has
 # not the plugin, for example libXrdHttp. Without a build directory, the test
 # assumes that the installation has it.

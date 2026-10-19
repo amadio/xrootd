@@ -31,18 +31,36 @@ if [[ -n "${BATS_TEST_TMPDIR:-}" ]]; then
     export XRD_LOGFILE="$BATS_TEST_TMPDIR/client.log"
 fi
 
-# The size of each server log when the test starts. On failure, only the
-# lines which the server logged during the test are printed, as a server
-# shared by all tests of a file logs the requests of the earlier tests too.
+# The size of each server log when the test starts, as lines "<size> <log>".
+# On failure, only the lines which the server logged during the test are
+# printed, as a server shared by all tests of a file logs the requests of the
+# earlier tests too. The helpers work with bash 3.2, the bash of macOS, thus
+# they use no associative arrays.
 
-declare -gA SETUP_LOG_OFFSETS=()
+SETUP_LOG_OFFSETS=
 
 if [[ -n "${BATS_TEST_TMPDIR:-}" ]]; then
     for log in "$BATS_FILE_TMPDIR"/*/xrootd.log; do
-        [[ -f "$log" ]] && SETUP_LOG_OFFSETS[$log]=$(wc -c < "$log")
+        if [[ -f "$log" ]]; then
+            SETUP_LOG_OFFSETS+="$(wc -c < "$log" | tr -d ' ') $log
+"
+        fi
     done
     unset log
 fi
+
+# _setup_log_offset <log>: the size of the log when the test started, or 0
+_setup_log_offset() {
+    local size path
+
+    while read -r size path; do
+        if [[ "$path" == "$1" ]]; then
+            echo "$size"
+            return
+        fi
+    done <<< "$SETUP_LOG_OFFSETS"
+    echo 0
+}
 
 # The directory of the servers started in the current context: the test
 # in setup() and @test, the file in setup_file() and teardown_file().
@@ -68,7 +86,8 @@ _setup_rundir() {
 
 # The name of the variables which start_server exports for a server.
 _setup_var() {
-    local var=${1^^}
+    local var
+    var=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')
     echo "${var//[^A-Z0-9]/_}"
 }
 
@@ -335,7 +354,7 @@ server_log() {
 
     for log in "${BATS_TEST_TMPDIR:-/nonexistent}/$1/xrootd.log" "$BATS_FILE_TMPDIR/$1/xrootd.log"; do
         if [[ -f "$log" ]]; then
-            tail -c +$(( ${SETUP_LOG_OFFSETS[$log]:-0} + 1 )) "$log"
+            tail -c +$(( $(_setup_log_offset "$log") + 1 )) "$log"
             return
         fi
     done
@@ -394,7 +413,7 @@ bats::on_failure() {
         name=$(basename "$(dirname "$log")")
         [[ "$log" == */client.log ]] && name=client
         printf '\n'
-        tail -c +$(( ${SETUP_LOG_OFFSETS[$log]:-0} + 1 )) "$log" | sed "s|^|[$name] |"
+        tail -c +$(( $(_setup_log_offset "$log") + 1 )) "$log" | sed "s|^|[$name] |"
         printf '\n'
     done
 }

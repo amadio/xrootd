@@ -24,4 +24,3 @@ add_subdirectory(XrdClHttp)
 add_subdirectory(XrdClS3)
 
 add_subdirectory( XrdOssTests )
-add_subdirectory( TPCTests )

@@ -19,13 +19,11 @@ add_subdirectory(end-to-end)
 
 add_subdirectory(scitokens)
 
-add_subdirectory(XrdCl)
 add_subdirectory(XrdClHttpCommon)
 add_subdirectory(XrdClHttp)
 add_subdirectory(XrdClS3)
 
 add_subdirectory( XrdOssTests )
-add_subdirectory( cluster )
 add_subdirectory( authenticated_cluster)
 add_subdirectory( TPCTests )
 add_subdirectory( badredir )

@@ -901,8 +901,14 @@ const char *XrdCpConfig::OpName()
    extern int optind, optopt;
    static char oName[4] = {'-', 0, 0, 0};
 
-   if (!optopt || optopt == '-' || *(Argv[optind-1]+1) == '-')
-      return Argv[optind-1];
+// When the argument of the last option is missing, musl leaves optind past
+// the end of the arguments, where glibc leaves it at the end. The option is
+// then the last argument, not the null pointer after it.
+//
+   const char *opt = Argv[(optind > Argc ? Argc : optind) - 1];
+
+   if (!optopt || optopt == '-' || *(opt+1) == '-')
+      return opt;
    oName[1] = optopt;
    return oName;
 }

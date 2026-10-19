@@ -92,34 +92,53 @@ _setup_admin_dir() {
     echo "$dir"
 }
 
-# _setup_run <program> <name> <port> [argument...]
+# _setup_run [--foreground] <program> <name> <port> [argument...]
 #
 # Start the program, xrootd or cmsd, with the configuration in the run
 # directory, on the given port, and with the extra arguments, and wait until
 # its initialization completes. For xrootd, write the port which it bound to
-# the run directory.
+# the run directory. The daemon runs in the background (-b), or with
+# --foreground as a job of the shell, as a service manager runs it.
 _setup_run() {
+    local daemon=-b
+    if [[ "$1" == --foreground ]]; then
+        daemon=
+        shift
+    fi
     local prog=$1 name=$2 port=$3
     shift 3
-    local rundir admin log pidfile line
+    local rundir admin log pidfile line offset=0
     rundir=$(_setup_rundir "$name") || return 1
     admin=$(readlink -f "$rundir/admin")
     log="$rundir/$prog.log"
     pidfile="$rundir/$prog.pid"
 
+    # A restart appends to the log of the earlier run, which has a line of its
+    # initialization too, thus look only at the lines after the end of it
+    if [[ -f "$log" ]]; then
+        offset=$(wc -c < "$log" | tr -d ' ')
+    fi
+
+    # The daemon must not keep the descriptors 3 and 4, on which BATS reads
+    # the output of the test until all holders close them
     (
         cd "$rundir" &&
         SETUP_NAME=$name SETUP_RUNDIR=$rundir SETUP_ADMIN=$admin SETUP_PORT=$port \
         SETUP_BINDIR=$(dirname "$(command -v xrootd)") \
         SETUP_CREDENTIALS=${CREDENTIALS:-} SETUP_TESTDIR=${BATS_TEST_DIRNAME:-} \
         SETUP_SETUPDIR=$SETUP_DIR \
-            XDG_CACHE_HOME="$rundir/cache" "$prog" -b -c "$rundir/$name.cfg" -l "$log" -s "$pidfile" "$@"
+            XDG_CACHE_HOME="$rundir/cache" "$prog" $daemon -c "$rundir/$name.cfg" -l "$log" -s "$pidfile" "$@" \
+                < /dev/null > "$rundir/$prog.out" 2>&1 3>&- 4>&- &
+        if [[ -n "$daemon" ]]; then
+            wait $!
+        fi
     )
 
     # the daemon logs this line at the end of its configuration; the
     # components log similar lines before it, thus match the whole line
     for _ in {1..200}; do
-        line=$(grep -asE "^------ $prog .*:[0-9]+ initialization (completed|failed)" "$log")
+        line=$(tail -c +$(( offset + 1 )) "$log" 2>/dev/null |
+               grep -asE "^------ $prog .*:[0-9]+ initialization (completed|failed)" || true)
 
         if [[ "$line" == *completed* ]]; then
             line=${line% initialization completed.}
@@ -138,6 +157,7 @@ _setup_run() {
     done
 
     echo "$prog '$name' failed to start" >&2
+    [[ -s "$rundir/$prog.out" ]] && sed "s|^|[$name] |" "$rundir/$prog.out" >&2
     [[ -f "$log" ]] && sed "s|^|[$name] |" "$log" >&2
     [[ -s "$pidfile" ]] && stop_pid "$(<"$pidfile")"
     return 1

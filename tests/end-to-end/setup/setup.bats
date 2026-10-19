@@ -139,6 +139,15 @@ teardown() {
     assert_output 'seed'
 }
 
+# The log keeps the line of the first start, which must not count for the
+# restart
+@test "restart_server fails when the server fails to start again" {
+    start_server mine server
+    cat "$SETUP_DIR/broken.cfg" >> "$BATS_TEST_TMPDIR/mine/mine.cfg"
+    run ! restart_server mine
+    assert_output --partial "xrootd 'mine' failed to start"
+}
+
 @test "start_server fails when the configuration is not valid" {
     run ! start_server broken server broken.cfg
     assert_output --partial 'initialization failed'
@@ -265,4 +274,20 @@ _stopped() {
     ln -s inst/xrootd.log "$BATS_TEST_TMPDIR/named/xrootd.log"
     _setup_run xrootd named any -n inst
     run -0 test -s "$BATS_TEST_TMPDIR/named/inst/xrootd.log"
+}
+
+# A service manager like systemd runs xrootd in the foreground, without -b
+@test "a server in the foreground answers on its port" {
+    _setup_compose foreground server
+    _setup_run --foreground xrootd foreground any
+    _setup_export foreground
+    run -0 server_is_up "$FOREGROUND_URL"
+}
+
+@test "stop_servers stops a server in the foreground" {
+    _setup_compose foreground server
+    _setup_run --foreground xrootd foreground any
+    local pid=$(<"$BATS_TEST_TMPDIR/foreground/xrootd.pid")
+    stop_servers
+    run ! is_running "$pid"
 }

@@ -76,13 +76,15 @@ _setup_admin_dir() {
     echo "$dir"
 }
 
-# _setup_run <program> <name> <port>
+# _setup_run <program> <name> <port> [argument...]
 #
 # Start the program, xrootd or cmsd, with the configuration in the run
-# directory, on the given port, and wait until its initialization completes.
-# For xrootd, write the port which it bound to the run directory.
+# directory, on the given port, and with the extra arguments, and wait until
+# its initialization completes. For xrootd, write the port which it bound to
+# the run directory.
 _setup_run() {
     local prog=$1 name=$2 port=$3
+    shift 3
     local rundir admin log pidfile line
     rundir="$(_setup_tmpdir)/$name"
     admin=$(readlink -f "$rundir/admin")
@@ -95,7 +97,7 @@ _setup_run() {
         SETUP_BINDIR=$(dirname "$(command -v xrootd)") \
         SETUP_CREDENTIALS=${CREDENTIALS:-} SETUP_TESTDIR=${BATS_TEST_DIRNAME:-} \
         SETUP_SETUPDIR=$SETUP_DIR \
-            XDG_CACHE_HOME="$rundir/cache" "$prog" -b -c "$rundir/$name.cfg" -l "$log" -s "$pidfile"
+            XDG_CACHE_HOME="$rundir/cache" "$prog" -b -c "$rundir/$name.cfg" -l "$log" -s "$pidfile" "$@"
     )
 
     # the daemon logs this line at the end of its configuration; the

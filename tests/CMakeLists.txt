@@ -10,6 +10,7 @@ add_subdirectory(unit)
 add_subdirectory(integration)
 
 add_subdirectory(XrdMonCollectTests)
+add_subdirectory(XrdSec)
 
 add_subdirectory( XrdSsiTests )
 add_subdirectory(XrdOfsTests)

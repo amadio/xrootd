@@ -200,6 +200,7 @@
          "libXrdSecgsiVOMS.so",      \
          "libXrdSeckrb5.so",         \
          "libXrdSecssh.so",          \
+         "libXrdSecjwt.so",          \
          "libXrdSecProt.so",         \
          "libXrdSecpwd.so",          \
          "libXrdSecsss.so",          \

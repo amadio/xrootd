@@ -101,15 +101,21 @@ _setup_admin_dir() {
     echo "$dir"
 }
 
-# _setup_run <program> <name> <port> [argument...]
+# _setup_run [--foreground] <program> <name> <port> [argument...]
 #
 # Start the program, xrootd or cmsd, with the configuration in the run
 # directory, on the given port, or on a random port for "any", and with the
 # extra arguments. The options are those of the systemd units: the instance
 # name is the server name, thus the program has its home in the run
 # directory, and logs to <program>.log there. For xrootd, write the port to
-# the run directory.
+# the run directory. The daemon runs in the background (-b), or with
+# --foreground as a job of the shell, as a service manager runs it.
 _setup_run() {
+    local daemon=-b
+    if [[ "$1" == --foreground ]]; then
+        daemon=
+        shift
+    fi
     local prog=$1 name=$2 port=$3
     shift 3
     local rundir admin log bind=$port
@@ -130,20 +136,7 @@ _setup_run() {
             bind=$(( 21000 + RANDOM % 11000 ))
         fi
 
-        # The program with -b exits when the daemon reports the result of its
-        # configuration, with a nonzero status on failure. The daemon must not
-        # keep the descriptors 3 and 4, on which BATS reads the output of the
-        # test until all holders close them.
-        if (
-            SETUP_NAME=$name SETUP_RUNDIR=$rundir SETUP_PORT=$bind \
-            SETUP_BINDIR=$(dirname "$(command -v xrootd)") \
-            SETUP_CREDENTIALS=${CREDENTIALS:-} SETUP_TESTDIR=${BATS_TEST_DIRNAME:-} \
-            SETUP_SETUPDIR=$SETUP_DIR \
-                XDG_CACHE_HOME="$rundir/cache" $prog -b -k fifo -n "$name" -a "$admin" -w "${rundir%/*}" \
-                    -c "$rundir/$name.cfg" -l "${rundir%/*}/$prog.log" \
-                    -s "$rundir/$prog.pid" "$@" \
-                    < /dev/null > "$rundir/$prog.out" 2>&1 3>&- 4>&-
-        ); then
+        if _setup_daemon $daemon "$prog" "$name" "$bind" "$rundir" "$admin" "$@"; then
             [[ "$prog" == xrootd ]] && echo "$bind" > "$rundir/port"
             [[ "$prog" == cmsd ]] && echo "$bind" > "$rundir/cmsd.port"
             return 0
@@ -160,6 +153,60 @@ _setup_run() {
     [[ -s "$rundir/$prog.out" ]] && sed "s|^|[$name] |" "$rundir/$prog.out" >&2
     [[ -f "$log" ]] && sed "s|^|[$name] |" "$log" >&2
     [[ -s "$rundir/$prog.pid" ]] && stop_pid "$(<"$rundir/$prog.pid")"
+    return 1
+}
+
+# _setup_daemon [-b] <program> <name> <port> <rundir> <admin> [argument...]
+#
+# Run the program once. With -b, the program exits when the daemon reports
+# the result of its configuration, with a nonzero status on failure. In the
+# foreground, wait for the line which the daemon logs at the end of its
+# configuration. The daemon must not keep the descriptors 3 and 4, on which
+# BATS reads the output of the test until all holders close them.
+_setup_daemon() {
+    local daemon=
+    if [[ "$1" == -b ]]; then
+        daemon=-b
+        shift
+    fi
+    local prog=$1 name=$2 port=$3 rundir=$4 admin=$5 line offset=0
+    shift 5
+
+    # an earlier try or start of the daemon logged to the same file
+    if [[ -f "$rundir/$prog.log" ]]; then
+        offset=$(wc -c < "$rundir/$prog.log" | tr -d ' ')
+    fi
+    # the pid file of a try which failed names a process which is gone
+    rm -f "$rundir/$prog.pid"
+
+    (
+        SETUP_NAME=$name SETUP_RUNDIR=$rundir SETUP_PORT=$port \
+        SETUP_BINDIR=$(dirname "$(command -v xrootd)") \
+        SETUP_CREDENTIALS=${CREDENTIALS:-} SETUP_TESTDIR=${BATS_TEST_DIRNAME:-} \
+        SETUP_SETUPDIR=$SETUP_DIR \
+            XDG_CACHE_HOME="$rundir/cache" "$prog" $daemon -k fifo -n "$name" \
+                -a "$admin" -w "${rundir%/*}" -c "$rundir/$name.cfg" \
+                -l "${rundir%/*}/$prog.log" -s "$rundir/$prog.pid" "$@" \
+                < /dev/null > "$rundir/$prog.out" 2>&1 3>&- 4>&- &
+        if [[ -n "$daemon" ]]; then
+            wait $!
+        fi
+    ) || return 1
+
+    [[ -n "$daemon" ]] && return 0
+
+    # the components log similar lines before it, thus match the whole line
+    for _ in {1..200}; do
+        line=$(tail -c +$(( offset + 1 )) "$rundir/$prog.log" 2>/dev/null |
+               grep -asE "^------ $prog .*:[0-9]+ initialization (completed|failed)" || true)
+        [[ "$line" == *completed* ]] && return 0
+        [[ "$line" == *failed* ]] && return 1
+        # the pid file exists but the daemon is gone
+        if [[ -s "$rundir/$prog.pid" ]] && ! is_running "$(<"$rundir/$prog.pid")"; then
+            return 1
+        fi
+        sleep 0.05
+    done
     return 1
 }
 

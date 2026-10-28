@@ -735,11 +735,12 @@ Filesystem::Stat(const std::string      &path,
     if (query != std::string::npos) {
         obj.erase(query);
     }
-    // HEAD of the bucket returns a zero-byte success. List it instead.
+    // HEAD of the bucket returns a zero-byte success. List it instead; a
+    // successful list of one key is enough.
     if (obj.empty()) {
         auto query_loc = https_url.find('?');
         https_url += (query_loc == std::string::npos) ? "?" : "&";
-        https_url += "list-type=2&delimiter=/&encoding-type=url";
+        https_url += "list-type=2&delimiter=/&encoding-type=url&max-keys=1";
         auto expiry = time(NULL) + timeout;
         return DownloadUrl(
             https_url,

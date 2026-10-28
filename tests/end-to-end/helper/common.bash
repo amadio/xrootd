@@ -86,6 +86,38 @@ wait_for() {
     done
 }
 
+# tcp_connections <port>
+#
+# Print the client sockets of this host to the port which are established,
+# or which only the server closed. Linux has /proc/net/tcp, the other systems
+# netstat.
+tcp_connections() {
+    local port=$1
+
+    if [[ -r /proc/net/tcp ]]; then
+        # the remote port is in hex; state 01 is ESTABLISHED, 08 is CLOSE_WAIT
+        cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v port=":$(printf '%04X' "$port")" \
+            'substr($3, length($3) - 4) == port && ($4 == "01" || $4 == "08")'
+    else
+        netstat -an -p tcp | awk -v port=".$port" \
+            'substr($5, length($5) - length(port) + 1) == port && ($6 == "ESTABLISHED" || $6 == "CLOSE_WAIT")'
+    fi
+}
+
+# tcp_connections_are <port> <count>
+#
+# Succeed if exactly <count> client sockets of this host connect to the port.
+tcp_connections_are() {
+    (( $(tcp_connections "$1" | wc -l) == $2 ))
+}
+
+# tcp_connections_at_most <port> <count>
+#
+# Succeed if at most <count> client sockets of this host connect to the port.
+tcp_connections_at_most() {
+    (( $(tcp_connections "$1" | wc -l) <= $2 ))
+}
+
 # Skip the test (or all tests of the file, in setup_file) when the build has
 # not the plugin, for example libXrdHttp. Without a build directory, the test
 # assumes that the installation has it.

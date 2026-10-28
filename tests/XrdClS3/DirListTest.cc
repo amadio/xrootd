@@ -221,8 +221,7 @@ TEST_F(S3ListFixture, Mkdir)
     st = fs.DirList(fname + "?authz=" + GetReadToken(), XrdCl::DirListFlags::None, list, 10);
     ASSERT_TRUE(st.IsOK()) << "Empty directory should list: " << st.ToString();
     ASSERT_NE(list, nullptr);
-    ASSERT_EQ(list->GetSize(), 1);
-    ASSERT_EQ(list->At(0)->GetName(), ".xrdcls3.dirsentinel");
+    ASSERT_EQ(list->GetSize(), 0);
     delete list;
 
     list = nullptr;

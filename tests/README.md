@@ -339,7 +339,9 @@ bats-assert without a `load` of their own.
   socket of the IPv6 family is not available. `wait_for <seconds>
   <command...>` runs a command until it succeeds, for a result which comes
   later. `free_port` gives a free port from 32000 to 32767, for a daemon which
-  cannot choose its port.
+  cannot choose its port. `tcp_connections <port>` prints the client sockets
+  of the host to the port. `tcp_connections_are <port> <count>` and
+  `tcp_connections_at_most <port> <count>` check their number.
 
 All tests share one set of credentials: a CA (certificate authority), a host
 certificate for `localhost` and both loopback addresses, a client certificate,

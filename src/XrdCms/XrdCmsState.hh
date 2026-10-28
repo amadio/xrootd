@@ -48,6 +48,8 @@ void *Monitor();
 
 int   Port();
 
+void  Resend();
+
 void  sendState(XrdLink *Link);
 
 void  Set(int ncount);
@@ -85,7 +87,8 @@ char            feOK;         // Front end functioning
 char            noSpace;      // We don't have enough space
 char            adminSuspend; // Admin asked for suspension
 char            adminNoStage; // Admin asked for no staging
-char            isMan;        // We are a manager (i.e., have redirectors)
+signed char     isMan;        // 1 manager, -1 supervisor (both have redirectors)
+char            rdrState;     // Suspend state last sent to redirectors, -1 none
 char            Enabled;      // We are now enabled for reporting
 };
 

@@ -74,6 +74,7 @@ XrdCmsState::XrdCmsState() : mySemaphore(0)
    NoStageFile  = "";
    SuspendFile  = "";
    isMan        = 0;
+   rdrState     = -1;
    dataPort     = 0;
    Enabled      = 0;
 }
@@ -111,7 +112,7 @@ void XrdCmsState::Enable()
 void *XrdCmsState::Monitor()
 {
    CmsStatusRequest myStatus = {{0, kYR_status, 0, 0}};
-   int RTsend, theState, Changes, myPort;
+   int theState, Changes, myPort, rdrSuspend, rdrChange;
 
 // Do this forever (we are only posted when finally enabled)
 //
@@ -121,19 +122,28 @@ void *XrdCmsState::Monitor()
        theState  = currState;
        prevState = currState;
        myPort    = dataPort;
+       rdrSuspend = (theState & SRV_Suspend ? 1 : 0);
+       rdrChange  = (rdrSuspend != rdrState);
+       rdrState   = rdrSuspend;
        myMutex.UnLock();
+
+// A redirector sees only the suspend of the service, not the state of its
+// front end or of staging. A manager and a supervisor both have redirectors.
+// This thread sends all notices to them, thus they arrive in order.
+//
+       if (rdrChange && isMan)
+          {CmsStatusRequest rdrStatus = {{0, kYR_status, 0, 0}};
+           if (rdrSuspend) rdrStatus.Hdr.modifier = CmsStatusRequest::kYR_Suspend;
+              else {rdrStatus.Hdr.modifier = CmsStatusRequest::kYR_Resume;
+                    rdrStatus.Hdr.streamid = htonl(myPort);
+                   }
+           RTable.Send("status", (char *)&rdrStatus, sizeof(rdrStatus));
+          }
 
        if (Changes && (myStatus.Hdr.modifier = Status(Changes, theState)))
           {if (myStatus.Hdr.modifier & CmsStatusRequest::kYR_Resume)
-                    {myStatus.Hdr.streamid = htonl(myPort); RTsend = 1;}
-               else {myStatus.Hdr.streamid = 0;
-                     // A stage-only update carries no suspend bit. Redirectors
-                     // ignore it, so do not forward one.
-                     RTsend = (isMan != 0 && (theState & SRV_Suspend)
-                           && (myStatus.Hdr.modifier & CmsStatusRequest::kYR_Suspend));
-                    }
-           if (isMan && RTsend)
-              RTable.Send("status", (char *)&myStatus, sizeof(myStatus));
+                  myStatus.Hdr.streamid = htonl(myPort);
+             else myStatus.Hdr.streamid = 0;
            XrdCmsManager::Inform(myStatus.Hdr);
           }
       } while(1);
@@ -143,6 +153,22 @@ void *XrdCmsState::Monitor()
    return (void *)0;
 }
   
+/******************************************************************************/
+/* Public                         R e s e n d                                 */
+/******************************************************************************/
+
+// A new redirector got the state of its login reply, which can be older than
+// the last notice to the other redirectors. Make the monitor send the current
+// state to all redirectors again.
+//
+void XrdCmsState::Resend()
+{
+   myMutex.Lock();
+   rdrState = -1;
+   if (Enabled) mySemaphore.Post();
+   myMutex.UnLock();
+}
+
 /******************************************************************************/
 /* Public                           P o r t                                   */
 /******************************************************************************/

@@ -598,7 +598,7 @@ XrdCmsRouting *XrdCmsProtocol::Admit()
    const char  *Reason;
    SMask_t      newmask, servset(0);
    int addedp = 0, Status = 0, isPeer = 0, isProxy = 0;
-   int isMan, isServ, isSubm, wasSuspended = 0, Share = 100, tZone = 0;
+   int isMan, isServ, isSubm, Share = 100, tZone = 0;
 
 // Construct environment data
 //
@@ -611,9 +611,7 @@ XrdCmsRouting *XrdCmsProtocol::Admit()
 //
    Data.Mode = 0;
    if (Trace.What & TRACE_Debug) Data.Mode |= CmsLoginData::kYR_debug;
-   if (CmsState.Suspended)      {Data.Mode |= CmsLoginData::kYR_suspend;
-                                 wasSuspended = 1;
-                                }
+   if (CmsState.Suspended)       Data.Mode |= CmsLoginData::kYR_suspend;
    Data.HoldTime = Config.LUPHold;
 
 // Do the login and get the data
@@ -659,7 +657,7 @@ XrdCmsRouting *XrdCmsProtocol::Admit()
 //
    if (Data.Mode & CmsLoginData::kYR_director)
       {Link->setID("redirector", Data.HoldTime);
-       return Admit_Redirector(wasSuspended);
+       return Admit_Redirector();
       }
 
 // Disallow subscriptions we are are configured as a solo manager
@@ -820,7 +818,7 @@ XrdCmsRouting *XrdCmsProtocol::Admit()
 /*                      A d m i t _ R e d i r e c t o r                       */
 /******************************************************************************/
 
-XrdCmsRouting *XrdCmsProtocol::Admit_Redirector(int wasSuspended)
+XrdCmsRouting *XrdCmsProtocol::Admit_Redirector()
 {
    EPNAME("Admit_Redirector");
 
@@ -840,20 +838,11 @@ XrdCmsRouting *XrdCmsProtocol::Admit_Redirector(int wasSuspended)
        return 0;
       } else myNode->setSlot(RSlot);
 
-   // The reply was sampled before this node was on the notify list. Fill in a
-   // service suspend the reply missed. A resume clears every suspend the reply
-   // advertised.
-   //
-   const int serviceSuspended = (CmsState.Suspended & XrdCmsState::SRV_Suspend) ? 1 : 0;
-   if ((wasSuspended && !CmsState.Suspended) || (!wasSuspended && serviceSuspended))
-      {CmsStatusRequest newState = {{0, kYR_status, 0, 0}};
-       if (!wasSuspended)
-          newState.Hdr.modifier = CmsStatusRequest::kYR_Suspend;
-          else {newState.Hdr.modifier = CmsStatusRequest::kYR_Resume;
-                newState.Hdr.streamid = htonl(CmsState.Port());
-               }
-       myNode->Send((char *)&newState, sizeof(newState));
-      }
+// The login reply was sampled before this node was on the notify list, thus
+// a change since then did not reach it. The monitor now sends the current
+// state to all redirectors, in order with its other notices.
+//
+   CmsState.Resend();
 
 // Login succeeded
 //

@@ -55,6 +55,11 @@ const uint64_t kLogXrdClHttp = 73173;
 
 bool HTTPStatusIsError(unsigned status);
 
+// Parse an HTTP date, for example "Wed, 21 Aug 2024 11:02:53 GMT", into
+// seconds since the epoch, in any of the three formats of RFC 7231 and in
+// any locale. Return false when the text is not such a date.
+bool ParseHttpDate(const char *text, time_t &result);
+
 std::pair<uint16_t, uint32_t> HTTPStatusConvert(unsigned status);
 
 // Read a bearer token from the standard XrdCl environment options, falling

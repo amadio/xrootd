@@ -94,15 +94,11 @@ bool CurlListdirOp::ParseProp(DavEntry &entry, TiXmlElement *prop)
                 return false;
             }
         } else if (!strcasecmp(child->Value(), "D:getlastmodified") || !strcasecmp(child->Value(), "lp1:getlastmodified")) {
-            auto lastmod = child->GetText();
-            if (lastmod == nullptr) {
+            time_t modtime;
+            if (!ParseHttpDate(child->GetText(), modtime)) {
                 return false;
             }
-            struct tm tm;
-            if (strptime(lastmod, "%a, %d %b %Y %H:%M:%S", &tm) == nullptr) {
-                return false;
-            }
-            entry.m_lastmodified = timegm(&tm);
+            entry.m_lastmodified = modtime;
         } else if (strcasecmp(child->Value(), "D:href") == 0) {
             auto href = child->GetText();
             if (href == nullptr) {

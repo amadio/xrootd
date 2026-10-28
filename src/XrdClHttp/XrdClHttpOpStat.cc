@@ -139,11 +139,9 @@ CurlStatOp::ParseProp(TiXmlElement *prop) {
             m_is_dir = child->FirstChildElement("D:collection") != nullptr;
         } else if (!strcasecmp(child->Value(), "D:getlastmodified") || !strcasecmp(child->Value(), "lp1:getlastmodified")) {
             auto lastmod = child->GetText();
-            if (lastmod) {
-                struct tm tm;
-                if (strptime(lastmod, "%a, %d %b %Y %H:%M:%S", &tm) != nullptr) {
-                    m_modtime = timegm(&tm);
-                }
+            time_t modtime;
+            if (ParseHttpDate(lastmod, modtime)) {
+                m_modtime = modtime;
             }
         }
     }

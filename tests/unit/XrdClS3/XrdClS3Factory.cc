@@ -303,3 +303,41 @@ TEST(FactoryTest, CleanObjectNameRemovesAllAuthzParameters) {
     ASSERT_EQ(Factory::CleanObjectName("test.txt?&foo=bar&authz=foo&foo=bar"), "test.txt?foo=bar&foo=bar");
     ASSERT_EQ(Factory::CleanObjectName("test.txt?&foo=bar&oss.asize&authz=foo&foo=bar"), "test.txt?foo=bar&oss.asize&foo=bar");
 }
+
+// The signature of a query, with the date of the examples of AWS. A failure
+// fails the test, thus two failures do not compare as equal signatures.
+static std::string SignQuery(const std::string &query) {
+    std::vector<std::pair<std::string, std::string>> headers = {
+        {"x-amz-content-sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+        {"x-amz-date", "20130524T000000Z"}
+    };
+    std::string auth_token, err_msg;
+    if (!Factory::GenerateV4Signature("https://examplebucket.s3.amazonaws.com?" + query, "GET", headers, auth_token, err_msg)) {
+        ADD_FAILURE() << "no signature of the query " << query << ": " << err_msg;
+        return {};
+    }
+    return auth_token;
+}
+
+TEST_F(FactoryCredentialsTest, GenerateV4SignatureOfAnEncodedValueIsTheOneOfTheValue) {
+    Factory::ResetCredCache();
+    Factory::SetEndpoint("s3.amazonaws.com");
+    Factory::SetRegion("us-east-1");
+    Factory::SetUrlStyle("virtual");
+    WriteCreds("access_key.txt", "AKIAIOSFODNN7EXAMPLE", "secret_key.txt", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
+    Factory::SetDefaultCredentials(GetTempLocation("access_key.txt"), GetTempLocation("secret_key.txt"));
+
+    ASSERT_EQ(SignQuery("prefix=a%2Fb"), SignQuery("prefix=a/b"));
+}
+
+// A service reads a '+' in a query as a space
+TEST_F(FactoryCredentialsTest, GenerateV4SignatureOfAPlusIsTheOneOfASpace) {
+    Factory::ResetCredCache();
+    Factory::SetEndpoint("s3.amazonaws.com");
+    Factory::SetRegion("us-east-1");
+    Factory::SetUrlStyle("virtual");
+    WriteCreds("access_key.txt", "AKIAIOSFODNN7EXAMPLE", "secret_key.txt", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
+    Factory::SetDefaultCredentials(GetTempLocation("access_key.txt"), GetTempLocation("secret_key.txt"));
+
+    ASSERT_EQ(SignQuery("prefix=a+b"), SignQuery("prefix=a%20b"));
+}

@@ -1666,9 +1666,12 @@ std::string obfuscateAuth(const std::string& input)
   return redacted.append(text + offset);
 }
 
+// The ASCII letters and digits only: std::isalnum() depends on the locale,
+// and a signature of S3 must encode all other bytes.
 static bool is_rfc3986_unreserved(unsigned char c)
 {
-  return std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~';
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+         (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~';
 }
 
 /**

@@ -28,6 +28,7 @@
 #include <openssl/hmac.h>
 #include <XrdCl/XrdClDefaultEnv.hh>
 #include <XrdCl/XrdClLog.hh>
+#include <XrdOuc/XrdOucUtils.hh>
 
 #include <fcntl.h>
 
@@ -48,39 +49,6 @@ Factory::Credentials Factory::m_default_creds;
 std::unordered_map<std::string, Factory::Credentials> Factory::m_bucket_location_map;
 std::unordered_map<std::string, std::pair<Factory::Credentials, std::chrono::steady_clock::time_point>> Factory::m_bucket_auth_map;
 
-
-namespace {
-
-std::string
-AmazonURLEncode(const std::string &input) {
-	/*
-	 * See
-	 * http://docs.amazonwebservices.com/AWSEC2/2010-11-15/DeveloperGuide/using-query-api.html
-	 *
-	 */
-	std::string output;
-    output.reserve(input.size());
-	for (const auto & val : input) {
-		// "Do not URL encode ... A-Z, a-z, 0-9, hyphen ( - ),
-		// underscore ( _ ), period ( . ), and tilde ( ~ ).  Percent
-		// encode all other characters with %XY, where X and Y are hex
-		// characters 0-9 and uppercase A-F.  Percent encode extended
-		// UTF-8 characters in the form %XY%ZA..."
-		if (('A' <= val && val <= 'Z') ||
-			('a' <= val && val <= 'z') ||
-			('0' <= val && val <= '9') || val == '-' ||
-			val == '_' || val == '.' || val == '~') {
-			output.append(1, val);
-		} else {
-			char percentEncode[4];
-			snprintf(percentEncode, 4, "%%%.2hhX", val);
-			output.append(percentEncode);
-		}
-	}
-	return output;
-}
-
-}
 
 Factory::Factory() {
     std::call_once(m_init_once, [&] {
@@ -122,7 +90,7 @@ Factory::CanonicalizeQueryString(const std::string &url) {
             auto param = url.substr(param_start, param_end - param_start);
             if (!param.empty()) {
                 // No '=' found, treat as a parameter without value
-                query_parameters.emplace_back(AmazonURLEncode(param), "");
+                query_parameters.emplace_back(XrdOucUtils::UrlEncode(XrdOucUtils::UrlDecode(param)), "");
             }
         } else {
             std::string name = url.substr(param_start, loc - param_start);
@@ -134,8 +102,11 @@ Factory::CanonicalizeQueryString(const std::string &url) {
             } else {
                 value = url.substr(value_start, param_end - value_start);
             }
+            // The service decodes the query before it computes the signature,
+            // thus a value which the URL already encodes is not encoded twice.
             if (!value.empty()) {
-                query_parameters.emplace_back(AmazonURLEncode(name), AmazonURLEncode(value));
+                query_parameters.emplace_back(XrdOucUtils::UrlEncode(XrdOucUtils::UrlDecode(name)),
+                                              XrdOucUtils::UrlEncode(XrdOucUtils::UrlDecode(value)));
             }
         }
         loc = param_end;
@@ -844,7 +815,7 @@ Factory::PathEncode(const std::string_view url) {
         }
 
 		segment = std::string(path.data() + offset, next);
-		encoded += AmazonURLEncode(segment);
+		encoded += XrdOucUtils::UrlEncode(segment);
 
 		offset += next;
 	}

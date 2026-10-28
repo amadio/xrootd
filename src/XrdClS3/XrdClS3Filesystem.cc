@@ -35,25 +35,6 @@ using namespace XrdClS3;
 
 namespace {
 
-// Helper function to URL-quote a string.
-std::string urlquote(const std::string input) {
-	std::string output;
-	output.reserve(3 * input.size());
-	for (char val : input) {
-		if ((val >= 48 && val <= 57) ||	 // Digits 0-9
-			(val >= 65 && val <= 90) ||	 // Uppercase A-Z
-			(val >= 97 && val <= 122) || // Lowercase a-z
-			(val == 95 || val == 46 || val == 45 || val == 126 ||
-			 val == 47)) // '_.-~/'
-		{
-			output += val;
-		} else {
-			output += "%" + std::to_string(val);
-		}
-	}
-	return output;
-}
-
 class StatHandler : public XrdCl::ResponseHandler {
 public:
     StatHandler(const std::string &path, const std::string &s3_url, XrdClHttp::HeaderCallout *header_callout, XrdCl::ResponseHandler *handler, time_t timeout, XrdCl::Log &log) :
@@ -178,7 +159,7 @@ StatHandler::HandleResponse(XrdCl::XRootDStatus *status_raw, XrdCl::AnyObject *r
     https_url += "list-type=2&delimiter=/&encoding-type=url";
     // An empty prefix= is dropped from the signature and the request is rejected.
     if (!obj.empty()) {
-        https_url += "&prefix=" + urlquote(obj);
+        https_url += "&prefix=" + XrdOucUtils::UrlEncode(obj);
     }
 
     auto expiry = time(NULL) + m_timeout;
@@ -435,9 +416,9 @@ DirListResponseHandler::HandleResponse(XrdCl::XRootDStatus *status_raw, XrdCl::A
         return;
 	}
 
-    // The signer encodes this query value. Encoding the token first makes
-    // the signature disagree with the one the service computes.
-    auto url = m_url + "&continuation-token=" + ct;
+    // A token can have '+', '/' and '=', thus encode it; the signer decodes
+    // the query before it encodes it again.
+    auto url = m_url + "&continuation-token=" + XrdOucUtils::UrlEncode(ct);
 
     // Calculate the timeout based on the current time and the expiry time
     time_t now = time(NULL);
@@ -527,7 +508,7 @@ Filesystem::DirList(const std::string          &path,
     https_url += "list-type=2&delimiter=/&encoding-type=url";
     // An empty prefix= is dropped from the signature and the request is rejected.
     if (!obj.empty()) {
-        https_url += "&prefix=" + urlquote(obj);
+        https_url += "&prefix=" + XrdOucUtils::UrlEncode(obj);
     }
 
     // File::Open turns a zero timeout into RequestTimeout for the first page.

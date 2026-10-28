@@ -291,6 +291,12 @@ int TPCHandler::RunCurlWithStreamsImpl(XrdHttpExtReq &req, State &state,
         handles.push_back(handles[0]->Duplicate());
         curl_handles.emplace_back(handles.back()->GetHandle());
     }
+    // The streams send one range request for each block, and reuse their
+    // connections: a new TCP and TLS connection for each block costs more
+    // than an idle connection to a redirector while the block flows.
+    for (State *handle : handles) {
+        curl_easy_setopt(handle->GetHandle(), CURLOPT_FORBID_REUSE, 0L);
+    }
 
     // Notify the packet marking manager that the transfer will start after this point
     rec.pmarkManager.startTransfer();

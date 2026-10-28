@@ -110,6 +110,68 @@ pid_t getthreadid() {
 
 }
 
+namespace {
+
+// The month of an HTTP date, from 0 for "Jan" to 11 for "Dec", or -1
+int
+HttpDateMonth(const char *name)
+{
+    static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    for (int i = 0; i < 12; i++) {
+        if (!strncmp(name, months + 3 * i, 3) && name[3] == '\0') {
+            return i;
+        }
+    }
+    return -1;
+}
+
+}
+
+// The three formats of RFC 7231, section 7.1.1.1. The names of the days and
+// the months are in English, thus the parse does not use strptime(), whose
+// %a and %b depend on the locale of the program:
+//
+//   IMF-fixdate  Sun, 06 Nov 1994 08:49:37 GMT
+//   RFC 850      Sunday, 06-Nov-94 08:49:37 GMT
+//   asctime      Sun Nov  6 08:49:37 1994
+bool
+XrdClHttp::ParseHttpDate(const char *text, time_t &result)
+{
+    if (!text) {
+        return false;
+    }
+
+    char month[4] = {};
+    int day, year, hour, min, sec;
+    if (sscanf(text, "%*[A-Za-z], %d %3[A-Za-z] %d %d:%d:%d",
+               &day, month, &year, &hour, &min, &sec) != 6 &&
+        sscanf(text, "%*[A-Za-z], %d-%3[A-Za-z]-%d %d:%d:%d",
+               &day, month, &year, &hour, &min, &sec) != 6 &&
+        sscanf(text, "%*[A-Za-z] %3[A-Za-z] %d %d:%d:%d %d",
+               month, &day, &hour, &min, &sec, &year) != 6) {
+        return false;
+    }
+
+    // RFC 850 has a year of two digits
+    if (year >= 0 && year < 100) {
+        year += year < 70 ? 2000 : 1900;
+    }
+
+    struct tm tm{};
+    tm.tm_mon = HttpDateMonth(month);
+    if (tm.tm_mon < 0 || day < 1 || day > 31 || year < 1900 || hour < 0 ||
+        hour > 23 || min < 0 || min > 59 || sec < 0 || sec > 60) {
+        return false;
+    }
+    tm.tm_mday = day;
+    tm.tm_year = year - 1900;
+    tm.tm_hour = hour;
+    tm.tm_min = min;
+    tm.tm_sec = sec;
+    result = timegm(&tm);
+    return true;
+}
+
 bool XrdClHttp::HTTPStatusIsError(unsigned status) {
      return (status < 100) || (status >= 400);
 }
@@ -459,9 +521,9 @@ bool HeaderParser::Parse(const std::string &header_line)
             m_allow_verbs = static_cast<VerbsCache::HttpVerb>(static_cast<unsigned>(m_allow_verbs) & ~static_cast<unsigned>(VerbsCache::HttpVerb::kUnknown));
         }
     } else if (header_name == "Last-Modified") {
-        struct tm tm;
-        if (strptime(header_value.c_str(), "%a, %d %b %Y %H:%M:%S", &tm) != nullptr) {
-            m_modtime = timegm(&tm);
+        time_t modtime;
+        if (ParseHttpDate(header_value.c_str(), modtime)) {
+            m_modtime = modtime;
         }
     } else if (header_name == "Content-Length") {
          try {

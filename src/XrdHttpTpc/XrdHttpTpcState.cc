@@ -82,6 +82,11 @@ bool State::InstallHandlers(CURL *curl) {
         }
     }
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    // A redirect leaves the connection to the redirector idle in the cache of
+    // the handle until the transfer ends, also for the HEAD request. Close
+    // each connection once its request is done. The streams of a transfer
+    // with several streams reuse their connections (see Multistream).
+    curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L);
     if(tpcForwardCreds) {
       curl_easy_setopt(curl,CURLOPT_UNRESTRICTED_AUTH,1L);
     }

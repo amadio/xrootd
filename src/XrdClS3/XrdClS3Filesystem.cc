@@ -292,8 +292,16 @@ DirListResponseHandler::HandleResponse(XrdCl::XRootDStatus *status_raw, XrdCl::A
 	bool isTruncated = false;
     std::string ct;
     bool found_prefix_marker = false;
+    // The request asks for encoding-type=url, but some services ignore it
+    // and send raw keys without the element EncodingType
+    auto encodingType = elem->FirstChildElement("EncodingType");
+    const bool urlEncoded = encodingType && encodingType->GetText() &&
+                            !strcasecmp(encodingType->GetText(), "url");
     auto relativeName = [&](std::string_view encoded) {
-        std::string name = XrdOucUtils::UrlDecode(std::string(encoded));
+        std::string name(encoded);
+        if (urlEncoded) {
+            name = XrdOucUtils::UrlDecode(name);
+        }
         if (!m_prefix.empty() &&
             name.compare(0, m_prefix.size(), m_prefix) == 0) {
             name.erase(0, m_prefix.size());

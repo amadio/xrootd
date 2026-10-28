@@ -460,3 +460,34 @@ TEST(UtilsTest, SplitHostCgiSplitsAtTheFirstQuestionMark) {
     ASSERT_EQ(t.expectedCgi,  cgi)  << t.input;
   }
 }
+
+// The encoding of the values of a query, as the V4 signature of S3 needs it
+TEST(UtilsTest, UrlEncodeEncodesSpaceAsHex)
+{
+  EXPECT_EQ(XrdOucUtils::UrlEncode("a b"), "a%20b");
+}
+
+TEST(UtilsTest, UrlEncodeEncodesPlusAsHex)
+{
+  EXPECT_EQ(XrdOucUtils::UrlEncode("a+b"), "a%2Bb");
+}
+
+TEST(UtilsTest, UrlEncodeEncodesEqualsAsHex)
+{
+  EXPECT_EQ(XrdOucUtils::UrlEncode("a="), "a%3D");
+}
+
+TEST(UtilsTest, UrlEncodeEncodesUtf8BytesAsHex)
+{
+  EXPECT_EQ(XrdOucUtils::UrlEncode("\xC3\xA9"), "%C3%A9");
+}
+
+TEST(UtilsTest, UrlEncodeEncodesSlash)
+{
+  EXPECT_EQ(XrdOucUtils::UrlEncode("a/b"), "a%2Fb");
+}
+
+TEST(UtilsTest, UrlEncodeKeepsTheUnreservedCharacters)
+{
+  EXPECT_EQ(XrdOucUtils::UrlEncode("AZaz09-_.~"), "AZaz09-_.~");
+}

@@ -139,7 +139,59 @@ TEST(HeaderParserTest, ParsesLastModifiedAsUtc)
   ASSERT_TRUE(parser.Parse("HTTP/1.1 200 OK\r\n"));
   ASSERT_TRUE(parser.Parse("Last-Modified: Wed, 21 Aug 2024 11:02:53 GMT\r\n"));
 
-  struct tm expected{};
-  ASSERT_NE(strptime("Wed, 21 Aug 2024 11:02:53", "%a, %d %b %Y %H:%M:%S", &expected), nullptr);
-  EXPECT_EQ(parser.GetModTime(), timegm(&expected));
+  EXPECT_EQ(parser.GetModTime(), 1724238173);
+}
+
+TEST(HeaderParserTest, IgnoresMalformedLastModified)
+{
+  XrdClHttp::HeaderParser parser;
+  ASSERT_TRUE(parser.Parse("HTTP/1.1 200 OK\r\n"));
+  ASSERT_TRUE(parser.Parse("Last-Modified: yesterday\r\n"));
+  EXPECT_EQ(parser.GetModTime(), -1);
+}
+
+TEST(ParseHttpDateTest, ReturnsUtcSecondsOfAnImfFixdate)
+{
+  time_t result = 0;
+  ASSERT_TRUE(XrdClHttp::ParseHttpDate("Wed, 21 Aug 2024 11:02:53 GMT", result));
+  EXPECT_EQ(result, 1724238173);
+}
+
+TEST(ParseHttpDateTest, ReturnsUtcSecondsOfAnRfc850Date)
+{
+  time_t result = 0;
+  ASSERT_TRUE(XrdClHttp::ParseHttpDate("Wednesday, 21-Aug-24 11:02:53 GMT", result));
+  EXPECT_EQ(result, 1724238173);
+}
+
+TEST(ParseHttpDateTest, ReturnsUtcSecondsOfAnAsctimeDate)
+{
+  time_t result = 0;
+  ASSERT_TRUE(XrdClHttp::ParseHttpDate("Wed Aug 21 11:02:53 2024", result));
+  EXPECT_EQ(result, 1724238173);
+}
+
+TEST(ParseHttpDateTest, TakesAYearOfTwoDigitsFrom70AsAYearOfThe1900s)
+{
+  time_t result = 0;
+  ASSERT_TRUE(XrdClHttp::ParseHttpDate("Sunday, 06-Nov-94 08:49:37 GMT", result));
+  EXPECT_EQ(result, 784111777);
+}
+
+TEST(ParseHttpDateTest, RejectsAnUnknownMonth)
+{
+  time_t result = 0;
+  EXPECT_FALSE(XrdClHttp::ParseHttpDate("Wed, 21 Aux 2024 11:02:53 GMT", result));
+}
+
+TEST(ParseHttpDateTest, RejectsGarbage)
+{
+  time_t result = 0;
+  EXPECT_FALSE(XrdClHttp::ParseHttpDate("yesterday", result));
+}
+
+TEST(ParseHttpDateTest, RejectsNull)
+{
+  time_t result = 0;
+  EXPECT_FALSE(XrdClHttp::ParseHttpDate(nullptr, result));
 }

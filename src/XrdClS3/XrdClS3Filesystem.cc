@@ -352,6 +352,13 @@ DirListResponseHandler::HandleResponse(XrdCl::XRootDStatus *status_raw, XrdCl::A
                 if (m_existence_check) break;
                 else continue;
             }
+            // The placeholder which MkDir writes is not an entry of the
+            // directory. A stat keeps it, for the time of the directory.
+            const auto &sentinel = Factory::GetMkdirSentinel();
+            if (!sentinel.empty() && name == sentinel) {
+                found_prefix_marker = true;
+                if (!m_existence_check) continue;
+            }
 			int64_t size = -1;
 			bool goodSize = false;
 			auto sizeElem = child->FirstChildElement("Size");

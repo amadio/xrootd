@@ -103,6 +103,11 @@ std::vector<std::string> HttpHeaders; // -> -H | --header settings, as given.
                                       //    XrdClHttp does all the parsing and
                                       //    validation of their contents.
 
+std::string JobsFile;                // JSONL manifest of exact file pairs
+std::string ChecksumMode;            // Explicit source/target/both verification
+bool        Json;                    // Emit terminal JSONL job results
+bool        AbortOnFailure;          // Stop admitting jobs after a failure
+
 static const uint64_t    OpCksum        =  'C';  // -adler -MD5 legacy -> DoCksrc
 static const uint64_t    DoCksrc        =  0x0000000000000001LL; // --cksum <type>:source
 static const uint64_t    DoCksum        =  0x0000000000000002LL; // --cksum <type>
@@ -216,6 +221,11 @@ static const uint64_t    OpTpcTokenFile    = 0x15;
 static const uint64_t    DoTpcTokenFile    = 0x0000002000000000LL; // --tpc-token-file
 
 static const uint64_t    DoTpcModePush     = 0x0000004000000000LL; // --tpc ... push ...
+
+static const uint64_t    OpJobsFile        = 0x16;
+static const uint64_t    OpJson            = 0x17;
+static const uint64_t    OpAbortOnFailure  = 0x18;
+static const uint64_t    OpChecksumMode    = 0x19;
 
 // Call Config with the parameters passed to main() to fill out this object. If
 // the method returns then no errors have been found. Otherwise, it exits.

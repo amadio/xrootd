@@ -1,3 +1,4 @@
+add_bats_test(batch.bats)
 add_bats_test(checksum.bats)
 add_bats_test(integrity.bats)
 add_bats_test(local.bats)

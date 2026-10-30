@@ -1,5 +1,7 @@
 add_unit_tests(
   SOURCES
+    XrdClCopyBatchTest.cc
+    XrdClCopyChecksumTest.cc
     XrdClDirListTest.cc
     XrdClEnv.cc
     XrdClLocalFileHandler.cc

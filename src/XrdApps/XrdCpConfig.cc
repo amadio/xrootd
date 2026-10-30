@@ -94,6 +94,10 @@ const char   *XrdCpConfig::opLetters = ":C:d:D:EfFhH:I:NpPrRsS:t:T:vVX:y:z:ZA";
 
 struct option XrdCpConfig::opVec[] =         // For getopt_long()
      {
+      {OPT_TYPE "jobs-file",      1, 0, XrdCpConfig::OpJobsFile},
+      {OPT_TYPE "json",           0, 0, XrdCpConfig::OpJson},
+      {OPT_TYPE "abort-on-failure",0, 0, XrdCpConfig::OpAbortOnFailure},
+      {OPT_TYPE "checksum-mode",  1, 0, XrdCpConfig::OpChecksumMode},
       {OPT_TYPE "cksum",          1, 0, XrdCpConfig::OpCksum},
       {OPT_TYPE "coerce",         0, 0, XrdCpConfig::OpCoerce},
       {OPT_TYPE "continue",       0, 0, XrdCpConfig::OpContinue},
@@ -172,6 +176,11 @@ XrdCpConfig::XrdCpConfig(const char *pgm)
    parmVal  = 0;
    parmCnt  = 0;
    zipFile  = 0;
+   pFile    = 0;
+   pLast    = 0;
+   pPrev    = 0;
+   Json     = false;
+   AbortOnFailure = false;
 
    tcpTokenFile = 0;
    if (const auto value = getenv("BEARER_TOKEN_FILE"); value != nullptr)
@@ -244,7 +253,20 @@ void XrdCpConfig::Config(int aCnt, char **aVec, int opts)
 do{while(optind < Argc && Legacy(optind)) {}
    if ((opC = getopt_long(Argc, Argv, opLetters, opVec, &i)) != (char)-1)
       switch(opC)
-         {case OpCksum:         defCks(optarg);
+         {case OpJobsFile:      if (!JobsFile.empty()) UMSG("'--jobs-file' specified more than once.");
+                                JobsFile = optarg;
+                                if (JobsFile.empty() || JobsFile == "-")
+                                   UMSG("'--jobs-file' requires a named manifest file.");
+                                break;
+          case OpJson:          Json = true;
+                                break;
+          case OpAbortOnFailure: AbortOnFailure = true;
+                                break;
+          case OpChecksumMode:  ChecksumMode = optarg;
+                                if (ChecksumMode != "source" && ChecksumMode != "target" && ChecksumMode != "both")
+                                   UMSG("'--checksum-mode' must be source, target, or both.");
+                                break;
+          case OpCksum:         defCks(optarg);
                                 break;
           case OpCoerce:        OpSpec |= DoCoerce;
                                 break;
@@ -370,7 +392,13 @@ do{while(optind < Argc && Legacy(optind)) {}
 
 // Make sure we have the right number of files
 //
-   if (inFile) {if (!parmCnt      ) UMSG("Destination not specified.");}
+   if (!JobsFile.empty())
+      {if (parmCnt || inFile)
+          UMSG("'--jobs-file' cannot be combined with operands or '--infiles'.");
+       if (OpSpec & (DoRecurse | DoZip | DoZipAppend | DoDynaSrc | DoZipMtlnCksum))
+          UMSG("'--jobs-file' does not support recursive, ZIP, or dynamic copies.");
+      }
+   else if (inFile) {if (!parmCnt      ) UMSG("Destination not specified.");}
       else {    if (!parmCnt      ) UMSG("No files specified.");
                 if ( parmCnt == 1 ) UMSG("Destination not specified.");
            }
@@ -399,10 +427,25 @@ do{while(optind < Argc && Legacy(optind)) {}
 //
    if (getenv("XRD_MAKEPATH")) OpSpec |= DoPath;
 
+   if (!ChecksumMode.empty())
+      {if ((!CksVal && JobsFile.empty()) || (OpSpec & DoCkprt))
+          UMSG("'--checksum-mode' requires a verifying '--cksum' argument.");
+       if (ChecksumMode != "both" && CksVal && !CksData.HasValue())
+          UMSG("Source or target verification requires an expected checksum.");
+       if (OpSpec & DoRecurse)
+          UMSG("'--checksum-mode' does not support recursive copies.");
+      }
+
+// A manifest supplies individual source/destination pairs in the client. Keep
+// global option and environment validation above, without resolving operands.
+   if (!JobsFile.empty()) return;
+
 // Process the destination first as it is special
 //
      dstFile = new XrdCpFile(parmVal[--parmCnt], rc);
      if (rc) FMSG("Invalid url, '" <<dstFile->Path <<"'.", 22);
+     if (Json && dstFile->Protocol == XrdCpFile::isStdIO)
+        UMSG("'--json' cannot be combined with stdout data transfers.");
 
 // Do a protocol check
 //
@@ -472,7 +515,7 @@ do{while(optind < Argc && Legacy(optind)) {}
 // Check for checksum spec conflicts
 //
    if (OpSpec & DoCksum)
-      {if (CksData.Length && numFiles > 1)
+      {if (CksData.Length && numFiles > 1 && ChecksumMode.empty())
           FMSG("Checksum with fixed value requires a single input file.", 2);
        if (CksData.Length && OpSpec & DoRecurse)
           FMSG("Checksum with fixed value conflicts with '--recursive'.", 2);
@@ -929,7 +972,8 @@ void XrdCpConfig::ProcFile(const char *fname)
 
 // For local files, make sure it exists and get its size
 //
-   if (pFile->Protocol == XrdCpFile::isFile && (rc = pFile->Resolve()))
+   if (pFile->Protocol == XrdCpFile::isFile && (rc = pFile->Resolve()) &&
+       !(Json && rc == ENOENT))
       FMSG(XrdSysE2T(rc) <<" processing " <<pFile->Path, 2);
 
 // Process file based on type (local or remote)
@@ -969,13 +1013,16 @@ void XrdCpConfig::ProcFile(const char *fname)
 void XrdCpConfig::Usage(int rc)
 {
    static const char *Syntax = "\n"
-   "Usage:   xrdcp [<options>] <src> [<src> [. . .]] <dest>\n";
+   "Usage:   xrdcp [<options>] <src> [<src> [. . .]] <dest>\n"
+   "         xrdcp [<options>] --jobs-file <manifest.jsonl>\n";
 
    static const char *Syntax1= "\n"
    "Usage:   xrdcp [<options>] <src> <dest>\n";
 
    static const char *Options= "\n"
    "Options: [--cksum <args>] [--coerce] [--continue]\n"
+   "         [--jobs-file <file>] [--json] [--abort-on-failure]\n"
+   "         [--checksum-mode {source|target|both}]\n"
    "         [--debug <lvl>] [--dynamic-src] [--force] [--header <name: value>]\n"
    "         [--help] [--infiles <fn>] [--license] [--nopbar] [--notlsok]\n"
    "         [--parallel <n>] [--posc] [--proxy <host>:<port>]\n"
@@ -1037,6 +1084,14 @@ void XrdCpConfig::Usage(int rc)
    "                              '<name>: <value>' entries.\n"
    "-h | --help                   prints this information\n"
    "-I | --infiles <fname>        specifies the file that contains a list of input files\n"
+   "     --jobs-file <fname>      JSONL objects with exact source/target file pairs and\n"
+   "                              optional checksum and checksum_mode fields. Cannot\n"
+   "                              be combined with operands or --infiles.\n"
+   "     --json                   emit one terminal JSON result per job, in input order\n"
+   "     --abort-on-failure       stop admitting jobs after a failure; active jobs finish\n"
+   "     --checksum-mode <mode>   source, target, or both verification; source/target\n"
+   "                              require an expected digest in --cksum. Source checks\n"
+   "                              run before the destination is opened.\n"
    "     --license                prints license terms and conditions\n"
    "-N | --nopbar                 does not print the progress bar\n"
    "     --notlsok                if server is too old to support TLS encryption fallback\n"

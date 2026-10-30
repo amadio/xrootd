@@ -5,6 +5,7 @@ xrdcp - copy files
 .nf
 
 \fBxrdcp\fR [\fIoptions\fR] \fIsource\fR \fIdestination\fR
+\fBxrdcp\fR [\fIoptions\fR] \fB--jobs-file\fR \fIFILE\fR
 
 \fIoptions\fR: [\fB--cksum\fR \fIargs\fR] [\fB--debug\fR \fIlvl\fR]
 [\fB--coerce\fR] [\fB--force\fR] [\fB--help\fR] [\fB--license\fR]
@@ -20,6 +21,8 @@ xrdcp - copy files
 [\fB--zip-mtln-cksum\fR] [\fB--rm-bad-cksum\fR] [\fB--continue\fR]
 [\fB--xrate-threshold\fR] [\fB--retry-policy\fR]
 [\fB--header\fR \fIname: value\fR]
+[\fB--jobs-file\fR \fIFILE\fR] [\fB--json\fR] [\fB--abort-on-failure\fR]
+[\fB--checksum-mode\fR \fIsource|target|both\fR]
 
 \fIlegacy options\fR: [\fB-adler\fR] [\fB-DS\fR\fIparm string\fR] [\fB-DI\fR\fIparm number\fR]
 [\fB-md5\fR] [\fB-np\fR] [\fB-OD\fR\fIcgi\fR] [\fB-OS\fR\fIcgi\fR] [\fB-x\fR]
@@ -42,6 +45,25 @@ type based on source/destination configuration, source file type (metalink, ZIP)
 available checksum plug-ins. If a \fIvalue\fR is specified, it is used as the source checksum.
 When \fIprint\fR is specified, the checksum at the destination is printed but is \fInot\fR
 verified.
+
+.RE
+\fB--checksum-mode\fR \fIsource|target|both\fR
+.RS 5
+selects explicit verification with \fB--cksum\fR, without changing the legacy
+checksum modes when this option is absent. \fIsource\fR checks an expected
+source checksum before the destination is opened; \fItarget\fR checks an
+expected target checksum after copying. Both one-sided modes require an explicit
+value. \fIboth\fR obtains the source checksum before copying and compares it
+with the target afterwards; if a value is supplied, the source must match it
+before copying starts.
+.PP
+A source mismatch does not create destination parents or overwrite an existing
+destination. A target mismatch leaves the copied file unless
+\fB--rm-bad-cksum\fR was explicitly supplied. Preflight is a separate checksum
+query/read, not an atomic snapshot of a source changed by another process.
+Explicit verification is for individual regular files; stdin/stdout, Metalink,
+ZIP, dynamic and recursive copies are unsupported. Native checksum availability
+and authorization still apply.
 
 .RE
 \fB-d\fR | \fB--debug\fR \fIlvl\fR
@@ -235,6 +257,32 @@ specifies the file that contains a list of input files
 number of copy jobs to be run simultaneously
 
 .RE
+\fB--jobs-file\fR \fIFILE\fR
+.RS 5
+reads exact independent source/target file pairs from a JSON Lines manifest.
+It cannot be combined with positional operands, \fB--infiles\fR, recursive,
+ZIP or dynamic copies. Targets are exact filenames, not directories to which
+source basenames are appended. See BATCH MANIFESTS below.
+
+.RE
+\fB--abort-on-failure\fR
+.RS 5
+stops admitting jobs after the first observed preparation or transfer failure.
+Already active jobs finish; unstarted jobs are marked skipped. Without this
+option, independent manifest jobs continue after per-file failures. Legacy
+invocations retain their existing preparation behavior unless \fB--json\fR
+is requested.
+
+.RE
+\fB--json\fR
+.RS 5
+writes one terminal JSON object per input job, in input order, to stdout. It
+disables progress/checksum prose on stdout and reports preparation failures and
+skipped jobs as well as completed copies. It is available for manifests and
+ordinary file operands; stdout data copies are incompatible. Diagnostic text
+remains on stderr. See MACHINE OUTPUT below.
+
+.RE
 \fB--xattr\fR
 .RS 5
 preserve extended attributes
@@ -269,10 +317,51 @@ Remove the target file if checksum verification failed (enables also POSC semant
 .RS 5
 Continue copying a file from the point where the previous copy was interrupted.
 
+.SH BATCH MANIFESTS
+Each nonempty line is a JSON object with string \fBsource\fR and \fBtarget\fR
+fields. Optional \fBchecksum\fR uses \fIALGORITHM[:VALUE]\fR;
+\fBchecksum_mode\fR is \fIsource\fR, \fItarget\fR or \fIboth\fR.
+Global checksum options are defaults; per-job fields override them. A manifest
+checksum selects explicit verification, defaulting to \fIboth\fR. Unknown or
+duplicate fields, invalid types/control characters and empty manifests are
+rejected before any copy starts. Duplicate/aliased targets and source/target
+dependencies are rejected. Local paths and file URLs containing a literal
+question mark are unsupported because native local URLs treat it as CGI.
+.PP
+Example \fIjobs.jsonl\fR:
+.nf
+{"source":"/tmp/input-a","target":"root://host//data/a","checksum":"adler32","checksum_mode":"both"}
+{"source":"https://host/data/b?authz=TOKEN","target":"/tmp/b"}
+.fi
+.PP
+Run with:
+.nf
+xrdcp --jobs-file jobs.jsonl --parallel 4 --json --abort-on-failure
+.fi
+.PP
+The complete manifest is validated before submission. File availability and
+native preparation/transfer failures are per-job outcomes. A preparation failure
+observed before execution skips all unstarted jobs when abort-on-failure is
+enabled. The aggregate exit status is the first genuine failure in input order,
+not a synthesized skipped-job status.
+.SH MACHINE OUTPUT
+Each JSON Lines record contains \fBjob\fR (one-based input index),
+credential-redacted \fBsource\fR and \fBtarget\fR, and \fBstate\fR:
+\fIsucceeded\fR, \fIfailed\fR or \fIskipped\fR.
+\fBstatus\fR contains native \fBstatus\fR, \fBcode\fR, \fBerrNo\fR and
+\fBmessage\fR fields. These are XRootD status values, not a promised POSIX errno
+translation. \fBbytes\fR is the native transferred-byte count when available,
+or null otherwise; resumed copies count only the remaining bytes transferred.
+\fBsource_checksum\fR and \fBtarget_checksum\fR contain native checksum results
+when available, or null otherwise. Explicit verification supplies actual
+checksums; legacy fixed-checksum mode retains its preset source value.
+Records are emitted after the batch
+completes; they are terminal results, not live progress events.
+Syntax/usage errors can fail before a batch
+exists and produce only a stderr diagnostic.
 .SH LEGACY OPTIONS
 Legacy options are provided for backward compatibility. These are now
 deprecated and should be avoided.
-.RE
 \fB-adler\fR
 .RS 5
 equivalent to "\fB--cksum adler32:source\fR".
@@ -679,7 +768,6 @@ Enable in-fly error correction of corrupted pages (default: 1).
 .RE
 
 .SH RETURN CODES
-.RE
 \fB50\fR  : generic error (e.g. config, internal, data, OS, command line option)
 
 \fB51\fR  : socket related error

@@ -37,6 +37,17 @@ systems like [ceph](https://ceph.io).
 General documentation such as configuration reference guides, and user manuals
 can be found on the XRootD website at https://xrootd.org/docs.html.
 
+### Native copy batches
+
+`xrdcp --jobs-file jobs.jsonl --parallel 4 --json` runs independent exact
+source/target file pairs and emits a terminal JSON result for every job.
+Manifest entries can supply individual checksum expectations; use
+`--checksum-mode source|target|both` for explicit verification and
+`--abort-on-failure` to stop starting jobs after a failure while active copies
+finish. Existing copy and checksum modes retain their behavior when the new
+options are absent. See the [xrdcp manual](docs/man/xrdcp.1) for the manifest
+schema, examples and result fields.
+
 ## Supported Operating Systems
 
 XRootD is officially supported on the following platforms:

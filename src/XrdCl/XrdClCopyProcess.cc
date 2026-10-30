@@ -26,6 +26,7 @@
 #include "XrdCl/XrdClClassicCopyJob.hh"
 #include "XrdCl/XrdClConstants.hh"
 #include "XrdCl/XrdClCopyJob.hh"
+#include "XrdCl/XrdClCopyChecksum.hh"
 #include "XrdCl/XrdClDefaultEnv.hh"
 #include "XrdCl/XrdClJobManager.hh"
 #include "XrdCl/XrdClLog.hh"
@@ -37,9 +38,67 @@
 #include "XrdSys/XrdSysPthread.hh"
 
 #include <sys/time.h>
+#include <mutex>
 
 namespace
 {
+  // Admission and completion share a lock: a queued wrapper that has not yet
+  // started must observe a failure before opening any destination.
+  struct CopyAdmission
+  {
+    CopyAdmission( bool stop, bool failed = false ):
+      stopOnFailure( stop ), failed( failed ) {}
+
+    std::mutex mutex;
+    bool       stopOnFailure;
+    bool       failed;
+  };
+
+  XrdCl::XRootDStatus SkippedStatus()
+  {
+    return XrdCl::XRootDStatus( XrdCl::stError,
+                               XrdCl::errOperationInterrupted,
+                               kXR_Cancelled,
+                               "Copy job skipped after a batch failure" );
+  }
+
+  const XrdCl::PropertyList *CopyConfiguration(
+                               const std::vector<XrdCl::PropertyList> &jobs )
+  {
+    for( auto it = jobs.rbegin(); it != jobs.rend(); ++it )
+      if( it->HasProperty( "jobType" ) &&
+          it->Get<std::string>( "jobType" ) == "configuration" )
+        return &*it;
+    return 0;
+  }
+
+  XrdCl::XRootDStatus FirstJobFailure(
+                             const std::vector<XrdCl::PropertyList*> &results )
+  {
+    for( auto result : results )
+    {
+      std::string state;
+      result->Get( "jobState", state );
+      if( state == "failed" )
+        return result->Get<XrdCl::XRootDStatus>( "status" );
+    }
+    return XrdCl::XRootDStatus();
+  }
+
+  void ReportUnstartedJob( XrdCl::CopyProgressHandler *progress,
+                           uint32_t                    currentJob,
+                           uint32_t                    totalJobs,
+                           XrdCl::PropertyList        &properties,
+                           XrdCl::PropertyList        *results )
+  {
+    if( !progress ) return;
+    XrdCl::URL source, target;
+    properties.Get( "source", source );
+    properties.Get( "target", target );
+    progress->BeginJob( currentJob, totalJobs, &source, &target );
+    progress->EndJob( currentJob, results );
+  }
+
   class QueuedCopyJob: public XrdCl::Job
   {
     public:
@@ -47,9 +106,10 @@ namespace
                      XrdCl::CopyProgressHandler *progress,
                      uint32_t                    currentJob,
                      uint32_t                    totalJobs,
+                     CopyAdmission              *admission,
                      XrdSysSemaphore            *sem = 0 ):
         pJob(job), pProgress(progress), pCurrentJob(currentJob),
-        pTotalJobs(totalJobs), pSem(sem),
+        pTotalJobs(totalJobs), pAdmission(admission), pSem(sem),
         pWrtRetryCnt( XrdCl::DefaultRetryWrtAtLBLimit ),
         pRetryCnt( XrdCl::DefaultCpRetry ),
         pRetryPolicy( XrdCl::DefaultCpRetryPolicy )
@@ -64,6 +124,22 @@ namespace
       //------------------------------------------------------------------------
       virtual void Run( void * )
       {
+        bool skipped = false;
+        {
+          std::lock_guard<std::mutex> lock( pAdmission->mutex );
+          skipped = pAdmission->stopOnFailure && pAdmission->failed;
+          pJob->GetResults()->Set( "jobState", skipped ? "skipped" : "running" );
+          if( skipped )
+            pJob->GetResults()->Set( "status", SkippedStatus() );
+        }
+        if( skipped )
+        {
+          ReportUnstartedJob( pProgress, pCurrentJob, pTotalJobs,
+                               *pJob->GetProperties(), pJob->GetResults() );
+          if( pSem ) pSem->Post();
+          return;
+        }
+
         XrdCl::Monitor     *mon = XrdCl::DefaultEnv::GetMonitor();
         timeval             bTOD;
 
@@ -88,8 +164,10 @@ namespace
         //----------------------------------------------------------------------
         // Do the copy
         //----------------------------------------------------------------------
-        XrdCl::XRootDStatus st;
-        while( true )
+        XrdCl::XRootDStatus st = XrdCl::PrepareCopyChecksum(
+                                  *pJob->GetProperties(), *pJob->GetResults() );
+        const bool prepared = st.IsOK();
+        while( prepared )
         {
           st = pJob->Run( pProgress );
           //--------------------------------------------------------------------
@@ -156,7 +234,15 @@ namespace
           break;
         }
 
-        pJob->GetResults()->Set( "status", st );
+        if( prepared )
+          st = XrdCl::FinishCopyChecksum( *pJob->GetProperties(),
+                                           *pJob->GetResults(), st );
+        {
+          std::lock_guard<std::mutex> lock( pAdmission->mutex );
+          pJob->GetResults()->Set( "status", st );
+          pJob->GetResults()->Set( "jobState", st.IsOK() ? "succeeded" : "failed" );
+          if( !st.IsOK() ) pAdmission->failed = true;
+        }
 
         //----------------------------------------------------------------------
         // Report end of the copy
@@ -187,6 +273,7 @@ namespace
       XrdCl::CopyProgressHandler *pProgress;
       uint32_t                    pCurrentJob;
       uint32_t                    pTotalJobs;
+      CopyAdmission              *pAdmission;
       XrdSysSemaphore            *pSem;
       int                         pWrtRetryCnt;
       int                         pRetryCnt;
@@ -201,6 +288,8 @@ namespace XrdCl
     std::vector<PropertyList>   pJobProperties;
     std::vector<PropertyList*>  pJobResults;
     std::vector<CopyJob*>       pJobs;
+    std::vector<PropertyList>   pPreparedProperties;
+    std::vector<URL>            pRegisteredSources;
   };
 
   //----------------------------------------------------------------------------
@@ -357,6 +446,8 @@ namespace XrdCl
     Utils::LogPropertyList( log, UtilityMsg, "Adding job with properties: %s",
                             p );
     pImpl->pJobResults.push_back( results );
+    results->Set( "jobState", "queued" );
+    results->Set( "status", XRootDStatus() );
     return XRootDStatus();
   }
 
@@ -365,143 +456,132 @@ namespace XrdCl
   //----------------------------------------------------------------------------
   XRootDStatus CopyProcess::Prepare()
   {
+    CleanUpJobs();
     Log *log = DefaultEnv::GetLog();
-    std::vector<PropertyList>::iterator it;
+    const PropertyList *config = CopyConfiguration( pImpl->pJobProperties );
+    bool continueOnPrepareError = false;
+    if( config ) config->Get( "continueOnPrepareError", continueOnPrepareError );
 
-    log->Debug( UtilityMsg, "CopyProcess: %zu jobs to prepare",
-                pImpl->pJobProperties.size() );
-
-    std::map<std::string, uint32_t> targetFlags;
-    int i = 0;
-    for( it = pImpl->pJobProperties.begin(); it != pImpl->pJobProperties.end(); ++it, ++i )
+    // Keep an independent, stable property list for every input. Preparing a
+    // directory target or a TPC URL must not alter the next Prepare() call.
+    pImpl->pPreparedProperties.reserve( pImpl->pJobResults.size() );
+    for( const auto &props : pImpl->pJobProperties )
     {
-      PropertyList &props = *it;
-
       if( props.HasProperty( "jobType" ) &&
           props.Get<std::string>( "jobType" ) == "configuration" )
         continue;
+      pImpl->pPreparedProperties.push_back( props );
+    }
+    pImpl->pJobs.resize( pImpl->pJobResults.size(), 0 );
+    for( auto result : pImpl->pJobResults )
+    {
+      result->Set( "jobState", "queued" );
+      result->Set( "status", XRootDStatus() );
+    }
 
-      PropertyList *res   = pImpl->pJobResults[i];
+    log->Debug( UtilityMsg, "CopyProcess: %zu jobs to prepare",
+                pImpl->pJobs.size() );
+
+    for( size_t i = 0; i < pImpl->pPreparedProperties.size(); ++i )
+    {
+      PropertyList &props = pImpl->pPreparedProperties[i];
+      PropertyList *res = pImpl->pJobResults[i];
       std::string tmp;
-
       props.Get( "source", tmp );
       URL source = tmp;
+      XRootDStatus st;
       if( !source.IsValid() )
       {
-        log->Error( UtilityMsg, "Invalid copy source URL: %s", obfuscateAuth( tmp ).c_str() );
-        return XRootDStatus( stError, errInvalidArgs, 0, "invalid source" );
+        log->Error( UtilityMsg, "Invalid copy source URL: %s",
+                    obfuscateAuth( tmp ).c_str() );
+        st = XRootDStatus( stError, errInvalidArgs, 0, "invalid source" );
       }
 
-      //--------------------------------------------------------------------------
-      // Create a virtual redirector if it is a Metalink file
-      //--------------------------------------------------------------------------
-      if( source.IsMetalink() )
+      // A retained Metalink registration is owned by the process even when
+      // loading its metadata or later validation of this job fails.
+      if( st.IsOK() && source.IsMetalink() )
       {
         RedirectorRegistry &registry = RedirectorRegistry::Instance();
-        XRootDStatus st = registry.RegisterAndWait( source );
-        if( !st.IsOK() ) return st;
+        st = registry.RegisterAndWait( source );
+        if( registry.Get( source ) ) pImpl->pRegisteredSources.push_back( source );
       }
 
-      // handle UNZIP CGI
-      const URL::ParamsMap &cgi = source.GetParams();
-      URL::ParamsMap::const_iterator itr = cgi.find( "xrdcl.unzip" );
-      if( itr != cgi.end() )
+      if( st.IsOK() )
       {
-        props.Set( "zipArchive", true );
-        props.Set( "zipSource",  itr->second );
+        const URL::ParamsMap &cgi = source.GetParams();
+        auto itr = cgi.find( "xrdcl.unzip" );
+        if( itr != cgi.end() )
+        {
+          props.Set( "zipArchive", true );
+          props.Set( "zipSource", itr->second );
+        }
       }
 
       props.Get( "target", tmp );
       URL target = tmp;
-      if( !target.IsValid() )
+      if( st.IsOK() && !target.IsValid() )
       {
-        log->Error( UtilityMsg, "Invalid copy target URL: %s", obfuscateAuth( tmp ).c_str() );
-        return XRootDStatus( stError, errInvalidArgs, 0, "invalid target" );
+        log->Error( UtilityMsg, "Invalid copy target URL: %s",
+                    obfuscateAuth( tmp ).c_str() );
+        st = XRootDStatus( stError, errInvalidArgs, 0, "invalid target" );
       }
 
-      if( target.GetProtocol() != "stdio" )
+      if( st.IsOK() && target.GetProtocol() != "stdio" )
       {
-        // handle directories
         bool targetIsDir = false;
         props.Get( "targetIsDir", targetIsDir );
-
         if( targetIsDir )
         {
           std::string path = target.GetPath();
           if( path.empty() || path.back() != '/' )
             path += '/';
           std::string fn;
-
           bool isZip = false;
           props.Get( "zipArchive", isZip );
           if( isZip )
-          {
             props.Get( "zipSource", fn );
-          }
           else if( source.IsMetalink() )
-          {
-            RedirectorRegistry &registry = XrdCl::RedirectorRegistry::Instance();
-            VirtualRedirector *redirector = registry.Get( source );
-            fn = redirector->GetTargetName();
-          }
+            fn = RedirectorRegistry::Instance().Get( source )->GetTargetName();
           else
-          {
             fn = source.GetPath();
-          }
 
           size_t pos = fn.rfind( '/' );
-          if( pos != std::string::npos )
-            fn = fn.substr( pos + 1 );
+          if( pos != std::string::npos ) fn = fn.substr( pos + 1 );
           path += fn;
           target.SetPath( path );
           props.Set( "target", target.GetURL() );
+          res->Set( "target", target.GetURL() );
         }
       }
 
-      bool tpc = false;
-      props.Get( "thirdParty", tmp );
-      if( tmp != "none" )
-        tpc = true;
-
-      //------------------------------------------------------------------------
-      // Check if we have all we need
-      //------------------------------------------------------------------------
-      if( source.GetProtocol() != "stdio" && source.GetPath().empty() )
-      {
-        log->Debug( UtilityMsg, "CopyProcess (job #%d): no source specified.",
-                    i );
-        CleanUpJobs();
-        XRootDStatus st = XRootDStatus( stError, errInvalidArgs );
-        res->Set( "status", st );
-        return st;
-      }
-
+      if( st.IsOK() && source.GetProtocol() != "stdio" &&
+          source.GetPath().empty() )
+        st = XRootDStatus( stError, errInvalidArgs, 0, "no source specified" );
       // A target which is a directory got the name of the source above, thus
       // an empty path here is a target without a file name.
-      if( target.GetProtocol() != "stdio" && target.GetPath().empty() )
+      if( st.IsOK() && target.GetProtocol() != "stdio" &&
+          target.GetPath().empty() )
+        st = XRootDStatus( stError, errInvalidArgs, 0, "no target specified" );
+
+      if( !st.IsOK() )
       {
-        log->Debug( UtilityMsg, "CopyProcess (job #%d): no target specified.",
-                    i );
-        CleanUpJobs();
-        XRootDStatus st = XRootDStatus( stError, errInvalidArgs );
+        log->Debug( UtilityMsg, "CopyProcess (job #%zu): preparation failed.",
+                    i + 1 );
         res->Set( "status", st );
+        res->Set( "jobState", "failed" );
+        if( continueOnPrepareError ) continue;
+        CleanUpJobs();
         return st;
       }
 
-      //------------------------------------------------------------------------
-      // Check what kind of job we should do
-      //------------------------------------------------------------------------
-      CopyJob *job = 0;
-
-      if( tpc == true )
+      props.Get( "thirdParty", tmp );
+      if( tmp != "none" )
       {
         MarkTPC( props );
-        job = new TPFallBackCopyJob( i+1, &props, res );
+        pImpl->pJobs[i] = new TPFallBackCopyJob( i + 1, &props, res );
       }
       else
-        job = new ClassicCopyJob( i+1, &props, res );
-
-      pImpl->pJobs.push_back( job );
+        pImpl->pJobs[i] = new ClassicCopyJob( i + 1, &props, res );
     }
     return XRootDStatus();
   }
@@ -511,108 +591,137 @@ namespace XrdCl
   //----------------------------------------------------------------------------
   XRootDStatus CopyProcess::Run( CopyProgressHandler *progress )
   {
-    //--------------------------------------------------------------------------
-    // Get the configuration
-    //--------------------------------------------------------------------------
-    uint8_t parallelThreads = 1;
-    if( pImpl->pJobProperties.size() > 0 &&
-        pImpl->pJobProperties.rbegin()->HasProperty( "jobType" ) &&
-        pImpl->pJobProperties.rbegin()->Get<std::string>( "jobType" ) == "configuration" )
-    {
-      PropertyList &config = *pImpl->pJobProperties.rbegin();
-      if( config.HasProperty( "parallel" ) )
-        parallelThreads = (uint8_t)config.Get<int>( "parallel" );
-    }
-
-    //--------------------------------------------------------------------------
-    // Run the show
-    //--------------------------------------------------------------------------
-    std::vector<CopyJob *>::iterator it;
-    uint32_t currentJob = 1;
-    uint32_t totalJobs  = pImpl->pJobs.size();
-
-    //--------------------------------------------------------------------------
-    // Single thread
-    //--------------------------------------------------------------------------
-    if( parallelThreads == 1 )
-    {
-      XRootDStatus err;
-
-      for( it = pImpl->pJobs.begin(); it != pImpl->pJobs.end(); ++it )
+    uint32_t totalJobs = pImpl->pJobs.size();
+    for( uint32_t i = 0; i < totalJobs; ++i )
+      if( pImpl->pJobs[i] )
       {
-        QueuedCopyJob j( *it, progress, currentJob, totalJobs );
-        j.Run(0);
-
-        XRootDStatus st = (*it)->GetResults()->Get<XRootDStatus>( "status" );
-        if( err.IsOK() && !st.IsOK() )
-        {
-          err = st;
-        }
-        ++currentJob;
+        // A repeated Run() starts a new attempt. Only preparation failures,
+        // represented by empty job slots, can prevent its initial admission.
+        pImpl->pJobResults[i]->Set( "jobState", "queued" );
+        pImpl->pJobResults[i]->Set( "status", XRootDStatus() );
       }
-
-      if( !err.IsOK() ) return err;
+    auto failUnstarted = [&]( const XRootDStatus &status )
+    {
+      for( uint32_t i = 0; i < totalJobs; ++i )
+      {
+        std::string state;
+        pImpl->pJobResults[i]->Get( "jobState", state );
+        if( state != "queued" ) continue;
+        pImpl->pJobResults[i]->Set( "jobState", "failed" );
+        pImpl->pJobResults[i]->Set( "status", status );
+        ReportUnstartedJob( progress, i + 1, totalJobs,
+                             pImpl->pPreparedProperties[i],
+                             pImpl->pJobResults[i] );
+      }
+      return status;
+    };
+    const PropertyList *config = CopyConfiguration( pImpl->pJobProperties );
+    int parallelThreads = 1;
+    bool stopOnFailure = false;
+    if( config )
+    {
+      config->Get( "parallel", parallelThreads );
+      config->Get( "stopOnFailure", stopOnFailure );
     }
-    //--------------------------------------------------------------------------
-    // Multiple threads
-    //--------------------------------------------------------------------------
+    if( parallelThreads < 1 || parallelThreads > 255 )
+      return failUnstarted( XRootDStatus( stError, errInvalidArgs, 0,
+                              "parallel must be between 1 and 255" ) );
+
+    XRootDStatus prepareFailure = FirstJobFailure( pImpl->pJobResults );
+    CopyAdmission admission( stopOnFailure, !prepareFailure.IsOK() );
+    if( !totalJobs ) return prepareFailure;
+
+    // Failed preparation has no CopyJob, but it still occupies the same input
+    // slot and must receive its terminal progress notification.
+    for( uint32_t i = 0; i < totalJobs; ++i )
+      if( !pImpl->pJobs[i] )
+        ReportUnstartedJob( progress, i + 1, totalJobs,
+                             pImpl->pPreparedProperties[i],
+                             pImpl->pJobResults[i] );
+
+    if( parallelThreads == 1 || (stopOnFailure && !prepareFailure.IsOK()) )
+    {
+      for( uint32_t i = 0; i < totalJobs; ++i )
+      {
+        if( !pImpl->pJobs[i] ) continue;
+        QueuedCopyJob job( pImpl->pJobs[i], progress, i + 1, totalJobs,
+                            &admission );
+        job.Run( 0 );
+      }
+    }
     else
     {
-      uint32_t workers = std::min( (uint32_t)parallelThreads,
-                                   (uint32_t)pImpl->pJobs.size() );
-      JobManager jm( workers );
-      jm.Initialize();
-      if( !jm.Start() )
-        return XRootDStatus( stError, errOSError, 0,
-                             "Unable to start job manager" );
-
-      XrdSysSemaphore *sem = new XrdSysSemaphore(0);
-      std::vector<QueuedCopyJob*> queued;
-      for( it = pImpl->pJobs.begin(); it != pImpl->pJobs.end(); ++it )
+      uint32_t workers = std::min( uint32_t( parallelThreads ), totalJobs );
+      JobManager manager( workers );
+      manager.Initialize();
+      if( !manager.Start() )
       {
-        QueuedCopyJob *j = new QueuedCopyJob( *it, progress, currentJob,
-                                              totalJobs, sem );
-
-        queued.push_back( j );
-        jm.QueueJob(j, 0);
-        ++currentJob;
+        manager.Finalize();
+        return failUnstarted( XRootDStatus( stError, errOSError, 0,
+                                "Unable to start job manager" ) );
       }
 
-      std::vector<QueuedCopyJob*>::iterator itQ;
-      for( itQ = queued.begin(); itQ != queued.end(); ++itQ )
-        sem->Wait();
-      delete sem;
+      XrdSysSemaphore completed( 0 );
+      std::vector<QueuedCopyJob*> queued;
+      uint32_t next = 0;
+      uint32_t outstanding = 0;
+      while( next < totalJobs || outstanding )
+      {
+        // Completion publishes a failure under the same lock as admission.
+        // Keep only one outstanding wrapper per worker rather than putting the
+        // entire batch into JobManager's unbounded queue.
+        {
+          std::lock_guard<std::mutex> lock( admission.mutex );
+          while( next < totalJobs && outstanding < workers &&
+                 !(admission.stopOnFailure && admission.failed) )
+          {
+            uint32_t current = next++;
+            if( !pImpl->pJobs[current] ) continue;
+            QueuedCopyJob *job = new QueuedCopyJob( pImpl->pJobs[current],
+                                  progress, current + 1, totalJobs,
+                                  &admission, &completed );
+            queued.push_back( job );
+            manager.QueueJob( job );
+            ++outstanding;
+          }
+        }
+        if( !outstanding ) break;
+        completed.Wait();
+        --outstanding;
+      }
 
-      if( !jm.Stop() )
+      bool stopped = manager.Stop();
+      manager.Finalize();
+      for( auto job : queued ) delete job;
+      if( !stopped )
         return XRootDStatus( stError, errOSError, 0,
                              "Unable to stop job manager" );
-      jm.Finalize();
-      for( itQ = queued.begin(); itQ != queued.end(); ++itQ )
-        delete *itQ;
 
-      for( it = pImpl->pJobs.begin(); it != pImpl->pJobs.end(); ++it )
+      // Jobs that were never admitted also need a terminal result. Wrappers
+      // already admitted perform the same check before starting a transfer.
+      for( uint32_t i = next; i < totalJobs; ++i )
       {
-        XRootDStatus st = (*it)->GetResults()->Get<XRootDStatus>( "status" );
-        if( !st.IsOK() ) return st;
+        if( !pImpl->pJobs[i] ) continue;
+        pImpl->pJobResults[i]->Set( "jobState", "skipped" );
+        pImpl->pJobResults[i]->Set( "status", SkippedStatus() );
+        ReportUnstartedJob( progress, i + 1, totalJobs,
+                             pImpl->pPreparedProperties[i],
+                             pImpl->pJobResults[i] );
       }
-    };
-    return XRootDStatus();
+    }
+
+    // A skipped job can precede the failing job in input order when preparation
+    // fails. Return a genuine failure, not the synthesized cancellation status.
+    return FirstJobFailure( pImpl->pJobResults );
   }
 
   void CopyProcess::CleanUpJobs()
   {
-    std::vector<CopyJob*>::iterator itJ;
-    for( itJ = pImpl->pJobs.begin(); itJ != pImpl->pJobs.end(); ++itJ )
-    {
-      CopyJob *job = *itJ;
-      URL src = job->GetSource();
-      if( src.IsMetalink() )
-      {
-        RedirectorRegistry &registry = RedirectorRegistry::Instance();
-        registry.Release( src );
-      }
-      delete job;
-    }
+    for( auto job : pImpl->pJobs ) delete job;
     pImpl->pJobs.clear();
+    pImpl->pPreparedProperties.clear();
+    for( const auto &source : pImpl->pRegisteredSources )
+      RedirectorRegistry::Instance().Release( source );
+    pImpl->pRegisteredSources.clear();
   }
 }

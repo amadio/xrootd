@@ -35,6 +35,7 @@ add_library(XrdCl SHARED
   XrdClFile.cc                   XrdClFile.hh
   XrdClFileStateHandler.cc       XrdClFileStateHandler.hh
   XrdClCopyProcess.cc            XrdClCopyProcess.hh
+  XrdClCopyChecksum.cc           XrdClCopyChecksum.hh
   XrdClClassicCopyJob.cc         XrdClClassicCopyJob.hh
   XrdClThirdPartyCopyJob.cc      XrdClThirdPartyCopyJob.hh
   XrdClThirdPartyCopyPlugIn.cc   XrdClThirdPartyCopyPlugIn.hh

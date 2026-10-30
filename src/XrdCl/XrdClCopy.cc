@@ -26,6 +26,8 @@
 #include "XrdApps/XrdCpFile.hh"
 #include "XrdCl/XrdClConstants.hh"
 #include "XrdCl/XrdClCopyProcess.hh"
+#include "XrdCl/XrdClCopyChecksum.hh"
+#include "XrdCl/XrdClCopyManifest.hh"
 #include "XrdCl/XrdClDefaultEnv.hh"
 #include "XrdCl/XrdClLog.hh"
 #include "XrdCl/XrdClFileSystem.hh"
@@ -72,8 +74,8 @@ class ProgressDisplay: public XrdCl::CopyProgressHandler
         if( jobTotal > 1 )
         {
           std::cerr << "Job: "    << jobNum << "/" << jobTotal << std::endl;
-          std::cerr << "Source: " << source->GetURL() << std::endl;
-          std::cerr << "Target: " << destination->GetURL() << std::endl;
+          std::cerr << "Source: " << XrdCpBatch::SanitizeURL(source->GetURL()) << std::endl;
+          std::cerr << "Target: " << XrdCpBatch::SanitizeURL(destination->GetURL()) << std::endl;
         }
       }
       pPrevious = 0;
@@ -280,8 +282,7 @@ class ProgressDisplay: public XrdCl::CopyProgressHandler
         std::cerr << url->GetPath() << " ";
       else
       {
-        std::cerr << url->GetProtocol() << "://" << url->GetHostId();
-        std::cerr << url->GetPath() << " ";
+        std::cerr << XrdCpBatch::SanitizeURL(url->GetURL()) << " ";
       }
 
       std::cerr << size;
@@ -571,7 +572,7 @@ int main( int argc, char **argv )
   }
 
   ProgressDisplay progress;
-  if( config.Want(XrdCpConfig::DoNoPbar) || !isatty( fileno( stdout ) ) )
+  if( config.Json || config.Want(XrdCpConfig::DoNoPbar) || !isatty( fileno( stdout ) ) )
     progress.PrintProgressBar( false );
 
   bool         posc          = false;
@@ -673,6 +674,46 @@ int main( int argc, char **argv )
   if( !config.AddCksVal.empty() )
     progress.PrintAdditionalCheckSum( true );
 
+  if( config.Json )
+  {
+    progress.PrintSourceCheckSum( false );
+    progress.PrintTargetCheckSum( false );
+    progress.PrintAdditionalCheckSum( false );
+  }
+
+  XrdCpBatch::Input defaults;
+  defaults.checksumType = checkSumType;
+  defaults.checksumPreset = checkSumPreset;
+  defaults.checksumMode = checkSumMode;
+  defaults.checksumVerify = config.ChecksumMode;
+  if( !defaults.checksumVerify.empty() ) defaults.checksumMode = "none";
+  std::vector<XrdCpBatch::Input> inputs;
+  if( !config.JobsFile.empty() )
+  {
+    try { inputs = XrdCpBatch::ReadManifest( config.JobsFile, defaults ); }
+    catch( const std::exception &error )
+    {
+      std::cerr << error.what() << std::endl;
+      return 50;
+    }
+    if( !config.HttpHeaders.empty() )
+    {
+      bool hasHttp = false;
+      for( const auto &input : inputs )
+        for( const auto &operand : {input.source, input.target} )
+        {
+          const auto protocol = URL(operand).GetProtocol();
+          hasHttp |= protocol == "http" || protocol == "https" || protocol == "dav" ||
+                     protocol == "davs" || protocol == "s3";
+        }
+      if( !hasHttp )
+      {
+        std::cerr << "'--header' requires an HTTP source or destination." << std::endl;
+        return 50;
+      }
+    }
+  }
+
   //----------------------------------------------------------------------------
   // ZIP archive
   //----------------------------------------------------------------------------
@@ -770,253 +811,10 @@ int main( int argc, char **argv )
   log->Dump( AppMsg, "Chunk size: %d, parallel chunks %d, streams: %d",
              chunkSize, parallelChunks, config.nStrm + 1 );
 
-  //----------------------------------------------------------------------------
-  // Build the URLs
-  //----------------------------------------------------------------------------
-  std::vector<XrdCl::PropertyList*> resultVect;
-
-  std::string dest;
-  if( config.dstFile->Protocol == XrdCpFile::isDir ||
-      config.dstFile->Protocol == XrdCpFile::isFile )
-  {
-    dest = "file://";
-
-    // if it is not an absolute path append cwd
-    if( config.dstFile->Path[0] != '/' )
-    {
-      char buf[FILENAME_MAX];
-      char *cwd = getcwd( buf, FILENAME_MAX );
-      if( !cwd )
-      {
-        XRootDStatus st( stError, XProtocol::mapError( errno ), errno );
-        std::cerr <<  st.GetErrorMessage() << std::endl;
-        return st.GetShellCode();
-      }
-      dest += cwd;
-      dest += '/';
-    }
-  }
-  dest += config.dstFile->Path;
-  AppendCGI( dest, config.dstOpq );
-
-  //----------------------------------------------------------------------------
-  // A destination that ends in / is a directory. Several sources are allowed,
-  // and the source file name is added. root://host/ loses that slash when the
-  // address is parsed, so the slash is read from the text the user typed.
-  //----------------------------------------------------------------------------
-  bool targetIsDir = config.dstFile->Protocol == XrdCpFile::isDir;
-  if( !targetIsDir &&
-      ( config.dstFile->Protocol == XrdCpFile::isXroot ||
-        config.dstFile->Protocol == XrdCpFile::isXroots ||
-        config.dstFile->Protocol == XrdCpFile::isHttp ||
-        config.dstFile->Protocol == XrdCpFile::isHttps ||
-        config.dstFile->Protocol == XrdCpFile::isS3 ) )
-  {
-    URL target( dest );
-    const std::string path = target.GetPath();
-    if( !path.empty() )
-      targetIsDir = path.back() == '/';
-    else
-    {
-      const std::string spec = config.dstFile->Path;
-      const size_t query = spec.find( '?' );
-      const size_t end = query == std::string::npos ? spec.size() : query;
-      targetIsDir = end > 0 && spec[end - 1] == '/';
-    }
-  }
-
-  // A local directory has already been replaced by the files inside it.
-  // The destination of that copy is a directory.
-  if( !targetIsDir && config.Want( XrdCpConfig::DoRecurse ) )
-  {
-    for( XrdCpFile *file = config.srcFile; file; file = file->Next )
-    {
-      if( file->fromDir )
-      {
-        targetIsDir = true;
-        break;
-      }
-    }
-  }
-
-  // root:// and roots:// may already be a directory even when the path does
-  // not end in /. Ask the server, and add the source file name if it is.
-  // http://, https://, and s3:// are directories only when the path ends in /.
-  bool targetExists = false;
-  if( !targetIsDir &&
-      ( config.dstFile->Protocol == XrdCpFile::isXroot ||
-        config.dstFile->Protocol == XrdCpFile::isXroots ) )
-  {
-    URL target( dest );
-    FileSystem fs( target );
-    StatInfo *statInfo = 0;
-    XRootDStatus st = fs.Stat( target.GetPathWithParams(), statInfo );
-    if( st.IsOK() && statInfo )
-    {
-      if( statInfo->TestFlags( StatInfo::IsDir ) )
-        targetIsDir = true;
-      else
-        targetExists = true;
-    }
-    else if( st.errNo == kXR_NotAuthorized )
-    {
-      log->Error( AppMsg, "%s (destination)", st.ToString().c_str() );
-      std::cerr << st.ToStr() << std::endl;
-      delete statInfo;
-      return st.GetShellCode();
-    }
-    delete statInfo;
-  }
-
-  // --continue resumes a copy to an existing file, at the size of the file
-  if( !targetIsDir && targetExists && !force && !continue_ && !recurse &&
-      !zipappend )
-  {
-    XRootDStatus st( stError, errInvalidOp, EEXIST );
-    // Unable to create /tmp/test.txt; file exists
-    log->Error( AppMsg, "%s (destination)", st.ToString().c_str() );
-    std::cerr << "Run: " << st.ToStr() << std::endl;
-    return st.GetShellCode();
-  }
-
-  //----------------------------------------------------------------------------
-  // If we have multiple sources and target is neither a directory nor stdout
-  // then we cannot proceed
-  //----------------------------------------------------------------------------
-  if( CountSources(config.srcFile) > 1 && !targetIsDir &&
-      config.dstFile->Protocol != XrdCpFile::isStdIO )
-  {
-    std::cerr << "Multiple sources were given but target is not a directory.";
-    std::cerr << std::endl;
-    return 50; // generic error
-  }
-
-  //----------------------------------------------------------------------------
-  // If we're doing remote recursive copy, chain all the files (if it's a
-  // directory)
-  //----------------------------------------------------------------------------
-  bool remoteSrcIsDir = false;
-  if( config.Want( XrdCpConfig::DoRecurse ) &&
-      SupportsRemoteDirectories( config.srcFile->Protocol ) )
-  {
-    std::string sourceURL = config.srcFile->Path;
-    AppendCGI( sourceURL, config.srcOpq );
-    URL          source( sourceURL );
-    FileSystem  *fs       = new FileSystem( source );
-    StatInfo    *statInfo = 0;
-
-    XRootDStatus st = fs->Stat( source.GetPathWithParams(), statInfo );
-    if( st.IsOK() && statInfo->TestFlags( StatInfo::IsDir ) )
-    {
-      remoteSrcIsDir = true;
-      // Each listed file name is added to this destination.
-      targetIsDir = true;
-      //------------------------------------------------------------------------
-      // Recursively index the remote directory
-      //------------------------------------------------------------------------
-      delete config.srcFile;
-      std::string url = source.GetURL();
-      config.srcFile = IndexRemote( fs, url,
-                                   url.size() - source.GetParamsAsString().size() );
-      if ( !config.srcFile )
-      {
-        std::cerr << "Error indexing remote directory.";
-        return 50; // generic error
-      }
-    }
-
-    delete fs;
-    delete statInfo;
-  }
-
-  XrdCpFile *sourceFile = config.srcFile;
-  //----------------------------------------------------------------------------
-  // Process the sources
-  //----------------------------------------------------------------------------
-  while( sourceFile )
-  {
-    AdjustFileInfo( sourceFile );
-
-    //--------------------------------------------------------------------------
-    // Create a job for every source
-    //--------------------------------------------------------------------------
-    PropertyList  properties;
-    PropertyList *results = new PropertyList;
-    std::string source = sourceFile->Path;
-    if( sourceFile->Protocol == XrdCpFile::isFile )
-    {
-      // make sure it is an absolute path
-      if( source[0] == '/' )
-        source = "file://" + source;
-      else
-      {
-        char buf[FILENAME_MAX];
-        char *cwd = getcwd( buf, FILENAME_MAX );
-        if( !cwd )
-        {
-          XRootDStatus st( stError, XProtocol::mapError( errno ), errno );
-          std::cerr <<  st.GetErrorMessage() << std::endl;
-          return st.GetShellCode();
-        }
-        source = "file://" + std::string( cwd ) + '/' + source;
-      }
-    }
-
-    if( !remoteSrcIsDir )
-      AppendCGI( source, config.srcOpq );
-
-    std::string sourcePathObf = sourceFile->Path;
-    std::string destPathObf = dest;
-    if( unlikely(log->GetLevel() >= Log::DumpMsg) ) {
-      sourcePathObf = obfuscateAuth(sourcePathObf);
-      destPathObf = obfuscateAuth(destPathObf);
-    }
-    log->Dump( AppMsg, "Processing source entry: %s, type %s, target file: %s, logLevel = %d",
-               sourcePathObf.c_str(), FileType2String( sourceFile->Protocol ),
-               destPathObf.c_str(), log->GetLevel() );
-
-    //--------------------------------------------------------------------------
-    // Set up the job
-    //--------------------------------------------------------------------------
-    std::string target = dest;
-
-
-    bool srcIsDir = false;
-    // if this is local file, for a directory Dlen + Doff will overlap with path size
-    if( strncmp( sourceFile->ProtName, "file", 4 ) == 0 )
-      srcIsDir = std::string( sourceFile->Path ).size() == size_t( sourceFile->Doff + sourceFile->Dlen );
-    // otherwise we are handling a remote file
-    else
-      srcIsDir = remoteSrcIsDir;
-    // if this is a recursive copy make sure we preserve the directory structure
-    if( config.Want( XrdCpConfig::DoRecurse ) && srcIsDir )
-    {
-      // Keep query parameters out of the local directory hierarchy.
-      std::string srcPath = sourceFile->Path;
-      if( remoteSrcIsDir )
-        srcPath = srcPath.substr( 0, srcPath.find( '?' ) );
-      // get the source directory
-      std::string srcDir( srcPath, 0, sourceFile->Doff );
-      // remove the trailing slash
-      if( !srcDir.empty() && srcDir.back() == '/' )
-        srcDir.pop_back();
-      size_t diroff = srcDir.rfind( '/' );
-      // A relative name has no slash, so the whole name is kept. Otherwise move
-      // past the slash in front of the directory name. Keeping it would write
-      // two slashes into the destination.
-      if( diroff == std::string::npos )
-        diroff = 0;
-      else
-        ++diroff;
-      if( target.empty() || target.back() != '/' )
-        target += '/';
-      target += srcPath.substr( diroff );
-      // remove the filename from destination path as it will be appended later anyway
-      target = target.substr( 0 , target.rfind('/') );
-    }
-
-    properties.Set( "source",          source                 );
-    properties.Set( "target",          target                 );
+  auto jobProperties = [&]( const XrdCpBatch::Input &input ) {
+    PropertyList properties;
+    properties.Set( "source",          input.source                 );
+    properties.Set( "target", input.jobTarget.empty() ? input.target : input.jobTarget );
     properties.Set( "force",           force                  );
     properties.Set( "posc",            posc                   );
     properties.Set( "coerce",          coerce                 );
@@ -1024,22 +822,23 @@ int main( int argc, char **argv )
     properties.Set( "dynamicSource",   dynSrc                 );
     properties.Set( "thirdParty",      thirdParty             );
     properties.Set( "thirdPartyMode",  thirdPartyMode         );
-    properties.Set( "checkSumMode",    checkSumMode           );
-    properties.Set( "checkSumType",    checkSumType           );
-    properties.Set( "checkSumPreset",  checkSumPreset         );
+    properties.Set( "checkSumMode",    input.checksumMode     );
+    properties.Set( "checkSumType",    input.checksumType     );
+    properties.Set( "checkSumPreset",  input.checksumPreset   );
     properties.Set( "chunkSize",       chunkSize              );
     properties.Set( "parallelChunks",  parallelChunks         );
     properties.Set( "zipArchive",      zip                    );
     properties.Set( "xcp",             xcp                    );
     properties.Set( "xcpBlockSize",    blockSize              );
     properties.Set( "delegate",        delegate               );
-    properties.Set( "targetIsDir",     targetIsDir            );
+    properties.Set( "targetIsDir",     input.targetIsDir      );
     properties.Set( "preserveXAttr",   preserveXAttr          );
     properties.Set( "xrate",           config.xRate           );
     properties.Set( "xrateThreshold",  config.xRateThreshold  );
     properties.Set( "rmOnBadCksum",    rmOnBadCksum           );
     properties.Set( "continue",        continue_              );
     properties.Set( "zipAppend",       zipappend              );
+    properties.Set( "recursive",       recurse                );
     properties.Set( "addcksums",       config.AddCksVal       );
     properties.Set( "doServer",        doserver               );
 
@@ -1052,14 +851,334 @@ int main( int argc, char **argv )
     if( !thirdPartyTokenFile.empty() )
       properties.Set( "thirdPartyTokenFile",  thirdPartyTokenFile  );
 
-    XRootDStatus st = process.AddJob( properties, results );
-    if( !st.IsOK() )
+    if( !input.checksumVerify.empty() )
+      properties.Set( "checkSumVerify", input.checksumVerify );
+    return properties;
+  };
+
+  //----------------------------------------------------------------------------
+  // Build the URLs
+  //----------------------------------------------------------------------------
+  std::vector<XrdCl::PropertyList*> resultVect;
+
+  if( config.JobsFile.empty() )
+  {
+    std::string dest;
+    if( config.dstFile->Protocol == XrdCpFile::isDir ||
+        config.dstFile->Protocol == XrdCpFile::isFile )
     {
-      std::cerr << "AddJob " << source << " -> " << target << ": ";
-      std::cerr << st.ToStr() << std::endl;
+      dest = "file://";
+
+      // if it is not an absolute path append cwd
+      if( config.dstFile->Path[0] != '/' )
+      {
+        char buf[FILENAME_MAX];
+        char *cwd = getcwd( buf, FILENAME_MAX );
+        if( !cwd )
+        {
+          XRootDStatus st( stError, XProtocol::mapError( errno ), errno );
+          std::cerr <<  st.GetErrorMessage() << std::endl;
+          return st.GetShellCode();
+        }
+        dest += cwd;
+        dest += '/';
+      }
     }
+    dest += config.dstFile->Path;
+    AppendCGI( dest, config.dstOpq );
+
+    //----------------------------------------------------------------------------
+    // A destination that ends in / is a directory. Several sources are allowed,
+    // and the source file name is added. root://host/ loses that slash when the
+    // address is parsed, so the slash is read from the text the user typed.
+    //----------------------------------------------------------------------------
+    bool targetIsDir = config.dstFile->Protocol == XrdCpFile::isDir ||
+                       config.dstFile->Protocol == XrdCpFile::isStdIO;
+    if( !targetIsDir &&
+        ( config.dstFile->Protocol == XrdCpFile::isXroot ||
+          config.dstFile->Protocol == XrdCpFile::isXroots ||
+          config.dstFile->Protocol == XrdCpFile::isHttp ||
+          config.dstFile->Protocol == XrdCpFile::isHttps ||
+          config.dstFile->Protocol == XrdCpFile::isS3 ) )
+    {
+      URL target( dest );
+      const std::string path = target.GetPath();
+      if( !path.empty() )
+        targetIsDir = path.back() == '/';
+      else
+      {
+        const std::string spec = config.dstFile->Path;
+        const size_t query = spec.find( '?' );
+        const size_t end = query == std::string::npos ? spec.size() : query;
+        targetIsDir = end > 0 && spec[end - 1] == '/';
+      }
+    }
+
+    // A local directory has already been replaced by the files inside it.
+    // The destination of that copy is a directory.
+    if( !targetIsDir && config.Want( XrdCpConfig::DoRecurse ) )
+    {
+      for( XrdCpFile *file = config.srcFile; file; file = file->Next )
+      {
+        if( file->fromDir )
+        {
+          targetIsDir = true;
+          break;
+        }
+      }
+    }
+
+    // root:// and roots:// may already be a directory even when the path does
+    // not end in /. Ask the server, and add the source file name if it is.
+    // http://, https://, and s3:// are directories only when the path ends in /.
+    bool targetExists = false;
+    if( !targetIsDir &&
+        ( config.dstFile->Protocol == XrdCpFile::isXroot ||
+          config.dstFile->Protocol == XrdCpFile::isXroots ) )
+    {
+      URL target( dest );
+      FileSystem fs( target );
+      StatInfo *statInfo = 0;
+      XRootDStatus st = fs.Stat( target.GetPathWithParams(), statInfo );
+      if( st.IsOK() && statInfo )
+      {
+        if( statInfo->TestFlags( StatInfo::IsDir ) )
+          targetIsDir = true;
+        else
+          targetExists = true;
+      }
+      else if( st.errNo == kXR_NotAuthorized && !config.Json )
+      {
+        log->Error( AppMsg, "%s (destination)", st.ToString().c_str() );
+        std::cerr << st.ToStr() << std::endl;
+        delete statInfo;
+        return st.GetShellCode();
+      }
+      delete statInfo;
+    }
+
+    // --continue resumes a copy to an existing file, at the size of the file
+    if( !targetIsDir && targetExists && !force && !continue_ && !recurse &&
+        !zipappend && !config.Json )
+    {
+      XRootDStatus st( stError, errInvalidOp, EEXIST );
+      // Unable to create /tmp/test.txt; file exists
+      log->Error( AppMsg, "%s (destination)", st.ToString().c_str() );
+      std::cerr << "Run: " << XrdCpBatch::SanitizeMessage(st.ToStr(), inputs) << std::endl;
+      return st.GetShellCode();
+    }
+
+    //----------------------------------------------------------------------------
+    // If we have multiple sources and target is neither a directory nor stdout
+    // then we cannot proceed
+    //----------------------------------------------------------------------------
+    if( CountSources(config.srcFile) > 1 && !targetIsDir &&
+        config.dstFile->Protocol != XrdCpFile::isStdIO )
+    {
+      std::cerr << "Multiple sources were given but target is not a directory.";
+      std::cerr << std::endl;
+      return 50; // generic error
+    }
+
+    //----------------------------------------------------------------------------
+    // If we're doing remote recursive copy, chain all the files (if it's a
+    // directory)
+    //----------------------------------------------------------------------------
+    bool remoteSrcIsDir = false;
+    if( config.Want( XrdCpConfig::DoRecurse ) &&
+        SupportsRemoteDirectories( config.srcFile->Protocol ) )
+    {
+      std::string sourceURL = config.srcFile->Path;
+      AppendCGI( sourceURL, config.srcOpq );
+      URL          source( sourceURL );
+      FileSystem  *fs       = new FileSystem( source );
+      StatInfo    *statInfo = 0;
+
+      XRootDStatus st = fs->Stat( source.GetPathWithParams(), statInfo );
+      if( st.IsOK() && statInfo->TestFlags( StatInfo::IsDir ) )
+      {
+        remoteSrcIsDir = true;
+        // Each listed file name is added to this destination.
+        targetIsDir = true;
+        //------------------------------------------------------------------------
+        // Recursively index the remote directory
+        //------------------------------------------------------------------------
+        delete config.srcFile;
+        std::string url = source.GetURL();
+        config.srcFile = IndexRemote( fs, url,
+                                     url.size() - source.GetParamsAsString().size() );
+        if ( !config.srcFile )
+        {
+          std::cerr << "Error indexing remote directory.";
+          return 50; // generic error
+        }
+      }
+
+      delete fs;
+      delete statInfo;
+    }
+
+    XrdCpFile *sourceFile = config.srcFile;
+    //----------------------------------------------------------------------------
+    // Process the sources
+    //----------------------------------------------------------------------------
+    while( sourceFile )
+    {
+      AdjustFileInfo( sourceFile );
+
+      //--------------------------------------------------------------------------
+      // Create a job for every source
+      //--------------------------------------------------------------------------
+      std::string source = sourceFile->Path;
+      if( sourceFile->Protocol == XrdCpFile::isFile )
+      {
+        // make sure it is an absolute path
+        if( source[0] == '/' )
+          source = "file://" + source;
+        else
+        {
+          char buf[FILENAME_MAX];
+          char *cwd = getcwd( buf, FILENAME_MAX );
+          if( !cwd )
+          {
+            XRootDStatus st( stError, XProtocol::mapError( errno ), errno );
+            std::cerr <<  st.GetErrorMessage() << std::endl;
+            return st.GetShellCode();
+          }
+          source = "file://" + std::string( cwd ) + '/' + source;
+        }
+      }
+
+      if( !remoteSrcIsDir )
+        AppendCGI( source, config.srcOpq );
+
+      std::string sourcePathObf = sourceFile->Path;
+      std::string destPathObf = dest;
+      sourcePathObf = XrdCpBatch::SanitizeURL(sourcePathObf);
+      destPathObf = XrdCpBatch::SanitizeURL(destPathObf);
+      log->Dump( AppMsg, "Processing source entry: %s, type %s, target file: %s, logLevel = %d",
+                 sourcePathObf.c_str(), FileType2String( sourceFile->Protocol ),
+                 destPathObf.c_str(), log->GetLevel() );
+
+      //--------------------------------------------------------------------------
+      // Set up the job
+      //--------------------------------------------------------------------------
+      std::string target = dest;
+
+      bool srcIsDir = false;
+      // if this is local file, for a directory Dlen + Doff will overlap with path size
+      if( strncmp( sourceFile->ProtName, "file", 4 ) == 0 )
+        srcIsDir = std::string( sourceFile->Path ).size() == size_t( sourceFile->Doff + sourceFile->Dlen );
+      // otherwise we are handling a remote file
+      else
+        srcIsDir = remoteSrcIsDir;
+      // if this is a recursive copy make sure we preserve the directory structure
+      if( config.Want( XrdCpConfig::DoRecurse ) && srcIsDir )
+      {
+        // Keep query parameters out of the local directory hierarchy.
+        std::string srcPath = sourceFile->Path;
+        if( remoteSrcIsDir )
+          srcPath = srcPath.substr( 0, srcPath.find( '?' ) );
+        // get the source directory
+        std::string srcDir( srcPath, 0, sourceFile->Doff );
+        // remove the trailing slash
+        if( !srcDir.empty() && srcDir.back() == '/' )
+          srcDir.pop_back();
+        size_t diroff = srcDir.rfind( '/' );
+        // A relative name has no slash, so the whole name is kept. Otherwise move
+        // past the slash in front of the directory name. Keeping it would write
+        // two slashes into the destination.
+        if( diroff == std::string::npos )
+          diroff = 0;
+        else
+          ++diroff;
+        if( target.empty() || target.back() != '/' )
+          target += '/';
+        target += srcPath.substr( diroff );
+        // remove the filename from destination path as it will be appended later anyway
+        target = target.substr( 0 , target.rfind('/') );
+      }
+      AppendCGI( target, config.dstOpq );
+
+      XrdCpBatch::Input input = defaults;
+      input.source = source;
+      input.target = target;
+      input.jobTarget = target;
+      input.targetIsDir = targetIsDir;
+      input.usePreparedTarget = true;
+      // Mirror CopyProcess's basename expansion for the result's exact target.
+      if( targetIsDir )
+      {
+        URL targetURL( input.target );
+        URL sourceURL( input.source );
+        auto basename = sourceURL.GetPath().substr( sourceURL.GetPath().rfind('/') + 1 );
+        targetURL.SetPath( targetURL.GetPath() + '/' + basename );
+        input.target = targetURL.GetURL();
+      }
+      inputs.push_back( std::move(input) );
+      sourceFile = sourceFile->Next;
+    }
+
+  }
+
+  // Validate every job before any preparation can open a destination. In
+  // particular, a malformed later checksum must not leave a partial batch.
+  std::vector<PropertyList> properties;
+  for( auto &input : inputs )
+  {
+    if( !config.JobsFile.empty() )
+    {
+      AppendCGI( input.source, config.srcOpq );
+      AppendCGI( input.target, config.dstOpq );
+      if( URL(input.source).GetParams().count("xrdcl.unzip") ||
+          URL(input.target).GetParams().count("xrdcl.unzip") )
+      {
+        std::cerr << "Manifest entries do not support ZIP copies." << std::endl;
+        return 50;
+      }
+    }
+    PropertyList job = jobProperties( input );
+    XRootDStatus validation = ValidateCopyChecksum( job );
+    if( !validation.IsOK() )
+    {
+      std::cerr << "Invalid job checksum: "
+                << XrdCpBatch::SanitizeMessage(validation.GetErrorMessage(), inputs) << std::endl;
+      return validation.GetShellCode();
+    }
+    properties.push_back( std::move(job) );
+  }
+  for( size_t i = 0; i < properties.size(); ++i )
+  {
+    PropertyList *results = new PropertyList;
+    XRootDStatus status = process.AddJob( properties[i], results );
     resultVect.push_back( results );
-    sourceFile = sourceFile->Next;
+    if( !status.IsOK() )
+    {
+      results->Set( "status", status );
+      results->Set( "jobState", "failed" );
+      // All jobs have already been validated. A failure to register a job
+      // cannot produce an incomplete execution of the requested batch.
+      for( auto *other : resultVect )
+        if( other->Get<std::string>("jobState") == "queued" )
+        {
+          other->Set( "status", XRootDStatus(stError, errOperationInterrupted, 0,
+                                             "Batch registration failed.") );
+          other->Set( "jobState", "skipped" );
+        }
+      for( size_t j = resultVect.size(); j < inputs.size(); ++j )
+      {
+        auto *other = new PropertyList;
+        other->Set( "status", XRootDStatus(stError, errOperationInterrupted, 0,
+                                           "Batch registration failed.") );
+        other->Set( "jobState", "skipped" );
+        resultVect.push_back( other );
+      }
+      if( config.Json ) XrdCpBatch::PrintResults( inputs, resultVect );
+      std::cerr << "Unable to register copy job: "
+                << XrdCpBatch::SanitizeMessage(status.GetErrorMessage(), inputs) << std::endl;
+      CleanUpResults( resultVect );
+      return status.GetShellCode();
+    }
   }
 
   //----------------------------------------------------------------------------
@@ -1068,6 +1187,8 @@ int main( int argc, char **argv )
   PropertyList processConfig;
   processConfig.Set( "jobType", "configuration" );
   processConfig.Set( "parallel", config.Parallel );
+  processConfig.Set( "stopOnFailure", config.AbortOnFailure );
+  processConfig.Set( "continueOnPrepareError", !config.JobsFile.empty() || config.Json );
   process.AddJob( processConfig, 0 );
 
   //----------------------------------------------------------------------------
@@ -1076,38 +1197,51 @@ int main( int argc, char **argv )
   XRootDStatus st = process.Prepare();
   if( !st.IsOK() )
   {
+    if( config.Json ) XrdCpBatch::PrintResults( inputs, resultVect );
     CleanUpResults( resultVect );
-    std::cerr << "Prepare: " << st.ToStr() << std::endl;
+    std::cerr << "Prepare: " << XrdCpBatch::SanitizeMessage(st.ToStr(), inputs) << std::endl;
     return st.GetShellCode();
   }
 
   st = process.Run( &progress );
+  if( config.Json ) XrdCpBatch::PrintResults( inputs, resultVect );
   if( !st.IsOK() )
   {
     if( resultVect.size() == 1 )
-      std::cerr << "Run: " << st.ToStr() << std::endl;
+      std::cerr << "Run: " << XrdCpBatch::SanitizeMessage(st.ToStr(), inputs) << std::endl;
     else
     {
       std::vector<XrdCl::PropertyList*>::iterator it;
       uint32_t i = 1;
       uint32_t jobsRun = 0;
       uint32_t errors  = 0;
+      uint32_t skipped = 0;
       for( it = resultVect.begin(); it != resultVect.end(); ++it, ++i )
       {
         if( !(*it)->HasProperty( "status" ) )
           continue;
 
         XRootDStatus st = (*it)->Get<XRootDStatus>("status");
+        std::string state;
+        (*it)->Get( "jobState", state );
+        if( state == "skipped" )
+        {
+          ++skipped;
+          continue;
+        }
         if( !st.IsOK() )
         {
-          std::cerr << "Job #" << i << ": " << st.ToStr();
+          std::cerr << "Job #" << i << ": " << XrdCpBatch::SanitizeMessage(st.ToStr(), inputs) << std::endl;
           ++errors;
         }
         ++jobsRun;
       }
       std::cerr << "Jobs total: " << resultVect.size();
       std::cerr << ", run: " << jobsRun;
-      std::cerr << ", errors: " << errors << std::endl;
+      std::cerr << ", errors: " << errors;
+      if( config.Json || config.AbortOnFailure || !config.JobsFile.empty() )
+        std::cerr << ", skipped: " << skipped;
+      std::cerr << std::endl;
     }
     CleanUpResults( resultVect );
     return st.GetShellCode();

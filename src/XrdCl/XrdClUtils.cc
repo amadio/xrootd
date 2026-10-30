@@ -335,8 +335,13 @@ namespace XrdCl
     algorithm = std::move( elems[0] );
     digest = std::move( elems[1] );
 
+    // Query callers may put opaque arguments in the path. Retain those for
+    // authorization, but never include their values in checksum diagnostics.
+    std::string displayPath = path;
+    size_t query = displayPath.find( '?' );
+    if( query != std::string::npos ) displayPath.erase( query );
     log->Dump( UtilityMsg, "Checksum for %s checksum: %s:%s",
-               path.c_str(), algorithm.c_str(), digest.c_str() );
+               displayPath.c_str(), algorithm.c_str(), digest.c_str() );
 
     return XRootDStatus();
   }

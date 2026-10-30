@@ -141,6 +141,18 @@ namespace XrdCl
       //!                             "target"  - calculate checksum at target
       //! checkSumType   [string]   - type of the checksum to be used
       //! checkSumPreset [string]   - checksum preset
+      //! checkSumVerify [string]   - opt-in "source", "target" or "both"
+      //!                             verification, independent of checkSumMode;
+      //!                             uses checkSumType (including "auto") and
+      //!                             a hex checkSumPreset (required for source
+      //!                             or target, optional for both)
+      //!                             source is checked before opening target;
+      //!                             target after the final successful transfer;
+      //!                             both without a preset compares the two
+      //!                             actual checksums. Unsupported for stdio,
+      //!                             Metalink, ZIP, dynamic or recursive copies.
+      //! rmOnBadCksum   [bool]     - remove target on a post-transfer checksum
+      //!                             mismatch (default false)
       //! chunkSize      [uint32_t] - size of a copy chunks in bytes
       //! parallelChunks [uint8_t]  - number of chunks that should be requested
       //!                             in parallel
@@ -155,12 +167,20 @@ namespace XrdCl
       //!
       //! jobType        [string]   - "configuration" - for configuraion
       //! parallel       [uint8_t]  - nomber of copy jobs to be run in parallel
+      //! stopOnFailure  [bool]     - stop admitting jobs after a failed job;
+      //!                             active jobs finish (default false)
+      //! continueOnPrepareError [bool] - record each preparation failure and
+      //!                             prepare other jobs (default false)
       //!
       //! Results:
       //! sourceCheckSum [string]   - checksum at source, if requested
       //! targetCheckSum [string]   - checksum at target, if requested
+      //! checkSumRemovalStatus [XRootDStatus] - result of target cleanup after
+      //!                             a checkSumVerify mismatch, if requested
       //! size           [uint64_t] - file size
       //! status         [XRootDStatus] - status of the copy operation
+      //! jobState       [string]   - queued, running, succeeded, failed or skipped;
+      //!                             skipped status is errOperationInterrupted
       //! sources        [vector<string>] - all sources used
       //! realTarget     [string]   - the actual disk server target
       //------------------------------------------------------------------------
@@ -168,12 +188,18 @@ namespace XrdCl
                            PropertyList       *results );
 
       //------------------------------------------------------------------------
-      // Prepare the copy jobs
+      //! Prepare the copy jobs. With continueOnPrepareError, individual errors
+      //! are recorded in the corresponding result and preparation returns OK;
+      //! Run() returns the first failed input's status after processing the batch.
+      //! Calling Prepare() again rebuilds jobs from their original properties.
       //------------------------------------------------------------------------
       XRootDStatus Prepare();
 
       //------------------------------------------------------------------------
       //! Run the copy jobs
+      //! With stopOnFailure, a preparation failure prevents all transfers.
+      //! BeginJob/EndJob also report failed preparation and skipped jobs, using
+      //! the same one-based input job number as successful jobs.
       //------------------------------------------------------------------------
       XRootDStatus Run( CopyProgressHandler *handler );
 

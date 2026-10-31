@@ -36,7 +36,8 @@ cmake -S xrootd -B build -DENABLE_FIO_ENGINE=ON -DFIO_SOURCE_DIR=/path/to/fio
 ```
 
 The engine is skipped (with a message, not an error) if `fio`/`git` are missing,
-under sanitizer builds, or on non-Linux platforms.
+under sanitizer builds, or on non-Linux platforms. With `-DFORCE_ENABLED=ON`,
+these cases stop the configuration with an error instead.
 
 ## Running
 

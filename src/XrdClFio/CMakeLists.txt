@@ -16,31 +16,39 @@
 #
 # The engine is best-effort: if fio (or git, or the network) is unavailable, or
 # under a sanitizer build, it is skipped with a message rather than failing the
-# whole configure.
+# whole configure. With FORCE_ENABLED, the configure fails instead.
 #-------------------------------------------------------------------------------
 
 set(FIO_SOURCE_DIR "" CACHE PATH
     "Configured fio source tree (with config-host.h); auto-fetched to match the installed fio if empty")
 
+# Skip the engine with a message. With FORCE_ENABLED, stop the configuration
+# instead, as for the other optional components. The return() of a macro
+# leaves the directory.
+macro(fio_engine_skip reason)
+  if(FORCE_ENABLED)
+    message(FATAL_ERROR "XrdClFio: ${reason}")
+  endif()
+  message(STATUS "XrdClFio: ${reason}, skipping fio engine")
+  return()
+endmacro()
+
 # The engine is dlopen'd by the fio binary, which is not sanitizer-instrumented,
 # so an instrumented engine cannot be loaded. Skip under sanitizer builds.
 if(ENABLE_ASAN OR ENABLE_TSAN OR CMAKE_CXX_FLAGS MATCHES "-fsanitize")
-  message(STATUS "XrdClFio: sanitizer build detected, skipping fio engine")
-  return()
+  fio_engine_skip("sanitizer build detected")
 endif()
 
 # fio external engines and the integration test are Linux-only here.
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  message(STATUS "XrdClFio: non-Linux platform, skipping fio engine")
-  return()
+  fio_engine_skip("non-Linux platform")
 endif()
 
 find_program(FIO_EXECUTABLE fio)
 
 if(NOT FIO_SOURCE_DIR)
   if(NOT FIO_EXECUTABLE)
-    message(STATUS "XrdClFio: fio not found and FIO_SOURCE_DIR unset, skipping fio engine")
-    return()
+    fio_engine_skip("fio not found and FIO_SOURCE_DIR unset")
   endif()
 
   # Query the installed fio version and fetch the matching source, since the
@@ -50,8 +58,7 @@ if(NOT FIO_SOURCE_DIR)
     OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 
   if(NOT FIO_VERSION_STRING MATCHES "fio-([0-9]+\\.[0-9]+)")
-    message(STATUS "XrdClFio: could not parse fio version from '${FIO_VERSION_STRING}', skipping fio engine")
-    return()
+    fio_engine_skip("could not parse fio version from '${FIO_VERSION_STRING}'")
   endif()
 
   set(FIO_GIT_TAG "fio-${CMAKE_MATCH_1}")
@@ -60,8 +67,7 @@ if(NOT FIO_SOURCE_DIR)
   if(NOT EXISTS "${FIO_SOURCE_DIR}/fio.h")
     find_program(GIT_EXECUTABLE git)
     if(NOT GIT_EXECUTABLE)
-      message(STATUS "XrdClFio: git not found, cannot fetch fio source, skipping fio engine")
-      return()
+      fio_engine_skip("git not found, cannot fetch fio source")
     endif()
     message(STATUS "XrdClFio: fetching ${FIO_GIT_TAG} source to match the installed fio")
     execute_process(
@@ -69,8 +75,8 @@ if(NOT FIO_SOURCE_DIR)
               https://github.com/axboe/fio.git "${FIO_SOURCE_DIR}"
       RESULT_VARIABLE FIO_CLONE_RC ERROR_VARIABLE FIO_CLONE_ERR OUTPUT_QUIET)
     if(NOT FIO_CLONE_RC EQUAL 0)
-      message(WARNING "XrdClFio: failed to fetch fio source (${FIO_CLONE_ERR}), skipping fio engine")
-      return()
+      string(STRIP "${FIO_CLONE_ERR}" FIO_CLONE_ERR)
+      fio_engine_skip("failed to fetch fio source (${FIO_CLONE_ERR})")
     endif()
   endif()
 endif()
@@ -83,8 +89,7 @@ if(NOT EXISTS "${FIO_SOURCE_DIR}/config-host.h")
 endif()
 
 if(NOT EXISTS "${FIO_SOURCE_DIR}/config-host.h" OR NOT EXISTS "${FIO_SOURCE_DIR}/fio.h")
-  message(WARNING "XrdClFio: fio headers unavailable in '${FIO_SOURCE_DIR}', skipping fio engine")
-  return()
+  fio_engine_skip("fio headers unavailable in '${FIO_SOURCE_DIR}'")
 endif()
 
 message(STATUS "XrdClFio: building fio engine against ${FIO_SOURCE_DIR}")

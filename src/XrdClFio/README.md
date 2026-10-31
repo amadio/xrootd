@@ -116,8 +116,9 @@ See `examples/multifile.fio`.
 | `xrd_workerthreads` | int  | 0       | Number of XrdCl worker threads for completion dispatch (0 = XrdCl default) |
 
 Standard XrdCl environment variables (`XRD_WORKERTHREADS`, `XRD_REQUESTTIMEOUT`,
-credentials, etc.) apply as usual; `xrd_workerthreads` is a convenience that sets
-`XRD_WORKERTHREADS` before XrdCl starts.
+credentials, etc.) apply as usual. `xrd_workerthreads` sets the number of XrdCl
+worker threads before XrdCl starts. All jobs share one XrdCl runtime, thus the
+value of the first job applies, and `XRD_WORKERTHREADS` has precedence.
 
 ## Supported operations
 

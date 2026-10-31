@@ -35,6 +35,8 @@
 // would be parsed with C linkage and fail to compile.
 #include <atomic>
 
+#include "XrdCl/XrdClDefaultEnv.hh"
+#include "XrdCl/XrdClEnv.hh"
 #include "XrdCl/XrdClFile.hh"
 #include "XrdCl/XrdClFileSystem.hh"
 #include "XrdCl/XrdClXRootDResponses.hh"
@@ -314,11 +316,13 @@ static int fio_xrd_setup(struct thread_data *td)
 	// so run all fio jobs as threads sharing a single XrdCl runtime.
 	td->o.use_thread = 1;
 
-	if (o && o->workerthreads) {
-		char buf[32];
-		snprintf(buf, sizeof(buf), "%u", o->workerthreads);
-		setenv("XRD_WORKERTHREADS", buf, 1);
-	}
+	// XrdCl reads the XRD_* variables when fio loads the engine, thus a
+	// setenv() here has no effect. Put the value in the XrdCl environment
+	// before the first request below starts the PostMaster. The value of the
+	// first job applies to all jobs, and XRD_WORKERTHREADS has precedence.
+	if (o && o->workerthreads)
+		XrdCl::DefaultEnv::GetEnv()->PutInt("WorkerThreads",
+		                                    (int) o->workerthreads);
 
 	// An engine with a setup hook must set the size of each file itself:
 	// fio then does not call get_file_sizes(), the only caller of

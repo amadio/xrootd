@@ -27,13 +27,18 @@ cmake --build build --target fio-xrootd
 
 With no `FIO_SOURCE_DIR` given, CMake locates the installed `fio`, queries its
 version, and fetches the matching fio source (a shallow `git clone`) to build
-against. To build against an existing, already-configured fio checkout instead
+against. The build directory keeps the tag of the fetched source, and a
+configure after an upgrade of `fio` fetches the new source. To build against an existing, already-configured fio checkout instead
 (offline, or a custom version), pass it explicitly:
 
 ```sh
 cd /path/to/fio && ./configure          # once, to generate config-host.h
 cmake -S xrootd -B build -DENABLE_FIO_ENGINE=ON -DFIO_SOURCE_DIR=/path/to/fio
 ```
+
+The tests then run the `fio` built in that checkout. Without one, they run the
+installed `fio` if its version is the version of the checkout. Otherwise, CMake
+warns and disables the tests of the engine.
 
 The engine is skipped (with a message, not an error) if `fio`/`git` are missing,
 under sanitizer builds, or on non-Linux platforms. With `-DFORCE_ENABLED=ON`,

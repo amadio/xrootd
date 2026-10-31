@@ -19,6 +19,7 @@
 # whole configure. With FORCE_ENABLED, the configure fails instead.
 #-------------------------------------------------------------------------------
 
+set(FIO_GIT_TAG "")
 set(FIO_SOURCE_DIR "" CACHE PATH
     "Configured fio source tree (with config-host.h); auto-fetched to match the installed fio if empty")
 
@@ -33,6 +34,26 @@ macro(fio_engine_skip reason)
   return()
 endmacro()
 
+# Print the version "fio-X.Y" of a fio binary, or of a fio source tree.
+function(fio_version out what)
+  set(version "")
+  if(IS_DIRECTORY "${what}")
+    if(EXISTS "${what}/FIO-VERSION-GEN")
+      file(STRINGS "${what}/FIO-VERSION-GEN" line REGEX "^DEF_VER=")
+      if(line MATCHES "fio-([0-9]+\\.[0-9]+)")
+        set(version "fio-${CMAKE_MATCH_1}")
+      endif()
+    endif()
+  else()
+    execute_process(COMMAND ${what} --version
+      OUTPUT_VARIABLE text OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(text MATCHES "fio-([0-9]+\\.[0-9]+)")
+      set(version "fio-${CMAKE_MATCH_1}")
+    endif()
+  endif()
+  set(${out} "${version}" PARENT_SCOPE)
+endfunction()
+
 # The engine is dlopen'd by the fio binary, which is not sanitizer-instrumented,
 # so an instrumented engine cannot be loaded. Skip under sanitizer builds.
 if(ENABLE_ASAN OR ENABLE_TSAN OR CMAKE_CXX_FLAGS MATCHES "-fsanitize")
@@ -46,29 +67,38 @@ endif()
 
 find_program(FIO_EXECUTABLE fio)
 
+if(FIO_EXECUTABLE)
+  fio_version(FIO_BINARY_VERSION ${FIO_EXECUTABLE})
+endif()
+
 if(NOT FIO_SOURCE_DIR)
   if(NOT FIO_EXECUTABLE)
     fio_engine_skip("fio not found and FIO_SOURCE_DIR unset")
   endif()
 
-  # Query the installed fio version and fetch the matching source, since the
-  # engine's FIO_IOOPS_VERSION must equal the running fio's.
-  execute_process(COMMAND ${FIO_EXECUTABLE} --version
-    OUTPUT_VARIABLE FIO_VERSION_STRING
-    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-
-  if(NOT FIO_VERSION_STRING MATCHES "fio-([0-9]+\\.[0-9]+)")
-    fio_engine_skip("could not parse fio version from '${FIO_VERSION_STRING}'")
+  # Fetch the source that matches the installed fio, since the engine's
+  # FIO_IOOPS_VERSION must equal the running fio's.
+  if(NOT FIO_BINARY_VERSION)
+    fio_engine_skip("could not get the version of ${FIO_EXECUTABLE}")
   endif()
 
-  set(FIO_GIT_TAG "fio-${CMAKE_MATCH_1}")
+  set(FIO_GIT_TAG "${FIO_BINARY_VERSION}")
   set(FIO_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/fio-src")
 
-  if(NOT EXISTS "${FIO_SOURCE_DIR}/fio.h")
+  # The stamp file holds the tag of the fetched source. After an upgrade of
+  # fio, the tag differs, and the old source goes away.
+  set(FIO_TAG_FILE "${FIO_SOURCE_DIR}/.xrootd-fio-tag")
+  set(FIO_FETCHED_TAG "")
+  if(EXISTS "${FIO_TAG_FILE}")
+    file(STRINGS "${FIO_TAG_FILE}" FIO_FETCHED_TAG LIMIT_COUNT 1)
+  endif()
+
+  if(NOT FIO_FETCHED_TAG STREQUAL FIO_GIT_TAG OR NOT EXISTS "${FIO_SOURCE_DIR}/fio.h")
     find_program(GIT_EXECUTABLE git)
     if(NOT GIT_EXECUTABLE)
       fio_engine_skip("git not found, cannot fetch fio source")
     endif()
+    file(REMOVE_RECURSE "${FIO_SOURCE_DIR}")
     message(STATUS "XrdClFio: fetching ${FIO_GIT_TAG} source to match the installed fio")
     execute_process(
       COMMAND ${GIT_EXECUTABLE} clone --depth 1 --branch ${FIO_GIT_TAG}
@@ -76,8 +106,10 @@ if(NOT FIO_SOURCE_DIR)
       RESULT_VARIABLE FIO_CLONE_RC ERROR_VARIABLE FIO_CLONE_ERR OUTPUT_QUIET)
     if(NOT FIO_CLONE_RC EQUAL 0)
       string(STRIP "${FIO_CLONE_ERR}" FIO_CLONE_ERR)
+      file(REMOVE_RECURSE "${FIO_SOURCE_DIR}")
       fio_engine_skip("failed to fetch fio source (${FIO_CLONE_ERR})")
     endif()
+    file(WRITE "${FIO_TAG_FILE}" "${FIO_GIT_TAG}\n")
   endif()
 endif()
 
@@ -90,6 +122,24 @@ endif()
 
 if(NOT EXISTS "${FIO_SOURCE_DIR}/config-host.h" OR NOT EXISTS "${FIO_SOURCE_DIR}/fio.h")
   fio_engine_skip("fio headers unavailable in '${FIO_SOURCE_DIR}'")
+endif()
+
+# The tests must run a fio of the version of the source tree. A fetched tree
+# matches the installed fio. For a tree given in FIO_SOURCE_DIR, use the fio
+# built in the tree, else the installed fio if its version matches.
+if(FIO_GIT_TAG)
+  set(FIO_TEST_EXECUTABLE "${FIO_EXECUTABLE}")
+elseif(EXISTS "${FIO_SOURCE_DIR}/fio" AND NOT IS_DIRECTORY "${FIO_SOURCE_DIR}/fio")
+  set(FIO_TEST_EXECUTABLE "${FIO_SOURCE_DIR}/fio")
+else()
+  fio_version(FIO_SOURCE_VERSION "${FIO_SOURCE_DIR}")
+  if(FIO_EXECUTABLE AND FIO_BINARY_VERSION STREQUAL FIO_SOURCE_VERSION)
+    set(FIO_TEST_EXECUTABLE "${FIO_EXECUTABLE}")
+  else()
+    set(FIO_TEST_EXECUTABLE "")
+    message(WARNING "XrdClFio: no fio binary of version '${FIO_SOURCE_VERSION}' "
+      "(installed: '${FIO_BINARY_VERSION}'), the fio engine tests are disabled")
+  endif()
 endif()
 
 message(STATUS "XrdClFio: building fio engine against ${FIO_SOURCE_DIR}")
@@ -131,6 +181,9 @@ target_compile_options(fio-xrootd
 
 # XrdPosix maps the XRootD status codes to POSIX errno values.
 target_link_libraries(fio-xrootd PRIVATE XrdCl XrdPosix XrdUtils)
+
+# The fio binary which the tests run with the engine, empty when there is none.
+set_target_properties(fio-xrootd PROPERTIES FIO_EXECUTABLE "${FIO_TEST_EXECUTABLE}")
 
 # The engine is a plugin loaded by fio, not part of the XRootD runtime, so keep
 # it out of the main library directory.

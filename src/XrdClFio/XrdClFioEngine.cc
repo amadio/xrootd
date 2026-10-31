@@ -251,14 +251,18 @@ void IoHandler::HandleResponse(XrdCl::XRootDStatus *status,
 		io_u->resid = io_u->xfer_buflen;
 	}
 
-	pthread_mutex_lock(&d->lock);
-	flist_add_tail(&iou->list, &d->completed);
-	d->nr_completed++;
-	pthread_mutex_unlock(&d->lock);
-	pthread_cond_signal(&d->cond);
-
 	delete status;
 	delete response;
+
+	// Once the io_u is on the queue, the fio thread can reap it, end the
+	// job, and free both this handler (in its xrd_iou) and d. Thus signal
+	// before the unlock, and use only a local copy of d.
+	struct xrd_data *data = d;
+	pthread_mutex_lock(&data->lock);
+	flist_add_tail(&iou->list, &data->completed);
+	data->nr_completed++;
+	pthread_cond_signal(&data->cond);
+	pthread_mutex_unlock(&data->lock);
 	// handler is embedded in xrd_iou and reused: do not delete this.
 }
 
@@ -278,18 +282,21 @@ public:
 	{
 		int err = xrd_errno(*status);
 
-		pthread_mutex_lock(&d->lock);
+		delete status;
+		delete response;
+
+		// See IoHandler: d can be gone after the unlock.
+		struct xrd_data *data = d;
+		pthread_mutex_lock(&data->lock);
 		for (struct xrd_iou *iou : ious) {
 			iou->io_u->error = err;
 			iou->io_u->resid = err ? iou->io_u->xfer_buflen : 0;
-			flist_add_tail(&iou->list, &d->completed);
-			d->nr_completed++;
+			flist_add_tail(&iou->list, &data->completed);
+			data->nr_completed++;
 		}
-		pthread_mutex_unlock(&d->lock);
-		pthread_cond_broadcast(&d->cond);
+		pthread_cond_broadcast(&data->cond);
+		pthread_mutex_unlock(&data->lock);
 
-		delete status;
-		delete response;
 		delete this;
 	}
 };
@@ -515,8 +522,8 @@ static int fio_xrd_commit(struct thread_data *td)
 					flist_add_tail(&iou->list, &d->completed);
 					d->nr_completed++;
 				}
-				pthread_mutex_unlock(&d->lock);
 				pthread_cond_broadcast(&d->cond);
+				pthread_mutex_unlock(&d->lock);
 				delete h;
 			}
 			i += n;

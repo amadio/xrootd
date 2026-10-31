@@ -192,8 +192,8 @@ into `io_u->xfer_buf`, and `ChunkInfo`/`PageInfo` lengths are used to set
 
 A bare `OpenFlags::Update` **fails with ENOENT** on a file that does not exist
 yet — `Update` opens for read+write but does not create. So write opens try
-`Update` and, on failure, retry with `OpenFlags::New` to create the file without
-truncating an existing one; `xrd_recreate=1` uses `OpenFlags::Delete` to always
+`Update` and, when the file does not exist, retry with `OpenFlags::New` to create
+the file without truncating an existing one. Other errors are not retried; `xrd_recreate=1` uses `OpenFlags::Delete` to always
 start fresh. (`OpenFlags::Read` is used for read-only jobs.)
 
 ### VectorRead mode (`xrd_readv=1`)

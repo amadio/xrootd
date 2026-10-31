@@ -598,7 +598,9 @@ static int fio_xrd_open(struct thread_data *td, struct fio_file *f)
 
 	// For write workloads without recreate, the file may simply not exist yet:
 	// retry with New so it is created (New alone would fail if it existed).
-	if (!st.IsOK() && writing && !o->recreate) {
+	// Retry only for a missing file: after another error, such as a denied
+	// access, the retry fails with "file exists" and hides the real cause.
+	if (!st.IsOK() && writing && !o->recreate && xrd_errno(st) == ENOENT) {
 		delete file;
 		file = new XrdCl::File();
 		st = file->Open(url, flags | XrdCl::OpenFlags::New, mode);

@@ -323,6 +323,27 @@ public:
 //------------------------------------------------------------------------------
 static int fio_xrd_get_file_size(struct thread_data *td, struct fio_file *f);
 
+// fio does the submission accounting only for an engine without a commit hook.
+// This engine has one, thus it sets the issue time of each io_u that it hands
+// to XrdCl, records the submission latency (slat), and counts the io_us of
+// each submission. FIO_ASYNCIO_SETS_ISSUE_TIME tells fio to leave the issue
+// time to the engine.
+static void xrd_set_issue_time(struct thread_data *td, struct io_u *io_u)
+{
+	if (!fio_fill_issue_time(td))
+		return;
+	fio_gettime(&io_u->issue_time, NULL);
+	// only used for iolog
+	if (td->o.read_iolog_file)
+		memcpy(&td->last_issue, &io_u->issue_time, sizeof(io_u->issue_time));
+}
+
+static void xrd_mark_queued(struct thread_data *td, struct io_u *io_u)
+{
+	xrd_set_issue_time(td, io_u);
+	io_u_queued(td, io_u);
+}
+
 static int fio_xrd_setup(struct thread_data *td)
 {
 	struct xrd_options *o = (struct xrd_options *) td->eo;
@@ -476,17 +497,23 @@ static enum fio_q_status fio_xrd_queue(struct thread_data *td,
 		break;
 	case DDIR_TRIM:
 		// XRootD has no file-level trim; treat as an immediate no-op success.
+		xrd_set_issue_time(td, io_u);
 		io_u->error = 0;
 		return FIO_Q_COMPLETED;
 	default:
+		xrd_set_issue_time(td, io_u);
 		io_u->error = EINVAL;
 		return FIO_Q_COMPLETED;
 	}
 
 	if (!st.IsOK()) {
+		xrd_set_issue_time(td, io_u);
 		io_u->error = xrd_errno(st);
 		return FIO_Q_COMPLETED;
 	}
+
+	xrd_mark_queued(td, io_u);
+	io_u_mark_submit(td, 1);
 	return FIO_Q_QUEUED;
 }
 
@@ -538,9 +565,17 @@ static int fio_xrd_commit(struct thread_data *td)
 				++i;
 			}
 
-			VReadHandler *h = new VReadHandler(d, std::move(batch));
+			// The handler can complete and delete itself before
+			// VectorRead() returns, thus give it a copy of the batch.
+			VReadHandler *h = new VReadHandler(d, std::vector<struct xrd_iou *>(batch));
 			XrdCl::XRootDStatus st = f->VectorRead(chunks, 0, h, to);
-			if (!st.IsOK()) {
+			if (st.IsOK()) {
+				for (struct xrd_iou *iou : batch)
+					xrd_mark_queued(td, iou->io_u);
+				io_u_mark_submit(td, batch.size());
+			} else {
+				for (struct xrd_iou *iou : batch)
+					xrd_set_issue_time(td, iou->io_u);
 				int err = xrd_errno(st);
 				pthread_mutex_lock(&d->lock);
 				for (struct xrd_iou *iou : h->ious) {
@@ -770,7 +805,8 @@ extern "C" void get_ioengine(struct ioengine_ops **ops_ptr)
 	memset(ops, 0, sizeof(*ops));
 	ops->name               = "xrootd";
 	ops->version            = FIO_IOOPS_VERSION;
-	ops->flags              = FIO_DISKLESSIO | FIO_NODISKUTIL;
+	ops->flags              = FIO_DISKLESSIO | FIO_NODISKUTIL |
+	                          FIO_ASYNCIO_SETS_ISSUE_TIME;
 	ops->setup              = fio_xrd_setup;
 	ops->init               = fio_xrd_init;
 	ops->post_init          = fio_xrd_post_init;

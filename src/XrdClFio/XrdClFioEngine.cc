@@ -38,6 +38,8 @@
 #include "XrdCl/XrdClFileSystem.hh"
 #include "XrdCl/XrdClXRootDResponses.hh"
 #include "XrdCl/XrdClURL.hh"
+#include "XrdOuc/XrdOucECMsg.hh"
+#include "XrdPosix/XrdPosixMap.hh"
 
 // fio's C headers. Wrapped in extern "C" so the referenced fio symbols
 // (log_err, __td_verror, ...) keep C linkage and resolve against the fio binary
@@ -205,12 +207,17 @@ static std::string xrd_url(const char *name)
 	return url;
 }
 
-// Translate an XRootDStatus into a POSIX errno for fio.
+// Translate an XRootDStatus into a POSIX errno for fio. For an error response
+// of the server, errNo holds a kXR_* code, not an errno, thus fio would print
+// "Unknown error 3011" and ignore_error= would never match. XrdPosixMap maps
+// both the server codes and the client codes.
 static inline int xrd_errno(const XrdCl::XRootDStatus &st)
 {
 	if (st.IsOK())
 		return 0;
-	return st.errNo ? (int) st.errNo : EIO;
+	XrdOucECMsg ecm;
+	int err = -XrdPosixMap::Result(st, ecm);
+	return err > 0 ? err : EIO;
 }
 
 void IoHandler::HandleResponse(XrdCl::XRootDStatus *status,

@@ -124,7 +124,8 @@ target_compile_options(fio-xrootd
     -Wno-pointer-arith
 )
 
-target_link_libraries(fio-xrootd PRIVATE XrdCl)
+# XrdPosix maps the XRootD status codes to POSIX errno values.
+target_link_libraries(fio-xrootd PRIVATE XrdCl XrdPosix XrdUtils)
 
 # The engine is a plugin loaded by fio, not part of the XRootD runtime, so keep
 # it out of the main library directory.

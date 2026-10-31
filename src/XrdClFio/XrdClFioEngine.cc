@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cerrno>
+#include <memory>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -296,6 +297,8 @@ public:
 //------------------------------------------------------------------------------
 // Engine entry points
 //------------------------------------------------------------------------------
+static int fio_xrd_get_file_size(struct thread_data *td, struct fio_file *f);
+
 static int fio_xrd_setup(struct thread_data *td)
 {
 	struct xrd_options *o = (struct xrd_options *) td->eo;
@@ -308,6 +311,35 @@ static int fio_xrd_setup(struct thread_data *td)
 		char buf[32];
 		snprintf(buf, sizeof(buf), "%u", o->workerthreads);
 		setenv("XRD_WORKERTHREADS", buf, 1);
+	}
+
+	// An engine with a setup hook must set the size of each file itself:
+	// fio then does not call get_file_sizes(), the only caller of
+	// ->get_file_size(). Without the size, a read job without size= fails,
+	// and fio cannot place the I/O of file_append= or offset=N%.
+	struct fio_file *f;
+	unsigned int i;
+	for_each_file(td, f, i) {
+		if (fio_xrd_get_file_size(td, f))
+			return 1;
+	}
+	return 0;
+}
+
+// fio calls this hook after it computes the range of each file. The real size
+// limits the offsets that fio generates: a read stays within the data of the
+// file, but a write can extend the file up to the end of the range of the job.
+static int fio_xrd_post_init(struct thread_data *td)
+{
+	if (!td_write(td))
+		return 0;
+
+	struct fio_file *f;
+	unsigned int i;
+	for_each_file(td, f, i) {
+		uint64_t end = f->file_offset + f->io_size;
+		if (f->real_file_size < end)
+			f->real_file_size = end;
 	}
 	return 0;
 }
@@ -590,21 +622,37 @@ static int fio_xrd_close(struct thread_data *td, struct fio_file *f)
 
 static int fio_xrd_get_file_size(struct thread_data *td, struct fio_file *f)
 {
+	if (fio_file_size_known(f))
+		return 0;
+
 	XrdCl::URL url(xrd_url(f->file_name));
 	if (!url.IsValid()) {
 		log_err("fio: xrootd: invalid URL: %s\n", f->file_name);
+		td_verror(td, EINVAL, "xrd_url");
 		return 1;
 	}
 
 	XrdCl::FileSystem fs(url);
 	XrdCl::StatInfo  *si = nullptr;
-	XrdCl::XRootDStatus st = fs.Stat(url.GetPath(), si);
+	XrdCl::XRootDStatus st = fs.Stat(url.GetPathWithParams(), si);
+	std::unique_ptr<XrdCl::StatInfo> info(si);
 
-	// A missing file is not an error here: write jobs create it and fio uses
-	// the configured size. Report 0 so setup can proceed.
-	f->real_file_size = (st.IsOK() && si) ? si->GetSize() : 0;
+	// A missing file is not an error: a write job creates it, with the size
+	// of the job. This is what fio does for a missing local file.
+	if (!st.IsOK()) {
+		int err = xrd_errno(st);
+		if (err == ENOENT) {
+			f->real_file_size = 0;
+			return 0;
+		}
+		log_err("fio: xrootd: stat %s failed: %s\n",
+		        f->file_name, st.ToStr().c_str());
+		td_verror(td, err, "xrd_stat");
+		return 1;
+	}
 
-	delete si;
+	f->real_file_size = info ? info->GetSize() : 0;
+	fio_file_set_size_known(f);
 	return 0;
 }
 
@@ -615,7 +663,7 @@ static int fio_xrd_unlink(struct thread_data *td, struct fio_file *f)
 		return 1;
 
 	XrdCl::FileSystem fs(url);
-	XrdCl::XRootDStatus st = fs.Rm(url.GetPath());
+	XrdCl::XRootDStatus st = fs.Rm(url.GetPathWithParams());
 	return st.IsOK() ? 0 : 1;
 }
 
@@ -642,6 +690,7 @@ extern "C" void get_ioengine(struct ioengine_ops **ops_ptr)
 	ops->flags              = FIO_DISKLESSIO | FIO_NODISKUTIL;
 	ops->setup              = fio_xrd_setup;
 	ops->init               = fio_xrd_init;
+	ops->post_init          = fio_xrd_post_init;
 	ops->cleanup            = fio_xrd_cleanup;
 	ops->queue              = fio_xrd_queue;
 	ops->commit             = fio_xrd_commit;

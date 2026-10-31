@@ -200,8 +200,10 @@ start fresh. (`OpenFlags::Read` is used for read-only jobs.)
 
 Reads are not submitted in `->queue()`; they are stashed and coalesced into a
 single `VectorRead` per file in `->commit()` (each `ChunkInfo` points at that
-`io_u`'s buffer, so data scatters directly into place). Batches are capped at
-1024 chunks (XrdCl's per-request limit).
+`io_u`'s buffer, so data scatters directly into place). At open, the engine asks
+the data server for its limits (`readv_iov_max` segments of at most
+`readv_ior_max` bytes each). A batch holds at most `readv_iov_max` segments and
+2 GiB in total. A read larger than `readv_ior_max` goes out as a plain `Read`.
 
 ### CI and packaging
 

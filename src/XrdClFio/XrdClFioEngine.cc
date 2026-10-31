@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <mutex>
 #include <unordered_map>
 
 // fio's arch.h includes <atomic> under C++. Pull it (and the other C++ standard
@@ -157,9 +158,23 @@ static struct fio_option options[] = {
 //------------------------------------------------------------------------------
 // Runtime state
 //------------------------------------------------------------------------------
-static const size_t XRD_MAX_VREAD_CHUNKS = 1024;   // XrdCl default per-request cap
+// The limits of a readv request, for a server which does not report them:
+// readv_iov_max is the number of segments, readv_ior_max the size of one
+// segment. The server also limits the total of one readv to 2 GiB, with the
+// 16-byte header of each segment included.
+static const uint32_t XRD_READV_IOV_MAX   = 1024;
+static const uint32_t XRD_READV_IOR_MAX   = 2097136;
+static const uint64_t XRD_READV_TOTAL_MAX = 0x80000000ULL;
+static const uint64_t XRD_READV_SEG_HDR   = 16;
 
 struct xrd_iou;   // forward declaration
+
+// Per-file engine state (FILE_ENG_DATA).
+struct xrd_file {
+	XrdCl::File file;
+	uint32_t    readv_iov_max = XRD_READV_IOV_MAX;
+	uint32_t    readv_ior_max = XRD_READV_IOR_MAX;
+};
 
 // Per-thread engine state (td->io_ops_data).
 struct xrd_data {
@@ -418,7 +433,8 @@ static enum fio_q_status fio_xrd_queue(struct thread_data *td,
 	struct xrd_data    *d   = (struct xrd_data *) td->io_ops_data;
 	struct xrd_options *o   = (struct xrd_options *) td->eo;
 	struct xrd_iou     *iou = (struct xrd_iou *) io_u->engine_data;
-	XrdCl::File        *f   = (XrdCl::File *) FILE_ENG_DATA(io_u->file);
+	struct xrd_file    *xf  = (struct xrd_file *) FILE_ENG_DATA(io_u->file);
+	XrdCl::File        *f   = &xf->file;
 	time_t              to  = (time_t) o->timeout;
 
 	iou->io_u = io_u;
@@ -429,8 +445,9 @@ static enum fio_q_status fio_xrd_queue(struct thread_data *td,
 
 	switch (io_u->ddir) {
 	case DDIR_READ:
-		if (o->readv) {
+		if (o->readv && io_u->xfer_buflen <= xf->readv_ior_max) {
 			// Defer submission; ->commit() issues a single VectorRead.
+			// A read larger than one readv segment goes out alone.
 			flist_add_tail(&iou->list, &d->pending);
 			d->nr_pending++;
 			return FIO_Q_QUEUED;
@@ -483,36 +500,42 @@ static int fio_xrd_commit(struct thread_data *td)
 
 	time_t to = (time_t) o->timeout;
 
-	// Group deferred reads by their XrdCl::File so each file gets its own
+	// Group deferred reads by their file so each file gets its own
 	// VectorRead request(s).
-	std::unordered_map<XrdCl::File *, std::vector<struct xrd_iou *> > groups;
+	std::unordered_map<struct xrd_file *, std::vector<struct xrd_iou *> > groups;
 	struct flist_head *n, *tmp;
 
 	flist_for_each_safe(n, tmp, &d->pending) {
 		struct xrd_iou *iou = flist_entry(n, struct xrd_iou, list);
 		flist_del(n);
 		d->nr_pending--;
-		XrdCl::File *f = (XrdCl::File *) FILE_ENG_DATA(iou->io_u->file);
-		groups[f].push_back(iou);
+		struct xrd_file *xf = (struct xrd_file *) FILE_ENG_DATA(iou->io_u->file);
+		groups[xf].push_back(iou);
 	}
 
 	for (auto &kv : groups) {
-		XrdCl::File                   *f    = kv.first;
+		struct xrd_file               *xf   = kv.first;
+		XrdCl::File                   *f    = &xf->file;
 		std::vector<struct xrd_iou *> &ious = kv.second;
 
 		for (size_t i = 0; i < ious.size(); ) {
-			size_t n = std::min(ious.size() - i, XRD_MAX_VREAD_CHUNKS);
+			// Fill a batch up to the number of segments and the total
+			// size that the server accepts in one readv.
 			XrdCl::ChunkList chunks;
 			std::vector<struct xrd_iou *> batch;
-			chunks.reserve(n);
-			batch.reserve(n);
+			uint64_t total = 0;
 
-			for (size_t j = 0; j < n; ++j) {
-				struct xrd_iou *iou = ious[i + j];
-				chunks.push_back(XrdCl::ChunkInfo(iou->io_u->offset,
-				                                  iou->io_u->xfer_buflen,
-				                                  iou->io_u->xfer_buf));
-				batch.push_back(iou);
+			while (i < ious.size() && chunks.size() < xf->readv_iov_max) {
+				struct io_u *io_u = ious[i]->io_u;
+				uint64_t size = io_u->xfer_buflen + XRD_READV_SEG_HDR;
+				if (!chunks.empty() && total + size > XRD_READV_TOTAL_MAX)
+					break;
+				chunks.push_back(XrdCl::ChunkInfo(io_u->offset,
+				                                  io_u->xfer_buflen,
+				                                  io_u->xfer_buf));
+				batch.push_back(ious[i]);
+				total += size;
+				++i;
 			}
 
 			VReadHandler *h = new VReadHandler(d, std::move(batch));
@@ -530,7 +553,6 @@ static int fio_xrd_commit(struct thread_data *td)
 				pthread_mutex_unlock(&d->lock);
 				delete h;
 			}
-			i += n;
 		}
 	}
 	return 0;
@@ -566,6 +588,51 @@ static struct io_u *fio_xrd_event(struct thread_data *td, int event)
 	return d->events[event];
 }
 
+// Ask the data server of the file for its readv limits. The answer of each
+// server is kept, thus a job with many files asks each server once. A server
+// which does not answer gets the defaults.
+static void xrd_readv_limits(struct xrd_file *xf, time_t timeout)
+{
+	static std::mutex mutex;
+	static std::unordered_map<std::string, std::pair<uint32_t, uint32_t> > known;
+
+	std::string host;
+	if (!xf->file.GetProperty("DataServer", host))
+		return;
+
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		auto it = known.find(host);
+		if (it != known.end()) {
+			xf->readv_iov_max = it->second.first;
+			xf->readv_ior_max = it->second.second;
+			return;
+		}
+	}
+
+	XrdCl::FileSystem fs(XrdCl::URL("root://" + host));
+	XrdCl::Buffer arg, *resp = nullptr;
+	arg.FromString("readv_iov_max readv_ior_max");
+	XrdCl::XRootDStatus st = fs.Query(XrdCl::QueryCode::Config, arg, resp,
+	                                  timeout);
+	std::unique_ptr<XrdCl::Buffer> answer(resp);
+
+	// The server answers one line for each key, with the key itself for
+	// an unknown key, thus parse only numbers.
+	if (st.IsOK() && answer) {
+		unsigned long iov = 0, ior = 0;
+		std::string text = answer->ToString();
+		if (sscanf(text.c_str(), "%lu %lu", &iov, &ior) == 2 &&
+		    iov > 0 && ior > 0 && iov <= UINT32_MAX && ior <= UINT32_MAX) {
+			xf->readv_iov_max = (uint32_t) iov;
+			xf->readv_ior_max = (uint32_t) ior;
+		}
+	}
+
+	std::lock_guard<std::mutex> lock(mutex);
+	known[host] = { xf->readv_iov_max, xf->readv_ior_max };
+}
+
 static int fio_xrd_open(struct thread_data *td, struct fio_file *f)
 {
 	struct xrd_options *o = (struct xrd_options *) td->eo;
@@ -593,41 +660,44 @@ static int fio_xrd_open(struct thread_data *td, struct fio_file *f)
 
 	const std::string url = xrd_url(f->file_name);
 
-	XrdCl::File *file = new XrdCl::File();
-	XrdCl::XRootDStatus st = file->Open(url, flags, mode);
+	struct xrd_file *xf = new xrd_file();
+	XrdCl::XRootDStatus st = xf->file.Open(url, flags, mode);
 
 	// For write workloads without recreate, the file may simply not exist yet:
 	// retry with New so it is created (New alone would fail if it existed).
 	// Retry only for a missing file: after another error, such as a denied
 	// access, the retry fails with "file exists" and hides the real cause.
 	if (!st.IsOK() && writing && !o->recreate && xrd_errno(st) == ENOENT) {
-		delete file;
-		file = new XrdCl::File();
-		st = file->Open(url, flags | XrdCl::OpenFlags::New, mode);
+		delete xf;
+		xf = new xrd_file();
+		st = xf->file.Open(url, flags | XrdCl::OpenFlags::New, mode);
 	}
 
 	if (!st.IsOK()) {
 		log_err("fio: xrootd: open %s failed: %s\n",
 		        f->file_name, st.ToStr().c_str());
-		delete file;
+		delete xf;
 		td_verror(td, xrd_errno(st), "xrd_open");
 		return 1;
 	}
 
-	FILE_SET_ENG_DATA(f, file);
+	if (o->readv)
+		xrd_readv_limits(xf, (time_t) o->timeout);
+
+	FILE_SET_ENG_DATA(f, xf);
 	return 0;
 }
 
 static int fio_xrd_close(struct thread_data *td, struct fio_file *f)
 {
-	XrdCl::File *file = (XrdCl::File *) FILE_ENG_DATA(f);
+	struct xrd_file *xf = (struct xrd_file *) FILE_ENG_DATA(f);
 	int ret = 0;
 
-	if (file) {
-		XrdCl::XRootDStatus st = file->Close();
+	if (xf) {
+		XrdCl::XRootDStatus st = xf->file.Close();
 		if (!st.IsOK())
 			ret = 1;
-		delete file;
+		delete xf;
 		FILE_SET_ENG_DATA(f, NULL);
 	}
 	return ret;

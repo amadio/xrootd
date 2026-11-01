@@ -154,13 +154,19 @@ These are the non-obvious constraints behind the engine's design
 ### Version lock — the engine is tied to one fio version
 
 fio has no stable engine ABI. `FIO_IOOPS_VERSION` is bumped between releases
-(e.g. fio 3.39 → 36, fio 3.42 → 39) and is checked when the engine is loaded, so
-the engine only works with the fio it was built against. This is why the build
-resolves the fio *source* from the installed *binary*'s version rather than from
-a fixed pin, and why there is no packaged/installed engine: it would break on the
-next fio update. If you bump the fio the tests run with, the engine is simply
-rebuilt against the matching source — no code change is normally needed, as the
-engine only touches long-stable `struct` fields.
+(e.g. fio 3.36 → 33, fio 3.38 → 36, fio 3.41 → 39) and is checked when the
+engine is loaded, so the engine only works with the fio it was built against.
+This is why the build resolves the fio *source* from the installed *binary*'s
+version rather than from a fixed pin, and why there is no packaged/installed
+engine: it would break on the next fio update. If you bump the fio the tests run
+with, the engine is simply rebuilt against the matching source.
+
+The engine builds against fio 3.19 and later. CMake passes the version of the
+fio source as `XRD_FIO_VERSION` (major * 100 + minor), and the code follows two
+changes of the engine API with it: the `errdetails` hook has the thread as its
+first argument since fio 3.38, and `FIO_ASYNCIO_SETS_ISSUE_TIME` exists since
+fio 3.32. Before 3.32, fio sets the issue time of an `io_u` again after
+`->queue()`. CMake skips the engine for an older fio.
 
 ### Compiling C++ against fio's C headers
 

@@ -819,7 +819,8 @@ static int fio_xrd_getevents(struct thread_data *td, unsigned int min,
 
 // fio prints the text of this hook after the error of a failed io_u, and frees
 // it. The text of XRootD has the error of the server, for example its path.
-static char *fio_xrd_errdetails(struct thread_data *td, struct io_u *io_u)
+// fio 3.38 added the thread to the arguments of the hook.
+static char *xrd_errdetails(struct io_u *io_u)
 {
 	struct xrd_iou *iou = (struct xrd_iou *) io_u->engine_data;
 
@@ -827,6 +828,18 @@ static char *fio_xrd_errdetails(struct thread_data *td, struct io_u *io_u)
 		return NULL;
 	return strdup(iou->errmsg.c_str());
 }
+
+#if XRD_FIO_VERSION >= 338
+static char *fio_xrd_errdetails(struct thread_data *td, struct io_u *io_u)
+{
+	return xrd_errdetails(io_u);
+}
+#else
+static char *fio_xrd_errdetails(struct io_u *io_u)
+{
+	return xrd_errdetails(io_u);
+}
+#endif
 
 static struct io_u *fio_xrd_event(struct thread_data *td, int event)
 {
@@ -1018,8 +1031,11 @@ extern "C" void get_ioengine(struct ioengine_ops **ops_ptr)
 	memset(ops, 0, sizeof(*ops));
 	ops->name               = "xrootd";
 	ops->version            = FIO_IOOPS_VERSION;
-	ops->flags              = FIO_DISKLESSIO | FIO_NODISKUTIL |
-	                          FIO_ASYNCIO_SETS_ISSUE_TIME;
+	ops->flags              = FIO_DISKLESSIO | FIO_NODISKUTIL;
+#if XRD_FIO_VERSION >= 332
+	// Before fio 3.32, fio sets the issue time again after ->queue().
+	ops->flags             |= FIO_ASYNCIO_SETS_ISSUE_TIME;
+#endif
 	ops->setup              = fio_xrd_setup;
 	ops->init               = fio_xrd_init;
 	ops->post_init          = fio_xrd_post_init;

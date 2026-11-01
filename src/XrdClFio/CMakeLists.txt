@@ -124,6 +124,17 @@ if(NOT EXISTS "${FIO_SOURCE_DIR}/config-host.h" OR NOT EXISTS "${FIO_SOURCE_DIR}
   fio_engine_skip("fio headers unavailable in '${FIO_SOURCE_DIR}'")
 endif()
 
+# The engine supports fio 3.19 and later, and the code follows the changes of
+# the engine API of fio with the version, as major * 100 + minor.
+fio_version(FIO_BUILD_VERSION "${FIO_SOURCE_DIR}")
+if(NOT FIO_BUILD_VERSION MATCHES "^fio-([0-9]+)\\.([0-9]+)$")
+  fio_engine_skip("could not get the version of the fio source in '${FIO_SOURCE_DIR}'")
+endif()
+math(EXPR FIO_VERSION_NUMBER "${CMAKE_MATCH_1} * 100 + ${CMAKE_MATCH_2}")
+if(FIO_VERSION_NUMBER LESS 319)
+  fio_engine_skip("${FIO_BUILD_VERSION} is older than fio-3.19")
+endif()
+
 # The tests must run a fio of the version of the source tree. A fetched tree
 # matches the installed fio. For a tree given in FIO_SOURCE_DIR, use the fio
 # built in the tree, else the installed fio if its version matches.
@@ -170,6 +181,8 @@ target_include_directories(fio-xrootd
 # -Wno-pointer-arith: fio's parse.h (td_var) does void* arithmetic, a GNU
 #   extension flagged by older compilers (e.g. GCC 8 on AlmaLinux 8); it is in
 #   fio's headers, not ours, so silence it for this target.
+target_compile_definitions(fio-xrootd PRIVATE XRD_FIO_VERSION=${FIO_VERSION_NUMBER})
+
 target_compile_options(fio-xrootd
   PRIVATE
     -D_GNU_SOURCE

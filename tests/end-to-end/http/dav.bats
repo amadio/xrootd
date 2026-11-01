@@ -112,6 +112,8 @@ teardown() {
     echo "second" > "$SERVER_DATA$D/multi-upload/multi-two.ref"
     echo "third" > "$SERVER_DATA$D/multi-upload/nested/multi-three.ref"
 
+    # xrdcp refuses a recursive copy to a local directory which does not exist
+    mkdir "$BATS_TEST_TMPDIR/download"
     xrdcp --recursive "$DAV$D/multi-upload" "$BATS_TEST_TMPDIR/download"
     run -0 cmp "$SERVER_DATA$D/multi-upload/multi-one.ref" "$BATS_TEST_TMPDIR/download/multi-upload/multi-one.ref"
     run -0 cmp "$SERVER_DATA$D/multi-upload/multi-two.ref" "$BATS_TEST_TMPDIR/download/multi-upload/multi-two.ref"

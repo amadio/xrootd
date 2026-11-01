@@ -197,6 +197,7 @@ struct xrd_iou {
 	struct io_u          *io_u;
 	IoHandler             handler;
 	std::vector<uint32_t> cksums;   // per-page CRC32C for PgWrite
+	std::string           errmsg;   // the XRootD error, for ->errdetails()
 };
 
 // Normalize a fio file name into an XRootD URL. fio's filename= list is split
@@ -272,6 +273,7 @@ void IoHandler::HandleResponse(XrdCl::XRootDStatus *status,
 	} else {
 		io_u->error = xrd_errno(*status);
 		io_u->resid = io_u->xfer_buflen;
+		iou->errmsg = status->ToStr();
 	}
 
 	delete status;
@@ -304,6 +306,7 @@ public:
 	                    XrdCl::AnyObject    *response) override
 	{
 		int err = xrd_errno(*status);
+		std::string msg = err ? status->ToStr() : std::string();
 
 		delete status;
 		delete response;
@@ -314,6 +317,7 @@ public:
 		for (struct xrd_iou *iou : ious) {
 			iou->io_u->error = err;
 			iou->io_u->resid = err ? iou->io_u->xfer_buflen : 0;
+			iou->errmsg = msg;
 			flist_add_tail(&iou->list, &data->completed);
 			data->nr_completed++;
 		}
@@ -647,6 +651,7 @@ static enum fio_q_status fio_xrd_queue(struct thread_data *td,
 	iou->handler.iou = iou;
 	iou->handler.sync_file = nullptr;
 	iou->handler.timeout = to;
+	iou->errmsg.clear();
 
 	XrdCl::XRootDStatus st;
 
@@ -694,6 +699,7 @@ static enum fio_q_status fio_xrd_queue(struct thread_data *td,
 	if (!st.IsOK()) {
 		xrd_set_issue_time(td, io_u);
 		io_u->error = xrd_errno(st);
+		iou->errmsg = st.ToStr();
 		return FIO_Q_COMPLETED;
 	}
 
@@ -766,6 +772,7 @@ static int fio_xrd_commit(struct thread_data *td)
 				for (struct xrd_iou *iou : h->ious) {
 					iou->io_u->error = err;
 					iou->io_u->resid = iou->io_u->xfer_buflen;
+					iou->errmsg = st.ToStr();
 					flist_add_tail(&iou->list, &d->completed);
 					d->nr_completed++;
 				}
@@ -799,6 +806,17 @@ static int fio_xrd_getevents(struct thread_data *td, unsigned int min,
 	pthread_mutex_unlock(&d->lock);
 
 	return events;
+}
+
+// fio prints the text of this hook after the error of a failed io_u, and frees
+// it. The text of XRootD has the error of the server, for example its path.
+static char *fio_xrd_errdetails(struct thread_data *td, struct io_u *io_u)
+{
+	struct xrd_iou *iou = (struct xrd_iou *) io_u->engine_data;
+
+	if (!iou || iou->errmsg.empty())
+		return NULL;
+	return strdup(iou->errmsg.c_str());
 }
 
 static struct io_u *fio_xrd_event(struct thread_data *td, int event)
@@ -1008,6 +1026,7 @@ extern "C" void get_ioengine(struct ioengine_ops **ops_ptr)
 	ops->commit             = fio_xrd_commit;
 	ops->getevents          = fio_xrd_getevents;
 	ops->event              = fio_xrd_event;
+	ops->errdetails         = fio_xrd_errdetails;
 	ops->open_file          = fio_xrd_open;
 	ops->close_file         = fio_xrd_close;
 	ops->invalidate         = fio_xrd_invalidate;

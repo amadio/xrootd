@@ -13,13 +13,16 @@ export XrdSecPROTOCOL=ztn
 # start_https_cache
 #
 # Start the issuer, the origin and the cache, make the tokens, the test data,
-# and the settings file of the gtests. Export TAPE, the root of the Tape REST
-# API, DISK, the local root of the origin, READ_TOKEN and WRITE_TOKEN, the
-# token files, and ENV_FILE, the settings file.
+# and the settings file of the gtests. Export TAPE, the root of the mock tape
+# of the prepare backend, DISK, the local root of the origin, READ_TOKEN and
+# WRITE_TOKEN, the token files, and ENV_FILE, the settings file.
 start_https_cache() {
     require_plugin libXrdHttp
     require_plugin libXrdAccSciTokens
     require_plugin libXrdHttpTapeApi
+    require_plugin libXrdOfsPrepGPI
+    require_plugin libXrdOfsPrepPersist
+    require_commands python3
     require_plugin libXrdPfc
 
     export TAPE="$BATS_FILE_TMPDIR/tape" DISK="$BATS_FILE_TMPDIR/tape/disk"
@@ -42,7 +45,8 @@ start_https_cache() {
     # servers at a proxy which cannot exist.
     export XRD_HTTPSLOWRATEBYTESSEC=1024 XRD_HTTPSTALLTIMEOUT=2
     local snippets=(http-port.cfg tls.cfg https-tpc.cfg scitokens.cfg authdb.cfg)
-    X509_USER_PROXY=/dev/null/x509 start_server origin "${snippets[@]}" origin.cfg || return 1
+    XRD_PREP_MOCK_ROOT=$TAPE X509_USER_PROXY=/dev/null/x509 \
+        start_server origin "${snippets[@]}" origin.cfg || return 1
     export ORIGIN="https://localhost:$ORIGIN_PORT"
     X509_USER_PROXY=/dev/null/x509 start_server cache cache "${snippets[@]}" ztn.cfg https-cache.cfg || return 1
     unset XRD_HTTPSLOWRATEBYTESSEC XRD_HTTPSTALLTIMEOUT

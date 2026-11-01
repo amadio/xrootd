@@ -6,6 +6,8 @@
 
 load xrdclhttp.bash
 
+# The prepare requests need read access to each path (AOP_Read), which the
+# read token gives
 export BEARER_TOKEN_FILE
 
 # The tests use only HTTPS, where XrdClHttp would present a grid proxy of the
@@ -15,7 +17,7 @@ export X509_USER_PROXY=/dev/null/x509
 setup_file() {
     require_commands curl
     start_https_cache
-    BEARER_TOKEN_FILE=$WRITE_TOKEN
+    BEARER_TOKEN_FILE=$READ_TOKEN
 }
 
 teardown_file() {
@@ -29,14 +31,14 @@ setup() {
     URL="$ORIGIN_HTTPS$P"
 }
 
-# Request the endpoint of the API with the write token and the curl
+# Request the endpoint of the API with the read token and the curl
 # arguments, with the body in body.txt and the headers in headers.txt, and
 # print the HTTP status
 api() {
     local endpoint=$1
     shift
     curl --silent --cacert "$CREDENTIALS/ca.pem" -o body.txt -D headers.txt -w '%{http_code}' \
-        -H "Authorization: Bearer $(<"$WRITE_TOKEN")" "$@" "$ORIGIN_HTTPS/api/v1/$endpoint"
+        -H "Authorization: Bearer $(<"$READ_TOKEN")" "$@" "$ORIGIN_HTTPS/api/v1/$endpoint"
 }
 
 # The archive information of the file of the test
@@ -45,9 +47,36 @@ archive_info() {
     cat body.txt
 }
 
-# Stage the file of the test, and print the identifier of the request
+# Stage the file of the test, wait until the request is complete, and print
+# the identifier of the request. The coordinator of the prepare requests
+# stages the file after it has accepted the request, thus the request is
+# SUBMITTED at first.
 stage() {
-    xrdfs prepare -s "$URL"
+    local id n
+    id=$(xrdfs prepare -s "$URL") || return 1
+    for (( n = 0; n < 50; n++ )); do
+        if xrdfs "$ORIGIN_HTTPS" query prepare "$id" | grep -qF '"state":"COMPLETED"'; then
+            echo "$id"
+            return 0
+        fi
+        sleep 0.2
+    done
+    echo "stage: request $id is not complete after 10 s" >&2
+    return 1
+}
+
+# Evict the file of the test from the stage request $1, and wait until the
+# file is not on disk. The coordinator evicts the file after it has accepted
+# the request, and a query of the request does not show the eviction.
+evict() {
+    local n
+    xrdfs prepare -e "$1" "$URL" || return 1
+    for (( n = 0; n < 50; n++ )); do
+        [[ $(archive_info) != *'"locality":"DISK'* ]] && return 0
+        sleep 0.2
+    done
+    echo "evict: $P is on disk after 10 s" >&2
+    return 1
 }
 
 # Print the file of the test with the read token
@@ -61,7 +90,7 @@ read_file() {
 }
 
 @test "xrdfs prepare -s returns the UUID of the stage request" {
-    run -0 stage
+    run -0 xrdfs prepare -s "$URL"
     assert_output --regexp '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 }
 
@@ -105,14 +134,14 @@ read_file() {
 
 @test "archiveinfo reports a file evicted with xrdfs prepare -e on tape only" {
     id=$(stage)
-    xrdfs prepare -e "$id" "$URL"
+    evict "$id"
     run -0 archive_info
     assert_output --partial '"locality":"TAPE"'
 }
 
 @test "a file evicted with xrdfs prepare -e fails to read" {
     id=$(stage)
-    xrdfs prepare -e "$id" "$URL"
+    evict "$id"
     run ! read_file
 }
 

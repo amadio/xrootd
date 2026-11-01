@@ -54,6 +54,7 @@
 extern "C" {
 #include "fio.h"
 #include "optgroup.h"
+#include "options.h"
 }
 #ifdef min
 #undef min
@@ -61,6 +62,66 @@ extern "C" {
 #ifdef max
 #undef max
 #endif
+
+//------------------------------------------------------------------------------
+// The options of a job, in the layout of the fio binary. One version of fio
+// can have two layouts of struct thread_options: a distribution can build fio
+// from a snapshot after the tag of the release. The fio 3.39 of Debian has the
+// field verify_header_seed of fio 3.40, thus td->o.use_thread of the headers
+// of the tag fio-3.39 is a different field in that binary. The option table of
+// the binary has the offsets of its own layout. XRD_OPT(td, field) is the
+// field of td->o at the offset of the option table.
+//------------------------------------------------------------------------------
+static size_t xrd_opt_offset(const char *name, size_t header_offset)
+{
+	struct fio_option *opt = find_option(fio_options, name);
+	return opt ? opt->off1 : header_offset;
+}
+
+#define XRD_OPT_OFFSET(field, name) \
+	size_t field = xrd_opt_offset(name, offsetof(struct thread_options, field))
+
+struct xrd_opt_offsets {
+	XRD_OPT_OFFSET(name,            "name");
+	XRD_OPT_OFFSET(use_thread,      "thread");
+	XRD_OPT_OFFSET(read_iolog_file, "read_iolog");
+	XRD_OPT_OFFSET(allow_create,    "allow_file_create");
+	XRD_OPT_OFFSET(pre_read,        "pre_read");
+	XRD_OPT_OFFSET(odirect,         "direct");
+	XRD_OPT_OFFSET(iodepth,         "iodepth");
+	XRD_OPT_OFFSET(sync_io,         "sync");
+	XRD_OPT_OFFSET(verify_only,     "verify_only");
+};
+
+static const xrd_opt_offsets &xrd_opts()
+{
+	static const xrd_opt_offsets offsets;
+	return offsets;
+}
+
+#define XRD_OPT(td, field) \
+	(*reinterpret_cast<decltype((td)->o.field) *>( \
+		reinterpret_cast<char *>(&(td)->o) + xrd_opts().field))
+
+// The inline helpers of the fio headers, such as td_write() and
+// fio_fill_issue_time(), read some fields at the offsets of the headers. Refuse
+// to run when one of these fields has another offset in the binary.
+static bool xrd_layout_matches()
+{
+	static const struct { const char *name; size_t offset; } fields[] = {
+		{"rw",                     offsetof(struct thread_options, td_ddir)},
+		{"read_iolog",             offsetof(struct thread_options, read_iolog_file)},
+		{"disable_clat",           offsetof(struct thread_options, disable_clat)},
+		{"disable_slat",           offsetof(struct thread_options, disable_slat)},
+		{"disable_bw_measurement", offsetof(struct thread_options, disable_bw)},
+	};
+	for (const auto &field : fields) {
+		struct fio_option *opt = find_option(fio_options, field.name);
+		if (opt && opt->off1 != field.offset)
+			return false;
+	}
+	return true;
+}
 
 //------------------------------------------------------------------------------
 // Engine options (parsed by fio into td->eo). First member must be a pad: fio
@@ -369,7 +430,7 @@ static void xrd_set_issue_time(struct thread_data *td, struct io_u *io_u)
 		return;
 	fio_gettime(&io_u->issue_time, NULL);
 	// only used for iolog
-	if (td->o.read_iolog_file)
+	if (XRD_OPT(td, read_iolog_file))
 		memcpy(&td->last_issue, &io_u->issue_time, sizeof(io_u->issue_time));
 }
 
@@ -383,9 +444,17 @@ static int fio_xrd_setup(struct thread_data *td)
 {
 	struct xrd_options *o = (struct xrd_options *) td->eo;
 
+	if (!xrd_layout_matches()) {
+		log_err("fio: xrootd: the engine was built with the headers of another "
+		        "fio, rebuild it with FIO_SOURCE_DIR set to the source of this "
+		        "fio\n");
+		td_verror(td, EINVAL, "xrd_setup");
+		return 1;
+	}
+
 	// XrdCl's background threads and global environment do not survive fork(),
 	// so run all fio jobs as threads sharing a single XrdCl runtime.
-	td->o.use_thread = 1;
+	XRD_OPT(td, use_thread) = 1;
 
 	// XrdCl reads the XRD_* variables when fio loads the engine, thus a
 	// setenv() here has no effect. Put the value in the XrdCl environment
@@ -499,7 +568,7 @@ static int xrd_layout_files(struct thread_data *td)
 	// The message of fio for the layout of local files
 	if (output_format & FIO_OUTPUT_NORMAL)
 		log_info("%s: Laying out IO file%s (%u file%s / %s%lluMiB)\n",
-		         td->o.name, files > 1 ? "s" : "", files,
+		         XRD_OPT(td, name), files > 1 ? "s" : "", files,
 		         files > 1 ? "s" : "", files > 1 ? "total " : "",
 		         bytes >> 20);
 
@@ -507,7 +576,7 @@ static int xrd_layout_files(struct thread_data *td)
 		uint64_t end = f->file_offset + f->io_size;
 		if (f->real_file_size >= end)
 			continue;
-		if (!td->o.allow_create && !fio_file_size_known(f)) {
+		if (!XRD_OPT(td, allow_create) && !fio_file_size_known(f)) {
 			log_err("fio: file creation disallowed by allow_file_create=0\n");
 			td_verror(td, ENOENT, "xrd_layout");
 			return 1;
@@ -563,7 +632,7 @@ static int xrd_pre_read_files(struct thread_data *td)
 		}
 	}
 
-	td->o.pre_read = 0;
+	XRD_OPT(td, pre_read) = 0;
 	return 0;
 }
 
@@ -584,10 +653,10 @@ static int fio_xrd_post_init(struct thread_data *td)
 			return 1;
 	}
 
-	if (td_read(td) && !td->o.read_iolog_file && xrd_layout_files(td))
+	if (td_read(td) && !XRD_OPT(td, read_iolog_file) && xrd_layout_files(td))
 		return 1;
 
-	if (td->o.pre_read && xrd_pre_read_files(td))
+	if (XRD_OPT(td, pre_read) && xrd_pre_read_files(td))
 		return 1;
 
 	if (!td_write(td))
@@ -609,7 +678,7 @@ static int fio_xrd_init(struct thread_data *td)
 		td_verror(td, EOPNOTSUPP, "xrd_init");
 		return 1;
 	}
-	if (td->o.odirect)
+	if (XRD_OPT(td, odirect))
 		log_info("fio: xrootd: direct=1 has no effect, XRootD has no direct I/O\n");
 
 	struct xrd_data *d = new xrd_data();
@@ -621,7 +690,7 @@ static int fio_xrd_init(struct thread_data *td)
 	d->nr_completed = 0;
 	d->nr_inflight = 0;
 
-	unsigned int depth = td->o.iodepth ? td->o.iodepth : 1;
+	unsigned int depth = XRD_OPT(td, iodepth) ? XRD_OPT(td, iodepth) : 1;
 	d->events = (struct io_u **) calloc(depth, sizeof(struct io_u *));
 	if (!d->events) {
 		delete d;
@@ -714,7 +783,7 @@ static enum fio_q_status fio_xrd_queue(struct thread_data *td,
 		break;
 	case DDIR_WRITE:
 		xrd_count_inflight(d, xf, 1);
-		if (td->o.sync_io)
+		if (XRD_OPT(td, sync_io))
 			iou->handler.sync_file = f;
 		if (o->pgio) {
 			iou->cksums.clear();
@@ -929,10 +998,10 @@ static int fio_xrd_open(struct thread_data *td, struct fio_file *f)
 	// fio opens the files of a write job for read only with verify_only=1,
 	// and all files with readonly=1.
 	const bool writing = (td_write(td) || td_trim(td)) &&
-	                     !td->o.verify_only && !read_only;
+	                     !XRD_OPT(td, verify_only) && !read_only;
 	// allow_file_create=0 forbids the creation of a file, and thus of its
 	// directories. fio creates the directories of a local file, too.
-	const bool create = td->o.allow_create;
+	const bool create = XRD_OPT(td, allow_create);
 
 	if (writing) {
 		// Update opens an existing file for read+write. A bare Update fails

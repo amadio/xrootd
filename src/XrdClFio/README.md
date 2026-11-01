@@ -187,6 +187,16 @@ version rather than from a fixed pin, and why there is no packaged/installed
 engine: it would break on the next fio update. If you bump the fio the tests run
 with, the engine is simply rebuilt against the matching source.
 
+The version does not fix the layout of `struct thread_options`. A distribution
+can build its fio from a snapshot after the tag of the release: the fio 3.39 of
+Debian 13 has the field `verify_header_seed` of fio 3.40, thus its options after
+that field are 4 bytes further than in the headers of the tag `fio-3.39`. The
+engine therefore accesses the options of a job (`XRD_OPT`) at the offsets of the
+option table of the binary (`fio_options`). The inline helpers of the headers,
+such as `td_write()`, still use the offsets of the headers: the engine checks
+their fields at setup, and stops with an error when the binary has another
+layout for them.
+
 The engine builds against fio 3.19 and later. CMake passes the version of the
 fio source as `XRD_FIO_VERSION` (major * 100 + minor), and the code follows two
 changes of the engine API with it: the `errdetails` hook has the thread as its

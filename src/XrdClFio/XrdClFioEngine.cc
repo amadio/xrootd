@@ -183,6 +183,9 @@ class IoHandler : public XrdCl::ResponseHandler
 public:
 	struct xrd_data *d   = nullptr;
 	struct xrd_iou  *iou = nullptr;
+	// For sync=1: the file to sync after the write, and the timeout.
+	XrdCl::File     *sync_file = nullptr;
+	time_t           timeout   = 0;
 
 	void HandleResponse(XrdCl::XRootDStatus *status,
 	                    XrdCl::AnyObject    *response) override;
@@ -231,6 +234,20 @@ void IoHandler::HandleResponse(XrdCl::XRootDStatus *status,
                                XrdCl::AnyObject    *response)
 {
 	struct io_u *io_u = iou->io_u;
+
+	// sync=1 (O_SYNC) has no equivalent in XRootD: sync the file after the
+	// write, and complete the io_u when the sync completes.
+	if (sync_file && status->IsOK()) {
+		XrdCl::File *f = sync_file;
+		sync_file = nullptr;
+		delete status;
+		delete response;
+		XrdCl::XRootDStatus st = f->Sync(this, timeout);
+		if (st.IsOK())
+			return;
+		status   = new XrdCl::XRootDStatus(st);
+		response = nullptr;
+	}
 
 	if (status->IsOK()) {
 		io_u->error = 0;
@@ -551,6 +568,9 @@ static int fio_xrd_post_init(struct thread_data *td)
 
 static int fio_xrd_init(struct thread_data *td)
 {
+	if (td->o.odirect)
+		log_info("fio: xrootd: direct=1 has no effect, XRootD has no direct I/O\n");
+
 	struct xrd_data *d = new xrd_data();
 
 	pthread_mutex_init(&d->lock, NULL);
@@ -619,6 +639,8 @@ static enum fio_q_status fio_xrd_queue(struct thread_data *td,
 	iou->io_u = io_u;
 	iou->handler.d = d;
 	iou->handler.iou = iou;
+	iou->handler.sync_file = nullptr;
+	iou->handler.timeout = to;
 
 	XrdCl::XRootDStatus st;
 
@@ -639,6 +661,8 @@ static enum fio_q_status fio_xrd_queue(struct thread_data *td,
 			             io_u->xfer_buf, &iou->handler, to);
 		break;
 	case DDIR_WRITE:
+		if (td->o.sync_io)
+			iou->handler.sync_file = f;
 		if (o->pgio) {
 			iou->cksums.clear();
 			st = f->PgWrite(io_u->offset, io_u->xfer_buflen,

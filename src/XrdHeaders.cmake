@@ -143,6 +143,13 @@ set( XROOTD_PRIVATE_HEADERS
   Xrd/XrdPoll.hh
   Xrd/XrdSendQ.hh
   XrdCks/XrdCksXAttr.hh
+  XrdMetrics/XrdMetricsConfig.hh
+  XrdMetrics/XrdMetricsFamily.hh
+  XrdMetrics/XrdMetricsInstrument.hh
+  XrdMetrics/XrdMetricsLabels.hh
+  XrdMetrics/XrdMetricsRegistry.hh
+  XrdMetrics/XrdMetricsSerializer.hh
+  XrdMetrics/XrdMetricsValue.hh
   XrdNet/XrdNetPeer.hh
   XrdNet/XrdNetBuffer.hh
   XrdNet/XrdNetIF.hh

@@ -160,9 +160,10 @@ struct xrd_iou;   // forward declaration
 
 // Per-file engine state (FILE_ENG_DATA).
 struct xrd_file {
-	XrdCl::File file;
-	uint32_t    readv_iov_max = XRD_READV_IOV_MAX;
-	uint32_t    readv_ior_max = XRD_READV_IOR_MAX;
+	XrdCl::File  file;
+	uint32_t     readv_iov_max = XRD_READV_IOV_MAX;
+	uint32_t     readv_ior_max = XRD_READV_IOR_MAX;
+	unsigned int inflight      = 0;   // requests in XrdCl, under xrd_data::lock
 };
 
 // Per-thread engine state (td->io_ops_data).
@@ -173,8 +174,20 @@ struct xrd_data {
 	struct flist_head pending;      // reads awaiting VectorRead coalescing (readv)
 	struct io_u     **events;       // scratch returned by ->event(), sized to iodepth
 	unsigned int      nr_completed;
-	unsigned int      nr_pending;
+	unsigned int      nr_inflight;  // requests in XrdCl of all files of the job
 };
+
+// Count n requests of a file which go to XrdCl, or which come back (n < 0).
+// fio can close a file, and end the job, while requests of it are still in
+// XrdCl: at the end of an iolog, td_io_getevents() reaps no more events. The
+// close and the cleanup wait for these requests (xrd_wait_inflight).
+static void xrd_count_inflight(struct xrd_data *d, struct xrd_file *xf, int n)
+{
+	pthread_mutex_lock(&d->lock);
+	xf->inflight += n;
+	d->nr_inflight += n;
+	pthread_mutex_unlock(&d->lock);
+}
 
 // Response handler for a single-operation submission, embedded in and reused by
 // its owning xrd_iou across successive I/Os.
@@ -183,6 +196,7 @@ class IoHandler : public XrdCl::ResponseHandler
 public:
 	struct xrd_data *d   = nullptr;
 	struct xrd_iou  *iou = nullptr;
+	struct xrd_file *xf  = nullptr;
 	// For sync=1: the file to sync after the write, and the timeout.
 	XrdCl::File     *sync_file = nullptr;
 	time_t           timeout   = 0;
@@ -281,12 +295,16 @@ void IoHandler::HandleResponse(XrdCl::XRootDStatus *status,
 
 	// Once the io_u is on the queue, the fio thread can reap it, end the
 	// job, and free both this handler (in its xrd_iou) and d. Thus signal
-	// before the unlock, and use only a local copy of d.
+	// before the unlock, and use only local copies. A close can wait on the
+	// condition too, thus wake all waiters.
 	struct xrd_data *data = d;
+	struct xrd_file *file = xf;
 	pthread_mutex_lock(&data->lock);
+	file->inflight--;
+	data->nr_inflight--;
 	flist_add_tail(&iou->list, &data->completed);
 	data->nr_completed++;
-	pthread_cond_signal(&data->cond);
+	pthread_cond_broadcast(&data->cond);
 	pthread_mutex_unlock(&data->lock);
 	// handler is embedded in xrd_iou and reused: do not delete this.
 }
@@ -297,10 +315,12 @@ class VReadHandler : public XrdCl::ResponseHandler
 {
 public:
 	struct xrd_data           *d;
+	struct xrd_file           *xf;
 	std::vector<struct xrd_iou *> ious;
 
-	VReadHandler(struct xrd_data *data, std::vector<struct xrd_iou *> &&batch)
-		: d(data), ious(std::move(batch)) {}
+	VReadHandler(struct xrd_data *data, struct xrd_file *file,
+	             std::vector<struct xrd_iou *> &&batch)
+		: d(data), xf(file), ious(std::move(batch)) {}
 
 	void HandleResponse(XrdCl::XRootDStatus *status,
 	                    XrdCl::AnyObject    *response) override
@@ -314,6 +334,8 @@ public:
 		// See IoHandler: d can be gone after the unlock.
 		struct xrd_data *data = d;
 		pthread_mutex_lock(&data->lock);
+		xf->inflight -= ious.size();
+		data->nr_inflight -= ious.size();
 		for (struct xrd_iou *iou : ious) {
 			iou->io_u->error = err;
 			iou->io_u->resid = err ? iou->io_u->xfer_buflen : 0;
@@ -600,7 +622,7 @@ static int fio_xrd_init(struct thread_data *td)
 	INIT_FLIST_HEAD(&d->completed);
 	INIT_FLIST_HEAD(&d->pending);
 	d->nr_completed = 0;
-	d->nr_pending = 0;
+	d->nr_inflight = 0;
 
 	unsigned int depth = td->o.iodepth ? td->o.iodepth : 1;
 	d->events = (struct io_u **) calloc(depth, sizeof(struct io_u *));
@@ -619,6 +641,12 @@ static void fio_xrd_cleanup(struct thread_data *td)
 
 	if (!d)
 		return;
+
+	// No request of the job may come back after d is gone
+	pthread_mutex_lock(&d->lock);
+	while (d->nr_inflight)
+		pthread_cond_wait(&d->cond, &d->lock);
+	pthread_mutex_unlock(&d->lock);
 
 	free(d->events);
 	pthread_cond_destroy(&d->cond);
@@ -661,6 +689,7 @@ static enum fio_q_status fio_xrd_queue(struct thread_data *td,
 	iou->io_u = io_u;
 	iou->handler.d = d;
 	iou->handler.iou = iou;
+	iou->handler.xf = xf;
 	iou->handler.sync_file = nullptr;
 	iou->handler.timeout = to;
 	iou->errmsg.clear();
@@ -676,9 +705,9 @@ static enum fio_q_status fio_xrd_queue(struct thread_data *td,
 			// does a read past the end of the file: the server fails the
 			// whole readv for it, where a read returns less data.
 			flist_add_tail(&iou->list, &d->pending);
-			d->nr_pending++;
 			return FIO_Q_QUEUED;
 		}
+		xrd_count_inflight(d, xf, 1);
 		if (o->pgio)
 			st = f->PgRead(io_u->offset, io_u->xfer_buflen,
 			               io_u->xfer_buf, &iou->handler, to);
@@ -687,6 +716,7 @@ static enum fio_q_status fio_xrd_queue(struct thread_data *td,
 			             io_u->xfer_buf, &iou->handler, to);
 		break;
 	case DDIR_WRITE:
+		xrd_count_inflight(d, xf, 1);
 		if (td->o.sync_io)
 			iou->handler.sync_file = f;
 		if (o->pgio) {
@@ -701,6 +731,7 @@ static enum fio_q_status fio_xrd_queue(struct thread_data *td,
 		break;
 	case DDIR_SYNC:
 	case DDIR_DATASYNC:
+		xrd_count_inflight(d, xf, 1);
 		st = f->Sync(&iou->handler, to);
 		break;
 	default:
@@ -712,6 +743,7 @@ static enum fio_q_status fio_xrd_queue(struct thread_data *td,
 	}
 
 	if (!st.IsOK()) {
+		xrd_count_inflight(d, xf, -1);
 		xrd_set_issue_time(td, io_u);
 		io_u->error = xrd_errno(st);
 		iou->errmsg = st.ToStr();
@@ -741,7 +773,6 @@ static int fio_xrd_commit(struct thread_data *td)
 	flist_for_each_safe(n, tmp, &d->pending) {
 		struct xrd_iou *iou = flist_entry(n, struct xrd_iou, list);
 		flist_del(n);
-		d->nr_pending--;
 		struct xrd_file *xf = (struct xrd_file *) FILE_ENG_DATA(iou->io_u->file);
 		groups[xf].push_back(iou);
 	}
@@ -773,27 +804,19 @@ static int fio_xrd_commit(struct thread_data *td)
 
 			// The handler can complete and delete itself before
 			// VectorRead() returns, thus give it a copy of the batch.
-			VReadHandler *h = new VReadHandler(d, std::vector<struct xrd_iou *>(batch));
+			VReadHandler *h = new VReadHandler(d, xf, std::vector<struct xrd_iou *>(batch));
+			xrd_count_inflight(d, xf, (int) batch.size());
 			XrdCl::XRootDStatus st = f->VectorRead(chunks, 0, h, to);
 			if (st.IsOK()) {
 				for (struct xrd_iou *iou : batch)
 					xrd_mark_queued(td, iou->io_u);
 				io_u_mark_submit(td, batch.size());
 			} else {
+				// XrdCl does not call the handler: complete the batch
+				// with the error, as a response would
 				for (struct xrd_iou *iou : batch)
 					xrd_set_issue_time(td, iou->io_u);
-				int err = xrd_errno(st);
-				pthread_mutex_lock(&d->lock);
-				for (struct xrd_iou *iou : h->ious) {
-					iou->io_u->error = err;
-					iou->io_u->resid = iou->io_u->xfer_buflen;
-					iou->errmsg = st.ToStr();
-					flist_add_tail(&iou->list, &d->completed);
-					d->nr_completed++;
-				}
-				pthread_cond_broadcast(&d->cond);
-				pthread_mutex_unlock(&d->lock);
-				delete h;
+				h->HandleResponse(new XrdCl::XRootDStatus(st), nullptr);
 			}
 		}
 	}
@@ -982,8 +1005,18 @@ static int fio_xrd_open(struct thread_data *td, struct fio_file *f)
 static int fio_xrd_close(struct thread_data *td, struct fio_file *f)
 {
 	struct xrd_options *o = (struct xrd_options *) td->eo;
+	struct xrd_data *d = (struct xrd_data *) td->io_ops_data;
 	struct xrd_file *xf = (struct xrd_file *) FILE_ENG_DATA(f);
 	int ret = 0;
+
+	// The requests of the file must come back first: XrdCl refuses the close
+	// of a file with requests, and they write to the File and to the io_us.
+	if (xf && d) {
+		pthread_mutex_lock(&d->lock);
+		while (xf->inflight)
+			pthread_cond_wait(&d->cond, &d->lock);
+		pthread_mutex_unlock(&d->lock);
+	}
 
 	// fio ignores the result of ->close_file(), thus a failed close, for
 	// example of a file with POSC or with a deferred error of a write,

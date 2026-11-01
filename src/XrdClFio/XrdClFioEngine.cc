@@ -362,11 +362,180 @@ static int fio_xrd_setup(struct thread_data *td)
 	return 0;
 }
 
+// The mode of a file which the engine creates.
+static const XrdCl::Access::Mode XRD_FILE_MODE =
+	XrdCl::Access::UR | XrdCl::Access::UW |
+	XrdCl::Access::GR | XrdCl::Access::OR;
+
+// The size of the requests with which the engine lays out and pre-reads files.
+static const uint64_t XRD_SETUP_BS = 1024 * 1024;
+
+// Open a file for the layout: create it, and its directories, if it is missing.
+// A File whose open failed cannot open again, thus the retry uses a new one.
+static XrdCl::XRootDStatus xrd_open_layout(std::unique_ptr<XrdCl::File> &file,
+                                           const std::string &url,
+                                           time_t timeout)
+{
+	auto flags = XrdCl::OpenFlags::Update | XrdCl::OpenFlags::MakePath;
+	file.reset(new XrdCl::File());
+	XrdCl::XRootDStatus st = file->Open(url, flags, XRD_FILE_MODE, timeout);
+	if (!st.IsOK() && xrd_errno(st) == ENOENT) {
+		file.reset(new XrdCl::File());
+		st = file->Open(url, flags | XrdCl::OpenFlags::New, XRD_FILE_MODE,
+		                timeout);
+	}
+	return st;
+}
+
+// Write the data of fio to the range [from, end) of a file.
+static int xrd_layout_file(struct thread_data *td, struct fio_file *f,
+                           uint64_t from, uint64_t end)
+{
+	struct xrd_options *o = (struct xrd_options *) td->eo;
+	const time_t to = (time_t) o->timeout;
+
+	std::unique_ptr<XrdCl::File> file;
+	XrdCl::XRootDStatus st = xrd_open_layout(file, xrd_url(f->file_name), to);
+
+	std::vector<char> buf(XRD_SETUP_BS);
+	for (uint64_t off = from; st.IsOK() && off < end; ) {
+		uint64_t len = std::min<uint64_t>(buf.size(), end - off);
+		fill_io_buffer(td, buf.data(), len, len);
+		st = file->Write(off, (uint32_t) len, buf.data(), to);
+		off += len;
+	}
+
+	if (file->IsOpen()) {
+		XrdCl::XRootDStatus cst = file->Close(to);
+		if (st.IsOK())
+			st = cst;
+	}
+
+	if (!st.IsOK()) {
+		log_err("fio: xrootd: layout of %s failed: %s\n",
+		        f->file_name, st.ToStr().c_str());
+		td_verror(td, xrd_errno(st), "xrd_layout");
+		return 1;
+	}
+	return 0;
+}
+
+// Make each file of a job which reads at least as large as the range of the
+// job, as fio does for a local file. fio writes the missing part of a local
+// file before a read job; for this engine, fio leaves the layout to the
+// engine. fio gets the sizes of all files before the first job starts, and
+// an earlier job, for example a write job before a stonewall, can extend a
+// file later. Thus get the size again, under a lock: all jobs share one
+// process, and several jobs can name the same file.
+static int xrd_layout_files(struct thread_data *td)
+{
+	static std::mutex mutex;
+	std::lock_guard<std::mutex> lock(mutex);
+
+	struct fio_file *f;
+	unsigned int i, files = 0;
+	unsigned long long bytes = 0;
+	for_each_file(td, f, i) {
+		uint64_t end = f->file_offset + f->io_size;
+		if (f->real_file_size >= end)
+			continue;
+		fio_file_clear_size_known(f);
+		if (fio_xrd_get_file_size(td, f))
+			return 1;
+		if (f->real_file_size < end) {
+			files++;
+			bytes += end - f->real_file_size;
+		}
+	}
+
+	if (!files)
+		return 0;
+
+	if (read_only) {
+		log_err("fio: refusing extend of file due to read-only\n");
+		return 0;
+	}
+
+	// The message of fio for the layout of local files
+	if (output_format & FIO_OUTPUT_NORMAL)
+		log_info("%s: Laying out IO file%s (%u file%s / %s%lluMiB)\n",
+		         td->o.name, files > 1 ? "s" : "", files,
+		         files > 1 ? "s" : "", files > 1 ? "total " : "",
+		         bytes >> 20);
+
+	for_each_file(td, f, i) {
+		uint64_t end = f->file_offset + f->io_size;
+		if (f->real_file_size >= end)
+			continue;
+		if (!td->o.allow_create && !fio_file_size_known(f)) {
+			log_err("fio: file creation disallowed by allow_file_create=0\n");
+			td_verror(td, ENOENT, "xrd_layout");
+			return 1;
+		}
+		if (xrd_layout_file(td, f, f->real_file_size, end))
+			return 1;
+		f->real_file_size = end;
+		fio_file_set_size_known(f);
+	}
+	return 0;
+}
+
+// Read the range of each file once, before the job starts. fio itself reads
+// the file descriptor for pre_read=1, which a file of this engine does not
+// have, thus the engine reads the files and turns the option off. Through a
+// cache (XCache), this fills the cache before the job.
+static int xrd_pre_read_files(struct thread_data *td)
+{
+	struct xrd_options *o = (struct xrd_options *) td->eo;
+	const time_t to = (time_t) o->timeout;
+	std::vector<char> buf(XRD_SETUP_BS);
+
+	struct fio_file *f;
+	unsigned int i;
+	for_each_file(td, f, i) {
+		XrdCl::File file;
+		uint64_t end = std::min<uint64_t>(f->file_offset + f->io_size,
+		                                  f->real_file_size);
+		XrdCl::XRootDStatus st = file.Open(xrd_url(f->file_name),
+		                                   XrdCl::OpenFlags::Read,
+		                                   XrdCl::Access::None, to);
+		for (uint64_t off = f->file_offset; st.IsOK() && off < end; ) {
+			uint32_t got = 0;
+			uint64_t len = std::min<uint64_t>(buf.size(), end - off);
+			st = file.Read(off, (uint32_t) len, buf.data(), got, to);
+			if (st.IsOK() && !got)
+				break;
+			off += got;
+		}
+		if (file.IsOpen()) {
+			XrdCl::XRootDStatus cst = file.Close(to);
+			if (st.IsOK())
+				st = cst;
+		}
+		if (!st.IsOK()) {
+			log_err("fio: xrootd: pre-read of %s failed: %s\n",
+			        f->file_name, st.ToStr().c_str());
+			td_verror(td, xrd_errno(st), "xrd_pre_read");
+			return 1;
+		}
+	}
+
+	td->o.pre_read = 0;
+	return 0;
+}
+
 // fio calls this hook after it computes the range of each file. The real size
 // limits the offsets that fio generates: a read stays within the data of the
 // file, but a write can extend the file up to the end of the range of the job.
+// A job which reads gets the missing data of its files first.
 static int fio_xrd_post_init(struct thread_data *td)
 {
+	if (td_read(td) && !td->o.read_iolog_file && xrd_layout_files(td))
+		return 1;
+
+	if (td->o.pre_read && xrd_pre_read_files(td))
+		return 1;
+
 	if (!td_write(td))
 		return 0;
 
@@ -682,8 +851,7 @@ static int fio_xrd_open(struct thread_data *td, struct fio_file *f)
 			flags |= XrdCl::OpenFlags::Delete;   // always start from a fresh file
 		if (o->posc)
 			flags |= XrdCl::OpenFlags::POSC;
-		mode = XrdCl::Access::UR | XrdCl::Access::UW |
-		       XrdCl::Access::GR | XrdCl::Access::OR;
+		mode = XRD_FILE_MODE;
 	} else {
 		flags = XrdCl::OpenFlags::Read;
 	}

@@ -517,6 +517,9 @@ static int xrd_pre_read_files(struct thread_data *td)
 		XrdCl::File file;
 		uint64_t end = std::min<uint64_t>(f->file_offset + f->io_size,
 		                                  f->real_file_size);
+		// A write job can have a missing file, with no data to read
+		if (end <= f->file_offset)
+			continue;
 		XrdCl::XRootDStatus st = file.Open(xrd_url(f->file_name),
 		                                   XrdCl::OpenFlags::Read,
 		                                   XrdCl::Access::None, to);

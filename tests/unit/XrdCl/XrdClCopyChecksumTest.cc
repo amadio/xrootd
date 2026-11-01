@@ -27,7 +27,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <fstream>
-#include <iterator>
+#include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -73,8 +73,9 @@ namespace
       std::string Read( const std::string &path )
       {
         std::ifstream stream( path.c_str(), std::ios::binary );
-        return std::string( std::istreambuf_iterator<char>( stream ),
-                            std::istreambuf_iterator<char>() );
+        std::ostringstream content;
+        content << stream.rdbuf();
+        return content.str();
       }
 
       std::string directory, source, target;

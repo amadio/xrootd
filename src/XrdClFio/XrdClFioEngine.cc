@@ -961,10 +961,17 @@ static int fio_xrd_close(struct thread_data *td, struct fio_file *f)
 	struct xrd_file *xf = (struct xrd_file *) FILE_ENG_DATA(f);
 	int ret = 0;
 
+	// fio ignores the result of ->close_file(), thus a failed close, for
+	// example of a file with POSC or with a deferred error of a write,
+	// reports itself and sets the error of the job.
 	if (xf) {
 		XrdCl::XRootDStatus st = xf->file.Close();
-		if (!st.IsOK())
+		if (!st.IsOK()) {
+			log_err("fio: xrootd: close %s failed: %s\n",
+			        f->file_name, st.ToStr().c_str());
+			td_verror(td, xrd_errno(st), "xrd_close");
 			ret = 1;
+		}
 		delete xf;
 		FILE_SET_ENG_DATA(f, NULL);
 	}

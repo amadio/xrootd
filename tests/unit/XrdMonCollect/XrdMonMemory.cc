@@ -1,0 +1,128 @@
+//------------------------------------------------------------------------------
+// Unit tests for XrdMonMemory: the process-RSS reader and allocator controls
+// that back the collector's --max-memory cap.
+//
+// These are the only tests in the suite that touch real process memory. The
+// control loop that consumes them is tested separately against a scripted RSS
+// (see the MemLoop fixture in XrdMonDecode.cc), so nothing about eviction
+// behaviour depends on what this file measures.
+//------------------------------------------------------------------------------
+
+#include <cstddef>
+#include <string>
+#include <vector>
+
+#include "XrdApps/XrdMonCollect/XrdMonMemory.hh"
+
+#include <gtest/gtest.h>
+
+namespace
+{
+constexpr std::size_t kMiB = 1024 * 1024;
+}
+
+// A reader that compiles but always returns 0 would disable the memory cap
+// wholesale and nothing else would notice, so pin down that this platform has
+// one. Skipping rather than passing keeps that honest where it genuinely has
+// none (Solaris without procfs, an exotic libc).
+//
+TEST(Memory, ProcessRssIsPlausible)
+{
+   std::size_t rss = XrdMonProcessRss();
+   if (!rss) GTEST_SKIP() << "no RSS reader on this platform";
+
+   EXPECT_GT(rss, 1 * kMiB);            // a linked gtest binary is never smaller
+   EXPECT_LT(rss, 64ull * 1024 * kMiB); // 64 GiB: a misread unit, not a process
+}
+
+// The test that catches a wrong page size. Reading /proc/self/statm gives
+// pages, and multiplying by the 4096-byte XrdSys::PageSize protocol constant
+// instead of sysconf(_SC_PAGESIZE) understates RSS by 4x on a 16 KiB-page
+// arm64 host -- which would silently make the cap four times looser there.
+//
+TEST(Memory, ProcessRssGrowsWithAllocation)
+{
+   std::size_t before = XrdMonProcessRss();
+   if (!before) GTEST_SKIP() << "no RSS reader on this platform";
+
+// Touch every page: an untouched allocation is mapped but not resident, so it
+// would not move RSS at all and the test would fail for the wrong reason. The
+// stores are volatile because the buffer is never read: without that, the
+// compiler may remove the allocation (clang does at -Og, gcc at -O1). A stride
+// of 4 KiB touches every page for any page size of 4 KiB or more.
+//
+   const std::size_t grow = 64 * kMiB;
+   std::vector<char> block(grow);
+   volatile char *p = block.data();
+   for (std::size_t i = 0; i < grow; i += 4096) p[i] = 1;
+
+   std::size_t after = XrdMonProcessRss();
+   EXPECT_GT(after, before + 32 * kMiB) << "RSS did not track a 64 MiB resident "
+                                           "allocation (page size units?)";
+}
+
+// The reader feeds a start-up warning, so its failure mode is a warning that
+// never fires (or fires against nonsense) on a containerised host -- silent
+// either way. There is no limit to assert against on an arbitrary test machine,
+// so pin the contract instead: 0 means "none", and anything else is a byte
+// count rather than a raw v1 sentinel or a page/kB unit slip.
+//
+TEST(Memory, CgroupLimitIsAbsentOrPlausible)
+{
+   std::size_t lim = XrdMonCgroupLimit();
+   if (!lim) GTEST_SKIP() << "no cgroup memory limit on this host";
+
+   EXPECT_GT(lim, 1 * kMiB);              // below this nothing could run
+   EXPECT_LT(lim, 1ull << 62);            // the v1 "unlimited" sentinel is 0
+}
+
+// Called once at start-up and again from the config path, and it must not cache
+// a stale answer across them.
+//
+TEST(Memory, CgroupLimitIsRepeatable)
+{
+   EXPECT_EQ(XrdMonCgroupLimit(), XrdMonCgroupLimit());
+}
+
+// Both are called on paths that run repeatedly (the control tick) or twice
+// across the two daemon modes, so neither may be one-shot or fragile.
+//
+TEST(Memory, ReleaseAndTuneAreRepeatable)
+{
+   XrdMonTuneAllocator();
+   XrdMonTuneAllocator();
+   XrdMonReleaseMemory();
+   XrdMonReleaseMemory();
+
+   if (!XrdMonProcessRss()) GTEST_SKIP() << "no RSS reader on this platform";
+   EXPECT_GT(XrdMonProcessRss(), 0u);   // still readable afterwards
+}
+
+// The recycling pipes exist so bodies do not reallocate every batch, so a
+// normal-sized body must come back with its capacity intact -- otherwise this
+// "fix" would quietly undo the optimisation it is protecting.
+//
+TEST(Memory, RecycleKeepsOrdinaryBodyWarm)
+{
+   std::string b(64 * 1024, 'x');
+   std::size_t was = b.capacity();
+
+   XrdMonRecycleBody(b);
+
+   EXPECT_TRUE(b.empty());
+   EXPECT_EQ(b.capacity(), was);        // still warm for the next batch
+}
+
+// The case that motivates it: one outsized batch would otherwise pin its peak
+// in one of the thirty-two recycled slots for the life of the process.
+//
+TEST(Memory, RecycleReleasesOutlierCapacity)
+{
+   std::string b(8 * kMiB, 'x');
+   ASSERT_GT(b.capacity(), kBodyKeepBytes);
+
+   XrdMonRecycleBody(b);
+
+   EXPECT_TRUE(b.empty());
+   EXPECT_LE(b.capacity(), kBodyKeepBytes);
+}

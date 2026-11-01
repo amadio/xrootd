@@ -1896,9 +1896,10 @@ enriches the user dictionary with the authentication method and VO (see the
 field table above); without it those fields are simply absent.
 
 The VO path (gsi → VOMS attribute certificate → `XrdSecEntity.vorg` → MAPUSER
-`&o=` → `xrootd.vo`) is exercised end-to-end by the `XRootD::moncollect`
-integration test when the VOMS plug-in is built: it mints a fake VOMS proxy with
-`voms-proxy-fake` and asserts `xrootd.vo` appears on the file operation document.
+`&o=` → `xrootd.vo`) is exercised by the end-to-end test
+`end-to-end::monitoring::collector` when the VOMS plug-in is built: it mints a
+fake VOMS proxy with `voms-proxy-fake` and asserts `xrootd.vo` appears on the
+file operation document.
 
 ```
 xrootd.monitor all flush 30 fstat 30 lfn ops ssq xfr 1 auth ident 300 \

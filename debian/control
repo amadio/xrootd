@@ -48,6 +48,7 @@ Build-Depends:
  procps,
  sqlite3,
  unzip,
+ voms-clients,
  zip
 Build-Depends-Indep:
  dh-sequence-sphinxdoc,

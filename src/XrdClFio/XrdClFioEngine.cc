@@ -36,6 +36,7 @@
 // would be parsed with C linkage and fail to compile.
 #include <atomic>
 
+#include "XProtocol/XProtocol.hh"
 #include "XrdCl/XrdClDefaultEnv.hh"
 #include "XrdCl/XrdClEnv.hh"
 #include "XrdCl/XrdClFile.hh"
@@ -149,12 +150,12 @@ static struct fio_option options[] = {
 //------------------------------------------------------------------------------
 // The limits of a readv request, for a server which does not report them:
 // readv_iov_max is the number of segments, readv_ior_max the size of one
-// segment. The server also limits the total of one readv to 2 GiB, with the
-// 16-byte header of each segment included.
-static const uint32_t XRD_READV_IOV_MAX   = 1024;
-static const uint32_t XRD_READV_IOR_MAX   = 2097136;
+// segment, as in XProtocol. The server also limits the total of one readv to
+// 2 GiB, with the header of each segment included.
+static const uint32_t XRD_READV_IOV_MAX   = XrdProto::maxRvecsz;
+static const uint32_t XRD_READV_IOR_MAX   = XrdProto::maxRVdsz;
 static const uint64_t XRD_READV_TOTAL_MAX = 0x80000000ULL;
-static const uint64_t XRD_READV_SEG_HDR   = 16;
+static const uint64_t XRD_READV_SEG_HDR   = XrdProto::rlItemLen;
 
 struct xrd_iou;   // forward declaration
 

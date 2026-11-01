@@ -288,10 +288,12 @@ TEST_P(CurlCopyResponseTest, PreservesFilesystemTerminalStatus)
         EXPECT_EQ(status.code, XrdCl::errErrorResponse);
         EXPECT_EQ(status.errNo, body.find("aborted:") == 0 ? kXR_Cancelled : kXR_IOError);
     }
-    if (std::get<2>(GetParam()) == 403)
+    if (std::get<2>(GetParam()) == 403) {
         EXPECT_EQ(status.errNo, kXR_NotAuthorized);
-    if (std::get<2>(GetParam()) == 500)
+    }
+    if (std::get<2>(GetParam()) == 500) {
         EXPECT_EQ(status.errNo, kXR_IOError);
+    }
     EXPECT_FALSE(exchange.read_failed);
     EXPECT_FALSE(exchange.write_failed);
 }

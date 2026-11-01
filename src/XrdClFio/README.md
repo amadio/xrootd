@@ -117,7 +117,6 @@ See `examples/multifile.fio`.
 | `xrd_readv`         | bool | 0       | Coalesce queued reads into a single `VectorRead` at commit         |
 | `xrd_recreate`      | bool | 0       | Delete and recreate the file when opening for write                |
 | `xrd_posc`          | bool | 0       | Enable Persist On Successful Close on write open                   |
-| `xrd_makepath`      | bool | 1       | Create parent directories when opening for write                   |
 | `xrd_timeout`       | int  | 0       | Per-operation XrdCl timeout in seconds (0 = environment default)   |
 | `xrd_workerthreads` | int  | 0       | Number of XrdCl worker threads for completion dispatch (0 = XrdCl default) |
 

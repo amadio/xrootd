@@ -70,7 +70,6 @@ struct xrd_options {
 	unsigned int  readv;          // coalesce queued reads into VectorRead
 	unsigned int  recreate;       // delete+recreate file on write open
 	unsigned int  posc;           // Persist On Successful Close
-	unsigned int  makepath;       // create parent dirs on write open
 	unsigned int  timeout;        // per-op XrdCl timeout in seconds (0 = default)
 	unsigned int  workerthreads;  // XrdCl worker threads (0 = XrdCl default)
 };
@@ -113,16 +112,6 @@ static struct fio_option options[] = {
 		.off1     = offsetof(struct xrd_options, posc),
 		.help     = "Enable Persist On Successful Close on write open",
 		.def      = "0",
-		.category = FIO_OPT_C_ENGINE,
-		.group    = FIO_OPT_G_INVALID,
-	},
-	{
-		.name     = "xrd_makepath",
-		.lname    = "XRootD create parent path",
-		.type     = FIO_OPT_BOOL,
-		.off1     = offsetof(struct xrd_options, makepath),
-		.help     = "Create parent directories when opening for write",
-		.def      = "1",
 		.category = FIO_OPT_C_ENGINE,
 		.group    = FIO_OPT_G_INVALID,
 	},
@@ -674,14 +663,20 @@ static int fio_xrd_open(struct thread_data *td, struct fio_file *f)
 	XrdCl::OpenFlags::Flags flags;
 	XrdCl::Access::Mode     mode = XrdCl::Access::None;
 
-	const bool writing = td_write(td) || td_trim(td);
+	// fio opens the files of a write job for read only with verify_only=1,
+	// and all files with readonly=1.
+	const bool writing = (td_write(td) || td_trim(td)) &&
+	                     !td->o.verify_only && !read_only;
+	// allow_file_create=0 forbids the creation of a file, and thus of its
+	// directories. fio creates the directories of a local file, too.
+	const bool create = td->o.allow_create;
 
 	if (writing) {
 		// Update opens an existing file for read+write. A bare Update fails
 		// if the file does not exist yet, so recreate/create handling is
 		// applied below.
 		flags = XrdCl::OpenFlags::Update;
-		if (o->makepath)
+		if (create)
 			flags |= XrdCl::OpenFlags::MakePath;
 		if (o->recreate)
 			flags |= XrdCl::OpenFlags::Delete;   // always start from a fresh file
@@ -702,13 +697,16 @@ static int fio_xrd_open(struct thread_data *td, struct fio_file *f)
 	// retry with New so it is created (New alone would fail if it existed).
 	// Retry only for a missing file: after another error, such as a denied
 	// access, the retry fails with "file exists" and hides the real cause.
-	if (!st.IsOK() && writing && !o->recreate && xrd_errno(st) == ENOENT) {
+	if (!st.IsOK() && writing && create && !o->recreate &&
+	    xrd_errno(st) == ENOENT) {
 		delete xf;
 		xf = new xrd_file();
 		st = xf->file.Open(url, flags | XrdCl::OpenFlags::New, mode);
 	}
 
 	if (!st.IsOK()) {
+		if (writing && !create && xrd_errno(st) == ENOENT)
+			log_err("fio: file creation disallowed by allow_file_create=0\n");
 		log_err("fio: xrootd: open %s failed: %s\n",
 		        f->file_name, st.ToStr().c_str());
 		delete xf;

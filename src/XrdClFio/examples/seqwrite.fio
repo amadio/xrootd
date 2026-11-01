@@ -4,8 +4,9 @@
 #   fio seqwrite.fio
 #
 # Colons in the root:// URL must be escaped with a backslash (fio splits
-# filenames on ':'). The file is created automatically (MakePath is on by
-# default); set xrd_recreate=1 to always start from a fresh file.
+# filenames on ':'). The file and its directories are created automatically
+# (allow_file_create=1, the default of fio); set xrd_recreate=1 to always start
+# from a fresh file.
 
 [global]
 ioengine=external:${XRD_FIO_ENGINE}

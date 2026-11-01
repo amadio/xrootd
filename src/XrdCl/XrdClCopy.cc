@@ -928,13 +928,18 @@ int main( int argc, char **argv )
       }
     }
 
-    // root:// and roots:// may already be a directory even when the path does
-    // not end in /. Ask the server, and add the source file name if it is.
-    // http://, https://, and s3:// are directories only when the path ends in /.
+    // root://, roots://, http:// and https:// may already be a directory even
+    // when the path does not end in /. Ask the server, and add the source file
+    // name if it is. A third-party copy over HTTP does not ask: the destination
+    // can allow the write of the transfer, but not a stat with the credentials
+    // of the client. s3:// is a directory only when the path ends in /.
     bool targetExists = false;
+    const bool httpTarget = config.dstFile->Protocol == XrdCpFile::isHttp ||
+                            config.dstFile->Protocol == XrdCpFile::isHttps;
     if( !targetIsDir &&
         ( config.dstFile->Protocol == XrdCpFile::isXroot ||
-          config.dstFile->Protocol == XrdCpFile::isXroots ) )
+          config.dstFile->Protocol == XrdCpFile::isXroots ||
+          ( httpTarget && thirdParty == "none" ) ) )
     {
       URL target( dest );
       FileSystem fs( target );
@@ -1092,13 +1097,17 @@ int main( int argc, char **argv )
           diroff = 0;
         else
           ++diroff;
-        if( target.empty() || target.back() != '/' )
-          target += '/';
-        target += srcPath.substr( diroff );
+        // Change the path of the URL, so that the query stays at the end
+        URL targetURL( target );
+        std::string targetPath = targetURL.GetPath();
+        if( targetPath.empty() || targetPath.back() != '/' )
+          targetPath += '/';
+        targetPath += srcPath.substr( diroff );
         // remove the filename from destination path as it will be appended later anyway
-        target = target.substr( 0 , target.rfind('/') );
+        targetPath.erase( targetPath.rfind( '/' ) );
+        targetURL.SetPath( targetPath );
+        target = targetURL.GetURL();
       }
-      AppendCGI( target, config.dstOpq );
 
       XrdCpBatch::Input input = defaults;
       input.source = source;

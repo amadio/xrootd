@@ -128,20 +128,46 @@ value of the first job applies, and `XRD_WORKERTHREADS` has precedence.
 ## Supported operations
 
 * Sequential and random **read**/**write**, and **mixed** (`randrw`).
-* **fsync**/**fdatasync** (`fsync=`, `fdatasync=`) → `XrdCl::File::Sync`.
-* File **create/open/close/stat/size**, **truncate** and **unlink**
-  (`unlink=1`) via XrdCl.
 * **CRC32C page integrity** through `xrd_pgio=1` (`PgRead`/`PgWrite`).
-* **Vectored reads** through `xrd_readv=1` (`VectorRead`).
-* fio data verification (`verify=crc32c`, ...) works end-to-end.
+* **Vectored reads** through `xrd_readv=1` (`VectorRead`). Set `iodepth_batch`
+  to the number of reads for one `VectorRead`: fio commits the queued reads
+  after `iodepth_batch` of them, and the default is 1.
+* fio data verification (`verify=crc32c`, `verify_only=1`, ...).
+* Replay of an iolog (`read_iolog=`, `write_iolog=`).
 
-**Trim** has no XRootD equivalent. The engine refuses a trim job
-(`rw=trim`, `randtrim`, `trimwrite`, `randtrimwrite`) with `EOPNOTSUPP`.
+## Native fio options
+
+The engine uses the native options of fio where XRootD has an equivalent:
+
+| fio option                       | Effect with the engine                                          |
+|----------------------------------|-----------------------------------------------------------------|
+| `size`, `filesize`, `offset`, `file_append` | The engine gets the size of each file with `Stat` before the job. A read stays within the file, a write can extend it. |
+| (read job of a missing or short file) | The engine writes the missing data first ("Laying out IO file"), as fio does for a local file. |
+| `allow_file_create`              | With 0, a job does not create a missing file or its directories. |
+| `readonly`, `verify_only`        | The engine opens the files for read only.                       |
+| `pre_read`                       | The engine reads the files before the job. Through a cache, this fills the cache. |
+| `fsync`, `fdatasync`, `end_fsync`, `fsync_on_close` | `XrdCl::File::Sync`.                     |
+| `sync=1`, `sync=dsync`           | A `Sync` after each write. XRootD has no `O_SYNC`.              |
+| `unlink`, `unlink_each_loop`     | `XrdCl::FileSystem::Rm`.                                        |
+| `continue_on_error`, `ignore_error` | The engine maps the XRootD errors to POSIX errno values, for example `ENOENT`, `EACCES` and `ENOSPC`. |
+| `nrfiles`, `openfiles`, `file_service_type` | Each file has its own `XrdCl::File`.                  |
+| `direct=1`                       | No effect; the engine prints a message. XRootD has no direct I/O. |
+| `rw=trim` and the other trims    | The engine refuses the job with `EOPNOTSUPP`. XRootD has no trim. |
+
+For a failed I/O, fio prints the XRootD error after its own message, for
+example `[3010] Unable to open /file; permission denied`. The engine records the
+submission latency (`slat`) and the histogram of the submissions.
 
 ## Notes
 
 * The engine forces `thread=1` (fio jobs run as threads in one process) because
-  XrdCl's background threads and global runtime do not survive `fork()`.
+  XrdCl's background threads and global runtime do not survive `fork()`. fio
+  prints "Starting N processes" before the engine sets this option, but the jobs
+  run as threads.
+* fio lays out a local file before all jobs start. The engine lays out the
+  file of a read job when that job starts. If a job writes a file while another
+  job of the same group lays it out, their data mix; put the jobs in separate
+  groups with `stonewall`.
 * Writes report success/failure only (no byte count); a successful write is
   treated as a full-length write.
 * See `examples/` for ready-to-edit job files.
@@ -196,8 +222,26 @@ returns `FIO_Q_QUEUED`. XrdCl runs the handler on one of its **worker threads**
 `->getevents()` drains. The handler **owns and deletes** both the `XRootDStatus`
 and the `AnyObject` response; for reads the data has already been read straight
 into `io_u->xfer_buf`, and `ChunkInfo`/`PageInfo` lengths are used to set
-`io_u->resid` for short reads. Errors map `XRootDStatus::errNo` → `io_u->error`
-(falling back to `EIO`).
+`io_u->resid` for short reads. Errors map the `XRootDStatus` to a POSIX errno in
+`io_u->error` with `XrdPosixMap::Result()` (falling back to `EIO`). A handler
+signals the condition variable before it releases the lock: after the unlock,
+the fio thread can reap the `io_u` and free the handler.
+
+An engine with a commit hook must do the accounting of the submissions itself:
+the engine sets `FIO_ASYNCIO_SETS_ISSUE_TIME`, sets the issue time of each
+`io_u` that it hands to XrdCl, and calls `io_u_queued()` and
+`io_u_mark_submit()`, as the libaio and io_uring engines do.
+
+### File sizes and layout
+
+An engine with a setup hook must set `real_file_size` of each file itself: fio
+then does not call `get_file_sizes()`. The setup hook stats each file. The real
+size limits the offsets of fio, thus `->post_init()` extends it to the end of
+the range of a write job. For a read job, `->post_init()` writes the missing
+data of each file, under a lock, after a new `Stat`: fio gets the sizes of all
+files before the first job, and an earlier job can extend a file. fio adds the
+files of `read_iolog=` after the setup hook, thus `->post_init()` gets their
+size too.
 
 ### File creation on write open
 

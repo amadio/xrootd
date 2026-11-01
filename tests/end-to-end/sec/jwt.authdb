@@ -1,0 +1,3 @@
+# The identity is the "sub" claim of the token (map_subject in jwt.conf).
+# The scope is not checked: the test uses acc.authdb, not XrdAccjwt.
+u alice /protected a

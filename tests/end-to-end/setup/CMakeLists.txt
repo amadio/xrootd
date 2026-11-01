@@ -10,6 +10,13 @@ if(BUILD_SCITOKENS)
   target_include_directories(xrdscitokens-create-token PRIVATE ${SCITOKENS_CPP_INCLUDE_DIR})
 endif()
 
+# xrdjwt-create-token writes the JWKS of the issuer and makes the tokens of
+# the tests of sec.protocol jwt, with OpenSSL only (see sec/jwt.bats).
+if(TARGET XrdSecjwtCore)
+  add_executable(xrdjwt-create-token XrdJwtCreateToken.cc)
+  target_link_libraries(xrdjwt-create-token PRIVATE OpenSSL::Crypto)
+endif()
+
 add_test(NAME end-to-end::setup::credentials::create
   COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/credentials.sh create ${CREDENTIALS_DIR})
 

@@ -6,7 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
-#include <iterator>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -258,9 +258,9 @@ TEST(DiskCache, QuarantineBypassesBacklog)
    auto names = filesWithSuffix(dir, ".rejected");
    ASSERT_EQ(names.size(), 1u);
    std::ifstream f(dir + "/" + names[0]);
-   std::string content((std::istreambuf_iterator<char>(f)),
-                       std::istreambuf_iterator<char>());
-   EXPECT_EQ(content, "refused-body");
+   std::ostringstream content;
+   content << f.rdbuf();
+   EXPECT_EQ(content.str(), "refused-body");
 }
 
 TEST(DiskCache, MaxBytesDropsOldest)

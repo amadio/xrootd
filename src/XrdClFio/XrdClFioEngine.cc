@@ -45,6 +45,7 @@
 #include "XrdCl/XrdClURL.hh"
 #include "XrdOuc/XrdOucECMsg.hh"
 #include "XrdPosix/XrdPosixMap.hh"
+#include "XrdSys/XrdSysPthread.hh"
 
 // fio's C headers. Wrapped in extern "C" so the referenced fio symbols
 // (log_err, __td_verror, ...) keep C linkage and resolve against the fio binary
@@ -355,6 +356,7 @@ public:
 // Engine entry points
 //------------------------------------------------------------------------------
 static int fio_xrd_get_file_size(struct thread_data *td, struct fio_file *f);
+static int xrd_stat_files(struct thread_data *td);
 
 // fio does the submission accounting only for an engine without a commit hook.
 // This engine has one, thus it sets the issue time of each io_u that it hands
@@ -397,13 +399,7 @@ static int fio_xrd_setup(struct thread_data *td)
 	// fio then does not call get_file_sizes(), the only caller of
 	// ->get_file_size(). Without the size, a read job without size= fails,
 	// and fio cannot place the I/O of file_append= or offset=N%.
-	struct fio_file *f;
-	unsigned int i;
-	for_each_file(td, f, i) {
-		if (fio_xrd_get_file_size(td, f))
-			return 1;
-	}
-	return 0;
+	return xrd_stat_files(td);
 }
 
 // The mode of a file which the engine creates.
@@ -1036,24 +1032,12 @@ static int fio_xrd_close(struct thread_data *td, struct fio_file *f)
 	return ret;
 }
 
-static int fio_xrd_get_file_size(struct thread_data *td, struct fio_file *f)
+// Set the size of a file from the result of its Stat. A missing file is not
+// an error: a write job creates it, with the size of the job. This is what
+// fio does for a missing local file.
+static int xrd_set_file_size(struct thread_data *td, struct fio_file *f,
+                             const XrdCl::XRootDStatus &st, uint64_t size)
 {
-	XrdCl::URL url(xrd_url(f->file_name));
-	if (!url.IsValid()) {
-		log_err("fio: xrootd: invalid URL: %s\n", f->file_name);
-		td_verror(td, EINVAL, "xrd_url");
-		return 1;
-	}
-
-	struct xrd_options *o = (struct xrd_options *) td->eo;
-	XrdCl::FileSystem fs(url);
-	XrdCl::StatInfo  *si = nullptr;
-	XrdCl::XRootDStatus st = fs.Stat(url.GetPathWithParams(), si,
-	                                 (time_t) o->timeout);
-	std::unique_ptr<XrdCl::StatInfo> info(si);
-
-	// A missing file is not an error: a write job creates it, with the size
-	// of the job. This is what fio does for a missing local file.
 	if (!st.IsOK()) {
 		int err = xrd_errno(st);
 		if (err == ENOENT) {
@@ -1066,8 +1050,115 @@ static int fio_xrd_get_file_size(struct thread_data *td, struct fio_file *f)
 		return 1;
 	}
 
-	f->real_file_size = info ? info->GetSize() : 0;
+	f->real_file_size = size;
 	fio_file_set_size_known(f);
+	return 0;
+}
+
+// The URL of a file, or false with the error of the job set
+static bool xrd_file_url(struct thread_data *td, struct fio_file *f,
+                         XrdCl::URL &url)
+{
+	url = XrdCl::URL(xrd_url(f->file_name));
+	if (url.IsValid())
+		return true;
+	log_err("fio: xrootd: invalid URL: %s\n", f->file_name);
+	td_verror(td, EINVAL, "xrd_url");
+	return false;
+}
+
+static int fio_xrd_get_file_size(struct thread_data *td, struct fio_file *f)
+{
+	XrdCl::URL url;
+	if (!xrd_file_url(td, f, url))
+		return 1;
+
+	struct xrd_options *o = (struct xrd_options *) td->eo;
+	XrdCl::FileSystem fs(url);
+	XrdCl::StatInfo  *si = nullptr;
+	XrdCl::XRootDStatus st = fs.Stat(url.GetPathWithParams(), si,
+	                                 (time_t) o->timeout);
+	std::unique_ptr<XrdCl::StatInfo> info(si);
+
+	return xrd_set_file_size(td, f, st, info ? info->GetSize() : 0);
+}
+
+// The response to the Stat of one file of xrd_stat_files
+class StatHandler : public XrdCl::ResponseHandler
+{
+public:
+	XrdCl::XRootDStatus status;
+	uint64_t            size = 0;
+
+	explicit StatHandler(XrdSysSemaphore &done) : done(done) {}
+
+	void HandleResponse(XrdCl::XRootDStatus *st,
+	                    XrdCl::AnyObject    *response) override
+	{
+		XrdCl::StatInfo *si = nullptr;
+		if (response)
+			response->Get(si);
+		status = *st;
+		size = si ? si->GetSize() : 0;
+		delete st;
+		delete response;
+		// the waiter can delete this handler once the post is done
+		done.Post();
+	}
+
+private:
+	XrdSysSemaphore &done;
+};
+
+// Stat all files of a job, XRD_STAT_BATCH at a time. A job can have thousands
+// of files, and a Stat after the other costs one round trip for each file.
+static int xrd_stat_files(struct thread_data *td)
+{
+	static const size_t XRD_STAT_BATCH = 64;
+	struct xrd_options *o = (struct xrd_options *) td->eo;
+	const time_t to = (time_t) o->timeout;
+
+	std::vector<struct fio_file *> files;
+	struct fio_file *f;
+	unsigned int i;
+	for_each_file(td, f, i)
+		files.push_back(f);
+
+	for (size_t first = 0; first < files.size(); first += XRD_STAT_BATCH) {
+		size_t n = std::min(XRD_STAT_BATCH, files.size() - first);
+		XrdSysSemaphore done(0);
+		std::vector<std::unique_ptr<XrdCl::FileSystem> > fs(n);
+		std::vector<std::unique_ptr<StatHandler> > handlers(n);
+		size_t sent = 0;
+		int ret = 0;
+
+		for (size_t k = 0; k < n; k++) {
+			XrdCl::URL url;
+			if (!xrd_file_url(td, files[first + k], url)) {
+				ret = 1;
+				break;
+			}
+			fs[k].reset(new XrdCl::FileSystem(url));
+			handlers[k].reset(new StatHandler(done));
+			XrdCl::XRootDStatus st = fs[k]->Stat(url.GetPathWithParams(),
+			                                     handlers[k].get(), to);
+			if (st.IsOK())
+				sent++;
+			else
+				handlers[k]->status = st;
+		}
+
+		// all handlers which XrdCl has must run before they go away
+		for (size_t k = 0; k < sent; k++)
+			done.Wait();
+
+		for (size_t k = 0; !ret && k < n; k++) {
+			ret = xrd_set_file_size(td, files[first + k],
+			                        handlers[k]->status, handlers[k]->size);
+		}
+		if (ret)
+			return 1;
+	}
 	return 0;
 }
 

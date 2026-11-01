@@ -91,6 +91,7 @@ struct xrd_opt_offsets {
 	XRD_OPT_OFFSET(iodepth,         "iodepth");
 	XRD_OPT_OFFSET(sync_io,         "sync");
 	XRD_OPT_OFFSET(verify_only,     "verify_only");
+	XRD_OPT_OFFSET(trim_percentage, "trim_percentage");
 };
 
 static const xrd_opt_offsets &xrd_opts()
@@ -672,8 +673,10 @@ static int fio_xrd_post_init(struct thread_data *td)
 
 static int fio_xrd_init(struct thread_data *td)
 {
-	// A trim which does nothing would count as done in the results.
-	if (td_trim(td)) {
+	// A trim which does nothing would count as done in the results. A write
+	// job with trim_percentage= trims too, and fio 3.39 stops on an assertion
+	// in fio_ro_check() before such a trim reaches ->queue().
+	if (td_trim(td) || XRD_OPT(td, trim_percentage)) {
 		log_err("fio: xrootd: trim is not supported, XRootD has no trim\n");
 		td_verror(td, EOPNOTSUPP, "xrd_init");
 		return 1;
@@ -801,8 +804,8 @@ static enum fio_q_status fio_xrd_queue(struct thread_data *td,
 		st = f->Sync(&iou->handler, to);
 		break;
 	default:
-		// XRootD has no trim: fio_xrd_init() refuses a trim job, and a
-		// trim of verify (trim_percentage=) fails here.
+		// XRootD has no trim: fio_xrd_init() refuses a trim job and
+		// trim_percentage=, thus this is only a safety net.
 		xrd_set_issue_time(td, io_u);
 		io_u->error = EOPNOTSUPP;
 		return FIO_Q_COMPLETED;

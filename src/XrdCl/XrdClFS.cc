@@ -1871,6 +1871,10 @@ XRootDStatus DoCat( FileSystem                      *fs,
     return XRootDStatus( stError, errInvalidArgs );
   }
 
+  // -o - writes to stdout, as without -o
+  if( local == "-" )
+    local.clear();
+
   // a file URL needs an absolute path, else the path becomes its host
   if( !local.empty() && local[0] != '/' )
   {

@@ -131,7 +131,9 @@ TEST(ReadResponse, KeepsUnconfirmedRangeErrors)
     char buffer[4]{};
     ReadOperation op(handler, test.first, buffer, sizeof(buffer));
     ASSERT_TRUE(op.Header("HTTP/1.1 416 Range Not Satisfiable\r\n"));
-    if (*range) ASSERT_TRUE(op.Header(range));
+    if (*range) {
+        ASSERT_TRUE(op.Header(range));
+    }
     ASSERT_TRUE(op.Header("\r\n"));
     op.CompleteHttpError();
     ASSERT_TRUE(handler.status);

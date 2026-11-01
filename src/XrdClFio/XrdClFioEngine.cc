@@ -669,9 +669,12 @@ static enum fio_q_status fio_xrd_queue(struct thread_data *td,
 
 	switch (io_u->ddir) {
 	case DDIR_READ:
-		if (o->readv && io_u->xfer_buflen <= xf->readv_ior_max) {
+		if (o->readv && io_u->xfer_buflen <= xf->readv_ior_max &&
+		    io_u->offset + io_u->xfer_buflen <= io_u->file->real_file_size) {
 			// Defer submission; ->commit() issues a single VectorRead.
-			// A read larger than one readv segment goes out alone.
+			// A read larger than one readv segment goes out alone. So
+			// does a read past the end of the file: the server fails the
+			// whole readv for it, where a read returns less data.
 			flist_add_tail(&iou->list, &d->pending);
 			d->nr_pending++;
 			return FIO_Q_QUEUED;

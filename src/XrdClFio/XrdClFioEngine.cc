@@ -960,9 +960,6 @@ static int fio_xrd_close(struct thread_data *td, struct fio_file *f)
 
 static int fio_xrd_get_file_size(struct thread_data *td, struct fio_file *f)
 {
-	if (fio_file_size_known(f))
-		return 0;
-
 	XrdCl::URL url(xrd_url(f->file_name));
 	if (!url.IsValid()) {
 		log_err("fio: xrootd: invalid URL: %s\n", f->file_name);
@@ -1005,12 +1002,6 @@ static int fio_xrd_unlink(struct thread_data *td, struct fio_file *f)
 	return st.IsOK() ? 0 : 1;
 }
 
-static int fio_xrd_invalidate(struct thread_data *td, struct fio_file *f)
-{
-	// Network target: nothing to invalidate in a local page cache.
-	return 0;
-}
-
 //------------------------------------------------------------------------------
 // External engine registration. C++ engines fill in the ops table through
 // get_ioengine() (fio ioengines.c). Populate by assignment to avoid depending
@@ -1038,7 +1029,6 @@ extern "C" void get_ioengine(struct ioengine_ops **ops_ptr)
 	ops->errdetails         = fio_xrd_errdetails;
 	ops->open_file          = fio_xrd_open;
 	ops->close_file         = fio_xrd_close;
-	ops->invalidate         = fio_xrd_invalidate;
 	ops->unlink_file        = fio_xrd_unlink;
 	ops->get_file_size      = fio_xrd_get_file_size;
 	ops->io_u_init          = fio_xrd_io_u_init;

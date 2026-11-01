@@ -131,11 +131,6 @@ teardown() {
     assert_output --partial "$F"
 }
 
-@test "xattr accepts shorthand queries" {
-    run -0 xrdfs xattr root://$HOST//$F xroot.cksum
-    assert_output --partial 'xroot.cksum'
-}
-
 @test "mkdir accepts -p and -m options" {
     run -0 xrdfs mkdir -p -m 0755 root://$HOST//newdir/subdir
     run -0 xrdfs stat root://$HOST//newdir/subdir

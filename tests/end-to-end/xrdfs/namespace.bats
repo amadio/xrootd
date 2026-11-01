@@ -99,14 +99,14 @@ teardown() {
 
 @test "ls -R of the root shows the file" {
     run -0 xrdfs "$SERVER_URL" ls -R /
-    assert_line "${FILE#/}"
+    assert_line "$FILE"
 }
 
 @test "ls -R of the root shows a file in a subdirectory" {
     xrdfs "$SERVER_URL" mkdir -p "/r${BATS_TEST_NUMBER}/sub"
     xrdfs "$SERVER_URL" mv "$FILE" "/r${BATS_TEST_NUMBER}/sub$FILE"
     run -0 xrdfs "$SERVER_URL" ls -R /
-    assert_line "r${BATS_TEST_NUMBER}/sub$FILE"
+    assert_line "/r${BATS_TEST_NUMBER}/sub$FILE"
 }
 
 @test "locate -r finds the file on the server" {

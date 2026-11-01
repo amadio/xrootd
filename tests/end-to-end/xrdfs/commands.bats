@@ -179,9 +179,9 @@ teardown() {
     run -0 xrdfs "$URL" ls
 }
 
-@test "ls with -R and -Z and -C together is not valid" {
-    run ! xrdfs "$URL" ls -l -u -R -D -Z -C "$D"
-    assert_output --partial 'Invalid arguments'
+@test "ls accepts -l -u -R -D -Z -C together" {
+    run -0 xrdfs "$URL" ls -l -u -R -D -Z -C "$D"
+    assert_output --partial "$F"
 }
 
 @test "ls of a relative path is not valid" {
@@ -720,8 +720,14 @@ teardown() {
     run ! xrdfs "$URL" xattr "$F" list extra
 }
 
-@test "xattr without an operation fails" {
-    run ! xrdfs "$URL" xattr "$F"
+@test "xattr without an operation queries the virtual attributes" {
+    run -0 xrdfs "$URL" xattr "$F"
+    assert_line --partial 'xroot.space = '
+}
+
+@test "xattr with a virtual attribute prints only its value" {
+    run -0 xrdfs "$URL" xattr "$F" xroot.cksum
+    assert_output --regexp '^adler32 [0-9a-f]{8}$'
 }
 
 @test "xattr get without a name fails" {

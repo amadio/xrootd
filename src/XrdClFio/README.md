@@ -135,8 +135,8 @@ value of the first job applies, and `XRD_WORKERTHREADS` has precedence.
 * **Vectored reads** through `xrd_readv=1` (`VectorRead`).
 * fio data verification (`verify=crc32c`, ...) works end-to-end.
 
-**Trim** has no XRootD file-level equivalent and is accepted as an immediate
-no-op success.
+**Trim** has no XRootD equivalent. The engine refuses a trim job
+(`rw=trim`, `randtrim`, `trimwrite`, `randtrimwrite`) with `EOPNOTSUPP`.
 
 ## Notes
 

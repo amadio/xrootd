@@ -568,6 +568,12 @@ static int fio_xrd_post_init(struct thread_data *td)
 
 static int fio_xrd_init(struct thread_data *td)
 {
+	// A trim which does nothing would count as done in the results.
+	if (td_trim(td)) {
+		log_err("fio: xrootd: trim is not supported, XRootD has no trim\n");
+		td_verror(td, EOPNOTSUPP, "xrd_init");
+		return 1;
+	}
 	if (td->o.odirect)
 		log_info("fio: xrootd: direct=1 has no effect, XRootD has no direct I/O\n");
 
@@ -677,14 +683,11 @@ static enum fio_q_status fio_xrd_queue(struct thread_data *td,
 	case DDIR_DATASYNC:
 		st = f->Sync(&iou->handler, to);
 		break;
-	case DDIR_TRIM:
-		// XRootD has no file-level trim; treat as an immediate no-op success.
-		xrd_set_issue_time(td, io_u);
-		io_u->error = 0;
-		return FIO_Q_COMPLETED;
 	default:
+		// XRootD has no trim: fio_xrd_init() refuses a trim job, and a
+		// trim of verify (trim_percentage=) fails here.
 		xrd_set_issue_time(td, io_u);
-		io_u->error = EINVAL;
+		io_u->error = EOPNOTSUPP;
 		return FIO_Q_COMPLETED;
 	}
 

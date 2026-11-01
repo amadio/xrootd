@@ -551,6 +551,17 @@ static int xrd_pre_read_files(struct thread_data *td)
 // A job which reads gets the missing data of its files first.
 static int fio_xrd_post_init(struct thread_data *td)
 {
+	struct fio_file *f;
+	unsigned int i;
+
+	// fio adds the files of read_iolog= after the setup hook, thus their
+	// size is unknown (-1). fio then repeats a short read at the end of the
+	// file, and counts no byte of it.
+	for_each_file(td, f, i) {
+		if (f->real_file_size == -1ULL && fio_xrd_get_file_size(td, f))
+			return 1;
+	}
+
 	if (td_read(td) && !td->o.read_iolog_file && xrd_layout_files(td))
 		return 1;
 
@@ -560,8 +571,6 @@ static int fio_xrd_post_init(struct thread_data *td)
 	if (!td_write(td))
 		return 0;
 
-	struct fio_file *f;
-	unsigned int i;
 	for_each_file(td, f, i) {
 		uint64_t end = f->file_offset + f->io_size;
 		if (f->real_file_size < end)

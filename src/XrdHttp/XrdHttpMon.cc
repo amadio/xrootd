@@ -15,13 +15,65 @@ typedef std::array<std::array<XrdHttpMon::HttpInfo, XrdHttpMon::StatusCodes::sc_
 StatsMatrix XrdHttpMon::statsInfo{};
 
 XrdXrootdGStream* XrdHttpMon::gStream = nullptr;
+XrdMonRoll* XrdHttpMon::mrollP = nullptr;
 std::chrono::seconds XrdHttpMon::flushPeriod{0};
 
 bool XrdHttpMon::hasGStream = false;
+bool XrdHttpMon::hasMonRoll = false;
 bool XrdHttpMon::isInitialized = false;
 
 XrdMetrics::Counter<std::uint64_t>* XrdHttpMon::verbMetric[XrdHttpReq::ReqType::rtCount] = {nullptr};
 XrdMetrics::Counter<std::uint64_t>* XrdHttpMon::statusMetric[XrdHttpMon::StatusCodes::sc_Count] = {nullptr};
+
+RAtomic_uint64_t XrdHttpMon::verbCounters[XrdHttpReq::ReqType::rtCount] = {0};
+RAtomic_uint64_t XrdHttpMon::statusCounters[XrdHttpMon::StatusCodes::sc_Count] = {0};
+
+// Combined schema for HTTP statistics
+// This creates a JSON structure: {"httpReqStats": {...}, "httpStatusCodeStats": {...}}
+std::vector<XrdMonRoll::Item> XrdHttpMon::statsSchema = {
+// NOTE: Keep this mapping aligned to the XrdHttpReq enum
+    XrdMonRoll::Item("request", XrdMonRoll::Item::Schema::begObject),
+        XrdMonRoll::Item("Unknown",   verbCounters[0]),
+        XrdMonRoll::Item("Malformed", verbCounters[1]),
+        XrdMonRoll::Item("GET",       verbCounters[2]),
+        XrdMonRoll::Item("HEAD",      verbCounters[3]),
+        XrdMonRoll::Item("PUT",       verbCounters[4]),
+        XrdMonRoll::Item("OPTIONS",   verbCounters[5]),
+        XrdMonRoll::Item("PATCH",     verbCounters[6]),
+        XrdMonRoll::Item("DELETE",    verbCounters[7]),
+        XrdMonRoll::Item("PROPFIND",  verbCounters[8]),
+        XrdMonRoll::Item("MKCOL",     verbCounters[9]),
+        XrdMonRoll::Item("MOVE",      verbCounters[10]),
+        XrdMonRoll::Item("POST",      verbCounters[11]),
+        XrdMonRoll::Item("COPY",      verbCounters[12]),
+    XrdMonRoll::Item("request", XrdMonRoll::Item::Schema::endObject),
+
+// NOTE: Keep this mapping strictly aligned with StatusCodes enum XrdHttpMon::StatusCode
+// The order and number of entries MUST match.
+    XrdMonRoll::Item("response", XrdMonRoll::Item::Schema::begObject),
+        XrdMonRoll::Item("http_100", statusCounters[sc_100]),
+        XrdMonRoll::Item("http_200", statusCounters[sc_200]),
+        XrdMonRoll::Item("http_201", statusCounters[sc_201]),
+        XrdMonRoll::Item("http_202", statusCounters[sc_202]),
+        XrdMonRoll::Item("http_206", statusCounters[sc_206]),
+        XrdMonRoll::Item("http_207", statusCounters[sc_207]),
+        XrdMonRoll::Item("http_302", statusCounters[sc_302]),
+        XrdMonRoll::Item("http_307", statusCounters[sc_307]),
+        XrdMonRoll::Item("http_400", statusCounters[sc_400]),
+        XrdMonRoll::Item("http_401", statusCounters[sc_401]),
+        XrdMonRoll::Item("http_403", statusCounters[sc_403]),
+        XrdMonRoll::Item("http_404", statusCounters[sc_404]),
+        XrdMonRoll::Item("http_405", statusCounters[sc_405]),
+        XrdMonRoll::Item("http_409", statusCounters[sc_409]),
+        XrdMonRoll::Item("http_416", statusCounters[sc_416]),
+        XrdMonRoll::Item("http_423", statusCounters[sc_423]),
+        XrdMonRoll::Item("http_500", statusCounters[sc_500]),
+        XrdMonRoll::Item("http_502", statusCounters[sc_502]),
+        XrdMonRoll::Item("http_504", statusCounters[sc_504]),
+        XrdMonRoll::Item("http_507", statusCounters[sc_507]),
+        XrdMonRoll::Item("OTHERS", statusCounters[sc_UNKNOWN]),
+    XrdMonRoll::Item("response", XrdMonRoll::Item::Schema::endObject)
+};
 
 namespace {
 // Label values for the request-method and response-status counter families.
@@ -36,13 +88,19 @@ const char* const codeLabels[XrdHttpMon::StatusCodes::sc_Count] = {
     "OTHERS"};
 }
 
-void XrdHttpMon::Initialize(XrdSysLogger *logP, XrdXrootdGStream *gStream) {
+void XrdHttpMon::Initialize(XrdSysLogger *logP, XrdXrootdGStream *gStream, XrdMonRoll *mrollP) {
     eDest.logger(logP);
     XrdHttpMon::gStream = gStream;
+    XrdHttpMon::mrollP = mrollP;
 
     if (gStream != nullptr){
         hasGStream = true;
         flushPeriod = std::chrono::seconds(gStream->GetAutoFlush());
+    }
+
+    if (mrollP != nullptr) {
+        hasMonRoll = true;
+        mrollP->Register(XrdMonRoll::AddOn, "http_plugin", statsSchema);
     }
 
     // Register the native HTTP request/response counters in the process-wide

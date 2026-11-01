@@ -898,6 +898,7 @@ static int fio_xrd_open(struct thread_data *td, struct fio_file *f)
 	struct xrd_options *o = (struct xrd_options *) td->eo;
 	XrdCl::OpenFlags::Flags flags;
 	XrdCl::Access::Mode     mode = XrdCl::Access::None;
+	const time_t            to   = (time_t) o->timeout;
 
 	// fio opens the files of a write job for read only with verify_only=1,
 	// and all files with readonly=1.
@@ -926,7 +927,7 @@ static int fio_xrd_open(struct thread_data *td, struct fio_file *f)
 	const std::string url = xrd_url(f->file_name);
 
 	struct xrd_file *xf = new xrd_file();
-	XrdCl::XRootDStatus st = xf->file.Open(url, flags, mode);
+	XrdCl::XRootDStatus st = xf->file.Open(url, flags, mode, to);
 
 	// For write workloads without recreate, the file may simply not exist yet:
 	// retry with New so it is created (New alone would fail if it existed).
@@ -936,7 +937,7 @@ static int fio_xrd_open(struct thread_data *td, struct fio_file *f)
 	    xrd_errno(st) == ENOENT) {
 		delete xf;
 		xf = new xrd_file();
-		st = xf->file.Open(url, flags | XrdCl::OpenFlags::New, mode);
+		st = xf->file.Open(url, flags | XrdCl::OpenFlags::New, mode, to);
 	}
 
 	if (!st.IsOK()) {
@@ -950,7 +951,7 @@ static int fio_xrd_open(struct thread_data *td, struct fio_file *f)
 	}
 
 	if (o->readv)
-		xrd_readv_limits(xf, (time_t) o->timeout);
+		xrd_readv_limits(xf, to);
 
 	FILE_SET_ENG_DATA(f, xf);
 	return 0;
@@ -958,6 +959,7 @@ static int fio_xrd_open(struct thread_data *td, struct fio_file *f)
 
 static int fio_xrd_close(struct thread_data *td, struct fio_file *f)
 {
+	struct xrd_options *o = (struct xrd_options *) td->eo;
 	struct xrd_file *xf = (struct xrd_file *) FILE_ENG_DATA(f);
 	int ret = 0;
 
@@ -965,7 +967,7 @@ static int fio_xrd_close(struct thread_data *td, struct fio_file *f)
 	// example of a file with POSC or with a deferred error of a write,
 	// reports itself and sets the error of the job.
 	if (xf) {
-		XrdCl::XRootDStatus st = xf->file.Close();
+		XrdCl::XRootDStatus st = xf->file.Close((time_t) o->timeout);
 		if (!st.IsOK()) {
 			log_err("fio: xrootd: close %s failed: %s\n",
 			        f->file_name, st.ToStr().c_str());
@@ -987,9 +989,11 @@ static int fio_xrd_get_file_size(struct thread_data *td, struct fio_file *f)
 		return 1;
 	}
 
+	struct xrd_options *o = (struct xrd_options *) td->eo;
 	XrdCl::FileSystem fs(url);
 	XrdCl::StatInfo  *si = nullptr;
-	XrdCl::XRootDStatus st = fs.Stat(url.GetPathWithParams(), si);
+	XrdCl::XRootDStatus st = fs.Stat(url.GetPathWithParams(), si,
+	                                 (time_t) o->timeout);
 	std::unique_ptr<XrdCl::StatInfo> info(si);
 
 	// A missing file is not an error: a write job creates it, with the size

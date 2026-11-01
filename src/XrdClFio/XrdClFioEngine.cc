@@ -915,7 +915,10 @@ static int fio_xrd_open(struct thread_data *td, struct fio_file *f)
 		flags = XrdCl::OpenFlags::Update;
 		if (create)
 			flags |= XrdCl::OpenFlags::MakePath;
-		if (o->recreate)
+		// Delete creates a missing file, thus without create the file is
+		// truncated after the open, as fio does with O_TRUNC for a local
+		// file.
+		if (o->recreate && create)
 			flags |= XrdCl::OpenFlags::Delete;   // always start from a fresh file
 		if (o->posc)
 			flags |= XrdCl::OpenFlags::POSC;
@@ -945,6 +948,19 @@ static int fio_xrd_open(struct thread_data *td, struct fio_file *f)
 			log_err("fio: file creation disallowed by allow_file_create=0\n");
 		log_err("fio: xrootd: open %s failed: %s\n",
 		        f->file_name, st.ToStr().c_str());
+		delete xf;
+		td_verror(td, xrd_errno(st), "xrd_open");
+		return 1;
+	}
+
+	if (o->recreate && writing && !create)
+		st = xf->file.Truncate(0, to);
+
+	if (!st.IsOK()) {
+		log_err("fio: xrootd: truncate %s failed: %s\n",
+		        f->file_name, st.ToStr().c_str());
+		XrdCl::XRootDStatus cst = xf->file.Close(to);
+		(void) cst;   // the error of the truncate is the one to report
 		delete xf;
 		td_verror(td, xrd_errno(st), "xrd_open");
 		return 1;

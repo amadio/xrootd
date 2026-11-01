@@ -254,7 +254,8 @@ installed, so it should be sufficient in most cases.
 
 The default `config.cmake` also enables `ENABLE_FIO_ENGINE`, which builds the
 fio I/O engine for XRootD (see [src/XrdClFio/README.md](../src/XrdClFio/README.md))
-and runs the `XRootD::fio` integration test. Because fio ships no development
+and runs its end-to-end tests, `end-to-end::fio::*` in `tests/end-to-end/fio`.
+Because fio ships no development
 headers, and the engine is version-locked to the `fio` binary, CMake fetches the
 fio source matching the installed `fio` (a shallow `git clone` during
 configuration) to build against. This step requires `fio` and `git` to be

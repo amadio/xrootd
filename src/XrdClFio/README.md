@@ -220,9 +220,10 @@ the data server for its limits (`readv_iov_max` segments of at most
 
 The engine is enabled for CI in `.ci/config.cmake` and skipped everywhere it
 cannot run (no fio/git, sanitizer builds, non-Linux). `fio` and `git` are test
-build-deps in `xrootd.spec` and `debian/control`. The `XRootD::fio` CTest runs
-the workloads in `tests/XRootD/fio.sh` against a local server, using the exact
-fio the engine was built against (passed as `$FIO`). The engine is intentionally
+build-deps in `xrootd.spec` and `debian/control`. The BATS tests in
+`tests/end-to-end/fio` (`end-to-end::fio::*`) run the engine against a data
+server, a cluster and a cache, with the fio that matches the engine (passed as
+`$FIO`, and the engine as `$FIO_ENGINE`). The engine is intentionally
 kept out of the installed packages (see the version-lock rationale above).
 
 ## Example job files

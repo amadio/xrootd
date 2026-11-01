@@ -12,7 +12,19 @@
 # counts a miss only for the request which creates a block. Thus a second
 # request for a block in flight counts as a hit (see issue #2366).
 
-load ../setup/server.bash
+# The directory of this file, thus a test of another directory, for example
+# fio/cache.bats, can load it
+# shellcheck disable=SC2155 # the directory of this file exists
+readonly CACHE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+if ! declare -F start_server > /dev/null; then
+    load "$CACHE_DIR/../setup/server.bash"
+fi
+
+# The snippet of the g-stream, by its path, as start_server finds a snippet
+# by its name only in the directory of the test file and in setup/
+# shellcheck disable=SC2034 # the test files use it
+readonly GSTREAM_CFG=$CACHE_DIR/gstream.cfg
 
 readonly BLOCK=$((128 * 1024))
 
@@ -22,7 +34,7 @@ start_cache() {
     start_server origin
     export ORIGIN="localhost:$ORIGIN_PORT"
     start_collector gstream
-    start_server cache cache gstream.cfg "$@"
+    start_server cache cache "$GSTREAM_CFG" "$@"
 }
 
 # make_origin_file <lfn> <blocks>: a random file of whole blocks on the origin

@@ -991,15 +991,17 @@ static int fio_xrd_get_file_size(struct thread_data *td, struct fio_file *f)
 	return 0;
 }
 
+// fio expects an errno: the layout of a local file ignores ENOENT.
 static int fio_xrd_unlink(struct thread_data *td, struct fio_file *f)
 {
 	XrdCl::URL url(xrd_url(f->file_name));
 	if (!url.IsValid())
-		return 1;
+		return EINVAL;
 
+	struct xrd_options *o = (struct xrd_options *) td->eo;
 	XrdCl::FileSystem fs(url);
-	XrdCl::XRootDStatus st = fs.Rm(url.GetPathWithParams());
-	return st.IsOK() ? 0 : 1;
+	XrdCl::XRootDStatus st = fs.Rm(url.GetPathWithParams(), (time_t) o->timeout);
+	return xrd_errno(st);
 }
 
 //------------------------------------------------------------------------------

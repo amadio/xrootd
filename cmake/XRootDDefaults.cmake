@@ -10,6 +10,7 @@ option( ENABLE_READLINE  "Enable the lib readline support in the commandline uti
 option( ENABLE_XRDCL     "Enable XRootD client."                                          TRUE )
 option( ENABLE_TESTS     "Enable unit tests."                                             FALSE )
 cmake_dependent_option( ENABLE_SERVER_TESTS "Enable server tests." TRUE "ENABLE_TESTS" FALSE )
+cmake_dependent_option( ENABLE_BENCHMARKS "Enable the benchmarks with fio (needs ENABLE_FIO_ENGINE)." FALSE "ENABLE_SERVER_TESTS" FALSE )
 option( ENABLE_HTTP      "Enable HTTP component."                                         TRUE )
 option( ENABLE_PYTHON    "Enable python bindings."                                        TRUE )
 option( XRDCL_ONLY       "Build only the client and necessary dependencies"               FALSE )

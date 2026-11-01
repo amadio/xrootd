@@ -21,6 +21,10 @@ endif()
 
 add_subdirectory(end-to-end)
 
+if(ENABLE_BENCHMARKS)
+  add_subdirectory(benchmarks)
+endif()
+
 add_subdirectory(XrdClHttpCommon)
 add_subdirectory(XrdClS3)
 

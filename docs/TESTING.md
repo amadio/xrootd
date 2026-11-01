@@ -263,6 +263,26 @@ installed (they are listed as test dependencies in the spec and `debian/control`
 files); if either is missing, or on non-Linux/sanitizer builds, the engine and
 its test are skipped with a message rather than failing the configuration.
 
+With `-DENABLE_BENCHMARKS=ON` (it needs the fio engine), CMake also registers
+the benchmarks in `tests/benchmarks`, with the label `benchmark`. Each benchmark
+runs a fio job against a data server, or against a cache (XCache) in front of
+an origin, and reports its results as CTest measurements, which CDash keeps for
+each submission:
+
+* the bandwidth, the IOPS and the latency (mean, p50, p99) of the reads and of
+  the writes,
+* the CPU time of the client and of each server, in percent of the time of
+  the job and in seconds per GiB of data,
+* for a cache which starts empty, the read amplification: the bytes from the
+  origin for each byte that the client reads.
+
+The benchmarks of the cache replay an analysis with ROOT, which reads 10 of the
+40 branches of a TTree, with cache blocks of 64 KiB to 1 MiB. CTest runs the
+benchmarks one at a time (`RUN_SERIAL`), as the CPU time and the bandwidth
+depend on the load of the host. Run them with `ctest -L benchmark`. The
+environment variable `BENCHMARK_RUNTIME` sets the duration of a job with a
+time limit, in seconds (default 5).
+
 The behavior of the [test.cmake](../test.cmake) script can also be influenced
 by environment variables like `CC`, `CXX`, `CXXFLAGS`, `CMAKE_ARGS`, `CMAKE_GENERATOR`,
 `CMAKE_BUILD_PARALLEL_LEVEL`, `CTEST_PARALLEL_LEVEL`, and `CTEST_CONFIGURATION_TYPE`.

@@ -31,5 +31,7 @@ setup() {
         http_plugin="$BINARY_DIR/src/XrdClHttp/libXrdClHttp-6.dylib"
     fi
 
-    run -0 python3 "$BATS_TEST_DIRNAME/copy_batch.py" "$(command -v xrdcp)" "$http_plugin"
+    # test.cmake sets LC_ALL=C. Python 3.6 then encodes the names of files
+    # in ASCII, and cannot make the file of a test with a non-ASCII name.
+    run -0 env LC_ALL=C.UTF-8 python3 "$BATS_TEST_DIRNAME/copy_batch.py" "$(command -v xrdcp)" "$http_plugin"
 }

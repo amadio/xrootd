@@ -25,6 +25,14 @@ if sys.version_info < (3, 11):
 
 CONFIG = Path(__file__).resolve().parent / 'xrootd.cfg'
 
+# pytest 3.9 added the tmp_path fixture. EL8 has pytest 3.4, thus give the
+# fixture from tmpdir there.
+
+if tuple(int(v) for v in pytest.__version__.split('.')[:2]) < (3, 9):
+    @pytest.fixture
+    def tmp_path(tmpdir):
+        return Path(str(tmpdir))
+
 # The remaining test modules do not talk to a server, so there is no point in
 # starting one for them.
 

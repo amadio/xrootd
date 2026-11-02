@@ -77,8 +77,9 @@ ofs.preplib libXrdOfsPrepGPI.so -admit stage -run {prepare_program}
                             result = subprocess.run(
                                 [str(BUILD / 'bin/xrdfs'),
                                  f'root://127.0.0.1:{port}', 'prepare', '-s',
-                                 *paths], env=env, capture_output=True,
-                                text=True, timeout=15)
+                                 *paths], env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                universal_newlines=True, timeout=15)
                             self.assertEqual(result.returncode == 0, accepted,
                                              result.stdout + result.stderr)
                 finally:

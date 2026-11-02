@@ -9,6 +9,9 @@
 //------------------------------------------------------------------------------
 
 #include <cstddef>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -63,17 +66,88 @@ TEST(Memory, ProcessRssGrowsWithAllocation)
 
 // The reader feeds a start-up warning, so its failure mode is a warning that
 // never fires (or fires against nonsense) on a containerised host -- silent
-// either way. There is no limit to assert against on an arbitrary test machine,
-// so pin the contract instead: 0 means "none", and anything else is a byte
-// count rather than a raw v1 sentinel or a page/kB unit slip.
+// either way. A test machine has no known limit, thus the tests give the
+// reader a cgroup tree in a temporary directory: the file of /proc/self/cgroup
+// and the files of /sys/fs/cgroup.
 //
-TEST(Memory, CgroupLimitIsAbsentOrPlausible)
+class CgroupLimitTest : public ::testing::Test
 {
-   std::size_t lim = XrdMonCgroupLimit();
-   if (!lim) GTEST_SKIP() << "no cgroup memory limit on this host";
+protected:
+   void SetUp() override
+   {
+      std::string tmpl = (std::filesystem::temp_directory_path()
+                          / "xrdmon-cgroup-XXXXXX").string();
+      ASSERT_NE(mkdtemp(tmpl.data()), nullptr);
+      dir = tmpl;
+   }
 
-   EXPECT_GT(lim, 1 * kMiB);              // below this nothing could run
-   EXPECT_LT(lim, 1ull << 62);            // the v1 "unlimited" sentinel is 0
+   void TearDown() override { std::filesystem::remove_all(dir); }
+
+   // Write the file at the path relative to the temporary directory
+   void Write(const std::string& path, const std::string& text)
+   {
+      std::filesystem::create_directories((dir / path).parent_path());
+      std::ofstream(dir / path) << text;
+   }
+
+   std::size_t Limit()
+   {
+      return XrdMonCgroupLimit((dir / "self.cgroup").string(),
+                               (dir / "cgroup").string());
+   }
+
+   std::filesystem::path dir;
+};
+
+TEST_F(CgroupLimitTest, ReadsTheV2LimitOfTheOwnCgroup)
+{
+   Write("self.cgroup", "0::/system.slice/xrdmon.service\n");
+   Write("cgroup/system.slice/xrdmon.service/memory.max", "1073741824\n");
+   EXPECT_EQ(Limit(), 1024 * kMiB);
+}
+
+TEST_F(CgroupLimitTest, TakesTheSmallestLimitOfTheAncestors)
+{
+   Write("self.cgroup", "0::/system.slice/xrdmon.service\n");
+   Write("cgroup/system.slice/xrdmon.service/memory.max", "2147483648\n");
+   Write("cgroup/system.slice/memory.max", "1073741824\n");
+   EXPECT_EQ(Limit(), 1024 * kMiB);
+}
+
+TEST_F(CgroupLimitTest, TreatsMaxAsNoLimit)
+{
+   Write("self.cgroup", "0::/system.slice/xrdmon.service\n");
+   Write("cgroup/system.slice/xrdmon.service/memory.max", "max\n");
+   EXPECT_EQ(Limit(), 0u);
+}
+
+TEST_F(CgroupLimitTest, ReadsTheV1LimitOfTheMemoryController)
+{
+   Write("self.cgroup", "4:cpu,cpuacct:/docker/abc\n3:memory:/docker/abc\n");
+   Write("cgroup/memory/docker/abc/memory.limit_in_bytes", "536870912\n");
+   EXPECT_EQ(Limit(), 512 * kMiB);
+}
+
+TEST_F(CgroupLimitTest, TreatsTheV1UnlimitedValueAsNoLimit)
+{
+   Write("self.cgroup", "3:memory:/docker/abc\n");
+   Write("cgroup/memory/docker/abc/memory.limit_in_bytes",
+         "9223372036854771712\n");
+   EXPECT_EQ(Limit(), 0u);
+}
+
+TEST_F(CgroupLimitTest, PrefersTheV2LimitInAHybridHierarchy)
+{
+   Write("self.cgroup", "3:memory:/v1\n0::/v2\n");
+   Write("cgroup/v2/memory.max", "1073741824\n");
+   Write("cgroup/memory/v1/memory.limit_in_bytes", "536870912\n");
+   EXPECT_EQ(Limit(), 1024 * kMiB);
+}
+
+TEST_F(CgroupLimitTest, GivesNoLimitWithoutTheCgroupFileOfTheProcess)
+{
+   Write("cgroup/memory.max", "1073741824\n");
+   EXPECT_EQ(Limit(), 0u);
 }
 
 // Called once at start-up and again from the config path, and it must not cache

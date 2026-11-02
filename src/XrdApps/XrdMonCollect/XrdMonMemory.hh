@@ -63,6 +63,12 @@ void XrdMonReleaseMemory();
 //!         platform has no cgroups. Never an error: a caller can only warn.
 std::size_t XrdMonCgroupLimit();
 
+//! XrdMonCgroupLimit() with the files as arguments: procCgroup in place of
+//! /proc/self/cgroup, and cgroupRoot in place of /sys/fs/cgroup. The unit
+//! tests give a cgroup tree in a temporary directory.
+std::size_t XrdMonCgroupLimit(const std::string& procCgroup,
+                              const std::string& cgroupRoot);
+
 //! Pin the glibc allocator parameters that otherwise let RSS ratchet upward.
 //!
 //! Must be called before any thread starts. Environment settings the operator

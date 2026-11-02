@@ -102,7 +102,6 @@ std::size_t XrdMonProcessRss()
 /*                   X r d M o n C g r o u p L i m i t                        */
 /******************************************************************************/
 
-#if defined(__linux__)
 namespace
 {
 // Read a single-value cgroup file. Returns 0 for absent, unreadable, "max", or
@@ -125,13 +124,14 @@ std::size_t readLimitFile(const std::string& path)
    return (std::size_t)v;
 }
 
-// This process's path within a controller's hierarchy, from /proc/self/cgroup.
-// For v2 that is the line beginning "0::"; for v1 it is the line whose
-// comma-separated controller list contains "memory". Empty when absent.
+// This process's path within a controller's hierarchy, from /proc/self/cgroup
+// (the file procCgroup). For v2 that is the line beginning "0::"; for v1 it is
+// the line whose comma-separated controller list contains "memory". Empty when
+// absent.
 //
-std::string cgroupPath(bool v2)
+std::string cgroupPath(const std::string& procCgroup, bool v2)
 {
-   int fd = open("/proc/self/cgroup", O_RDONLY);
+   int fd = open(procCgroup.c_str(), O_RDONLY);
    if (fd < 0) return std::string();
    std::string text;
    char  buff[1024];
@@ -184,11 +184,10 @@ std::size_t walkUp(const std::string& root, const std::string& rel,
    return best;
 }
 }
-#endif
 
-std::size_t XrdMonCgroupLimit()
+std::size_t XrdMonCgroupLimit(const std::string& procCgroup,
+                              const std::string& cgroupRoot)
 {
-#if defined(__linux__)
 // Unlike XrdMonProcessRss() this runs once, at start-up, so it may allocate
 // and use std::string freely -- it is not on the control tick.
 //
@@ -197,19 +196,27 @@ std::size_t XrdMonCgroupLimit()
 // scope. Reading /sys/fs/cgroup/memory.max would therefore have found nothing
 // on precisely the deployments this warning exists for.
 //
-   {std::string rel = cgroupPath(true);
+   {std::string rel = cgroupPath(procCgroup, true);
     if (!rel.empty())
-       {std::size_t v = walkUp("/sys/fs/cgroup", rel, "memory.max");
+       {std::size_t v = walkUp(cgroupRoot, rel, "memory.max");
         if (v) return v;
        }
    }
 
-   {std::string rel = cgroupPath(false);
-    std::size_t v = walkUp("/sys/fs/cgroup/memory", rel, "memory.limit_in_bytes");
+   {std::string rel = cgroupPath(procCgroup, false);
+    std::size_t v = walkUp(cgroupRoot + "/memory", rel, "memory.limit_in_bytes");
     if (v) return v;
    }
-#endif
    return 0;
+}
+
+std::size_t XrdMonCgroupLimit()
+{
+#if defined(__linux__)
+   return XrdMonCgroupLimit("/proc/self/cgroup", "/sys/fs/cgroup");
+#else
+   return 0;
+#endif
 }
 
 /******************************************************************************/

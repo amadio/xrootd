@@ -446,8 +446,10 @@ assert_quarantined() {
 
     touch "$ctl"
     wait_for 30 eval 'transfer > /dev/null 2>&1; grep -q "^rejected " "$out"'
-    run -0 grep -q "$what.*rejected by endpoint.*simulated validation error" "$COLLECTOR_LOG"
-    run -0 grep -q 'quarantined rejected body' "$COLLECTOR_LOG"
+    # the mock records the refusal before its reply, and the collector logs
+    # it after the reply
+    run -0 wait_for 10 grep -q "$what.*rejected by endpoint.*simulated validation error" "$COLLECTOR_LOG"
+    run -0 wait_for 10 grep -q 'quarantined rejected body' "$COLLECTOR_LOG"
     run -0 find "$@" -maxdepth 1 -name '*.rejected'
     refute_output ''
 

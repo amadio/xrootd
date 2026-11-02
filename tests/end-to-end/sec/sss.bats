@@ -9,11 +9,13 @@ export XrdSecPROTOCOL=sss
 export XrdSecSSSKT="$BATS_FILE_TMPDIR/sss.keytab"
 
 setup_file() {
-    # a default key, a key for a user to delete, and a key for this user
+    # a default key, a key for a user to delete, and a key for this user. The
+    # user to delete has a name which is not an account, such as the user
+    # xrootd of a container which runs the tests.
     xrdsssadmin add "$XrdSecSSSKT" <<< y > /dev/null
-    xrdsssadmin -u xrootd -g xrootd add "$XrdSecSSSKT" > /dev/null
+    xrdsssadmin -u deleted -g deleted add "$XrdSecSSSKT" > /dev/null
     xrdsssadmin -u "$(id -un)" -g "$(id -gn)" add "$XrdSecSSSKT" > /dev/null
-    xrdsssadmin -u xrootd -g xrootd del "$XrdSecSSSKT" > /dev/null
+    xrdsssadmin -u deleted -g deleted del "$XrdSecSSSKT" > /dev/null
 }
 
 # Write a keytab of one line, which only the owner can read
@@ -49,7 +51,7 @@ teardown() {
 
 @test "xrdsssadmin del removes the key of a user" {
     run -0 xrdsssadmin list "$XrdSecSSSKT"
-    refute_output --partial ' xrootd '
+    refute_output --partial ' deleted '
 }
 
 @test "the client authenticates with sss" {

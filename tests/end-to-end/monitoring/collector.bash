@@ -103,7 +103,7 @@ start_mock() {
           ${2:+"$dir/reject-next"} < /dev/null > "$dir/daemon.log" 2>&1 3>&- 4>&- &
       echo $! > "$dir/daemon.pid" )
 
-    # the first start of python3 on a loaded macOS runner took more than 10 s
+    # after 20 s, the mock writes its stack to daemon.log, which is shown below
     if ! wait_for 30 test -s "$dir/port"; then
         echo "start_mock: '$name' failed to start" >&2
         sed "s|^|[$name] |" "$dir/daemon.log" >&2

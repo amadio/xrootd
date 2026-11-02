@@ -19,12 +19,28 @@ touch refuses exactly one POST. The refused request is recorded as a
 "rejected <path>" line. Used to check that a body which an endpoint refuses
 goes to quarantine, and does not block the export."""
 
+import faulthandler
 import os
+import socketserver
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
+class Server(HTTPServer):
+    # HTTPServer.server_bind() looks up the name of the address with
+    # socket.getfqdn(). On macOS, the reverse lookup of 127.0.0.1 can go to
+    # DNS, and on a host whose name does not resolve it can wait for a long
+    # time. The mock does not use the name.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def main():
+    # start_mock waits 30 s for the port. If the start takes 20 s, write the
+    # stack of the mock to stderr, which start_mock shows on a failure.
+    faulthandler.dump_traceback_later(20)
+
     portfile = sys.argv[1]
     outfile = sys.argv[2]
     ctlfile = sys.argv[3] if len(sys.argv) > 3 else None
@@ -63,13 +79,14 @@ def main():
         def log_message(self, *args):
             pass
 
-    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server = Server(("127.0.0.1", 0), Handler)
 
     # write the port to a new file, then rename it, thus a reader never sees
     # a partial port
     with open(portfile + ".new", "w") as f:
         f.write("%d\n" % server.server_address[1])
     os.rename(portfile + ".new", portfile)
+    faulthandler.cancel_dump_traceback_later()
 
     server.serve_forever()
 

@@ -6,6 +6,7 @@
 #include "XrdOuc/XrdOucUtils.hh"
 #include "XrdSec/XrdSecEntity.hh"
 #include "XrdSec/XrdSecEntityAttr.hh"
+#include "XrdSec/XrdSecEntityXtra.hh"
 
 #include <ctime>
 #include <sstream>
@@ -165,6 +166,11 @@ XrdAccPrivs
 Authz::Access(const XrdSecEntity *Entity, const char *path,
               const Access_Operation oper, XrdOucEnv *env)
 {
+    // The name of a macaroon is for one request only. Start from the login
+    // identity, so that a request without a macaroon does not get the name of
+    // an earlier one.
+    if (Entity) XrdSecEntityXtra::ResetRequestIdentity(*Entity);
+
     // We don't allow any testing to occur in this authz module, preventing
     // a macaroon to be used to receive further macaroons.
     if (oper == AOP_Any)

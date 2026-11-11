@@ -5,6 +5,7 @@
 #include "XrdOuc/XrdOucPrivateUtils.hh"
 #include "XrdSec/XrdSecEntity.hh"
 #include "XrdSec/XrdSecEntityAttr.hh"
+#include "XrdSec/XrdSecEntityXtra.hh"
 #include "XrdSys/XrdSysLogger.hh"
 #include "XrdTls/XrdTlsContext.hh"
 #include "XrdVersion.hh"
@@ -510,6 +511,11 @@ public:
                                   const Access_Operation oper,
                                         XrdOucEnv       *env) override
     {
+        // The name and the subject of a token are for one request only. Start
+        // from the login identity, so that a request without a token does not
+        // get the identity of an earlier one.
+        if (Entity) XrdSecEntityXtra::ResetRequestIdentity(*Entity);
+
         const char *authz = env ? env->Get("authz") : nullptr;
             // Note: this is more permissive than the plugin was previously.
             // The prefix 'Bearer%20' used to be required as that's what HTTP

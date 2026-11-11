@@ -36,6 +36,8 @@
 #include "XrdSec/XrdSecEntityAttr.hh"
 #include "XrdSys/XrdSysPthread.hh"
 
+class XrdSecEntity;
+
 class XrdSecEntityXtra : public XrdSecEntityAttr
 {
 public:
@@ -46,7 +48,20 @@ std::vector<XrdSecAttr *>          attrVec;
 
 std::map<std::string, std::string> attrMap;
 
+// The request identity attributes at the first ResetRequestIdentity() call
+//
+std::map<std::string, std::string> loginMap;
+bool                               loginSet = false;
+
 void     Reset();
+
+//------------------------------------------------------------------------------
+//! Set the attributes "request.name" and "token.subject" back to their login
+//! values. A token module sets them for one request. The first call must come
+//! before the first authorization, because it records the login values.
+//------------------------------------------------------------------------------
+
+static void ResetRequestIdentity(const XrdSecEntity &entity);
 
          XrdSecEntityXtra() : XrdSecEntityAttr(this) {}
         ~XrdSecEntityXtra() {Reset();}

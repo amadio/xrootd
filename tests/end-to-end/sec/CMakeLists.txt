@@ -6,3 +6,4 @@ if(BUILD_KRB5 AND NOT APPLE)
 endif()
 
 add_bats_tests(sss.bats)
+add_bats_tests(unix.bats)

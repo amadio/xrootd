@@ -30,6 +30,14 @@ setup() {
     assert_output --partial "xrootd@XROOTD.ORG"
 }
 
+# Before the check of the size of the first message, the server accepted such
+# credentials as a login with the identity of the host.
+@test "credentials of only the name of the protocol fail the authentication" {
+    require_commands python3
+    run -0 python3 "$SETUP_DIR/raw-client.py" localhost "$SERVER_PORT" auth krb5
+    assert_output --partial 'error 3030'
+}
+
 @test "the client authenticates with krb5" {
     xrdfs "$SERVER_URL" query config version
     run -0 grep -F 'Authenticated with krb5' "$XRD_LOGFILE"

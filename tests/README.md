@@ -327,6 +327,10 @@ bats-assert without a `load` of their own.
   the extended regular expression.
 - `start_kdc` in `setup/kerberos.bash` starts a Kerberos KDC (key
   distribution center).
+- `setup/raw-client.py` sends single requests of the XRootD protocol which
+  the clients of XRootD do not send, for example an authentication request
+  without credentials, and prints the response. A test which uses it calls
+  `require_commands python3`.
 - `gstream_count <records> <key>` gives the sum of an HTTP counter of the
   g-stream, for example `HTTP_GET_302`, over all servers. `gstream_base` gives
   the count when no more reports change it, and `gstream_above` succeeds when

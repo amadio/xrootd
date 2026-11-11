@@ -32,6 +32,8 @@
 #include <cctype>
 #include <cerrno>
 #include <cstdlib>
+#include <cstring>
+#include <string>
 #include <strings.h>
 #include <sys/types.h>
 
@@ -67,19 +69,17 @@ friend class XrdSecProtocolDummy; // Avoid stupid gcc warnings about destructor
                            Entity.name = (char *)"?";
                            epAddr      = endPoint;
                            Entity.addrInfo = &epAddr;
-                           credBuff    = 0;
                           }
 
         void              Delete() {delete this;}
 
 private:
 
-       ~XrdSecProtocolunix() {if (credBuff)    free(credBuff);
-                              if (Entity.host) free(Entity.host);
+       ~XrdSecProtocolunix() {if (Entity.host) free(Entity.host);
                              } // via Delete()
 
 XrdNetAddrInfo            epAddr;
-char                     *credBuff;      // Credentials buffer (server)
+std::string               credBuff;      // Credentials buffer (server)
 };
 
 /******************************************************************************/
@@ -130,18 +130,21 @@ int XrdSecProtocolunix::Authenticate(XrdSecCredentials *cred,
 {
    char *bp, *ep;
 
-// Check if we have any credentials or if no credentials really needed.
-// In either case, use host name as client name
+// An incomplete first message is an authentication failure, not host auth.
+// A complete message holds the protocol id and its terminator, then the
+// identity. The identity may be empty: the client of dCache sends a layout in
+// which this parser sees no name, and it logs in without one.
 //
-   if (cred->size <= int(4) || !cred->buffer)
-      {strncpy(Entity.prot, "host", sizeof(Entity.prot));
-       Entity.name = (char *)"?";
-       return 0;
+   if (!cred->buffer || cred->size < int(5))
+      {const char *msg = "Secunix: Incomplete authentication credentials.";
+       if (erp) erp->setErrInfo(EACCES, msg);
+          else std::cerr <<msg <<std::endl;
+       return -1;
       }
 
 // Check if this is our protocol
 //
-   if (strcmp(cred->buffer, "unix"))
+   if (memcmp(cred->buffer, "unix", 5))
       {char msg[256];
        snprintf(msg, sizeof(msg),
                 "Secunix: Authentication protocol id mismatch (unix != %.4s).",
@@ -151,9 +154,12 @@ int XrdSecProtocolunix::Authenticate(XrdSecCredentials *cred,
        return -1;
       }
 
-// Skip over the protocol ID and copy the buffer
+// Skip over the protocol ID and copy the buffer. Some clients send no
+// terminator after the identity, thus the size of the message bounds the copy.
 //
-   bp = credBuff = strdup((cred->buffer)+5);
+   credBuff.assign(cred->buffer + 5, cred->size - 5);
+   Entity.grps = 0;
+   bp = credBuff.data();
    ep = bp + strlen(bp);
 
 // Extract out username

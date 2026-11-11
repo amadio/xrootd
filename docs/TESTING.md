@@ -167,7 +167,8 @@ The helpers are:
   the options of the systemd units (`-k fifo -a -w -n`). The name and the role
   are `server` by default. The roles are `server`, a data server with unix
   authentication, `server-nosec`, a data server without the security library,
-  and `cache`, a caching proxy in front of the server at `$ORIGIN`. A snippet
+  `server-export`, a data server without `oss.localroot` which exports the
+  absolute path of its data directory, and `cache`, a caching proxy in front of the server at `$ORIGIN`. A snippet
   ends in `.cfg`: a file of the test directory, or of `setup/`, like
   `http.cfg`, `tls.cfg`, `tpc.cfg`, `ztn.cfg`, `scitokens.cfg`, `krb5.cfg`,
   `checksum.cfg`, `checkpoint.cfg`, `faults.cfg` or `trace-http.cfg`. A name

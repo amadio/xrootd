@@ -4476,6 +4476,24 @@ int XrdXrootdProtocol::rpCheck(char *fn, char **opaque)
 }
 
 /******************************************************************************/
+/*                         N o r m a l i z e P a t h                          */
+/******************************************************************************/
+
+bool XrdXrootd::NormalizePath(std::string &path)
+{
+   char *opaque;
+
+   if (path.empty() || path[0] != '/') return false;
+
+// The checks change the buffer of the string in place and can only shorten it
+//
+   const bool ok = !XrdXrootdProtocol::rpCheck(path.data(), &opaque)
+                &&  XrdXrootdProtocol::Squash(path.data());
+   path.resize(strlen(path.c_str()));
+   return ok;
+}
+
+/******************************************************************************/
 /*                                r p E m s g                                 */
 /******************************************************************************/
 

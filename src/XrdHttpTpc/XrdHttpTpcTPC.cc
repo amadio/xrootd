@@ -8,6 +8,7 @@
 #include "XrdSys/XrdSysFD.hh"
 #include "XrdVersion.hh"
 
+#include "XrdXrootd/XrdXrootdPathUtils.hh"
 #include "XrdXrootd/XrdXrootdRedirHelper.hh"
 #include "XrdXrootd/XrdXrootdTpcMon.hh"
 #include "XrdOuc/XrdOucPrivateUtils.hh"
@@ -398,6 +399,13 @@ static bool IsAllowedScheme(const std::string& url)
 int TPCHandler::ProcessReq(XrdHttpExtReq &req) {
     if (req.verb == "OPTIONS") {
         return ProcessOptionsReq(req);
+    }
+    // The handler opens the local file directly, so it applies the path and
+    // export checks of the native protocol first.
+    if (!XrdXrootd::NormalizePath(req.resource)) {
+        const char *msg = "COPY rejected: the local path is outside the exported paths";
+        m_log.Emsg("ProcessReq", msg, req.resource.c_str());
+        return req.SendSimpleResp(403, NULL, NULL, msg, 0);
     }
     auto header = XrdOucTUtils::caseInsensitiveFind(req.headers,"credential");
     if (header != req.headers.end()) {

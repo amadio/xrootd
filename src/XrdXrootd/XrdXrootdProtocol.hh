@@ -44,6 +44,7 @@
 #include "Xrd/XrdObject.hh"
 #include "Xrd/XrdProtocol.hh"
 #include "XrdXrootd/XrdXrootdMonitor.hh"
+#include "XrdXrootd/XrdXrootdPathUtils.hh"
 #include "XrdXrootd/XrdXrootdReqID.hh"
 #include "XrdXrootd/XrdXrootdResponse.hh"
 #include "XProtocol/XProtocol.hh"
@@ -158,6 +159,7 @@ class XrdXrootdProtocol : public XrdProtocol, public XrdXrootd::gdCallBack,
                           public XrdSfsDio,   public XrdSfsXio
 {
 friend class XrdXrootdAdmin;
+friend bool  XrdXrootd::NormalizePath(std::string &path);
 public:
 
        void          aioUpdate(int val) {srvrAioOps += val;}

@@ -26,6 +26,7 @@ target_sources(XrdServer
     XrdXrootdMonFile.cc    XrdXrootdMonFile.hh
     XrdXrootdMonitor.cc    XrdXrootdMonitor.hh
     XrdXrootdNormAio.cc    XrdXrootdNormAio.hh
+                           XrdXrootdPathUtils.hh
     XrdXrootdPgrwAio.cc    XrdXrootdPgrwAio.hh
     XrdXrootdPgwBadCS.cc   XrdXrootdPgwBadCS.hh
     XrdXrootdPgwCtl.cc     XrdXrootdPgwCtl.hh

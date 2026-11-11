@@ -28,6 +28,7 @@
 /******************************************************************************/
 
 #include "XrdSec/XrdSecAttr.hh"
+#include "XrdSec/XrdSecEntity.hh"
 #include "XrdSec/XrdSecEntityXtra.hh"
 
 /******************************************************************************/
@@ -41,6 +42,8 @@ void XrdSecEntityXtra::Reset()
 // Cleanup the key-value map
 //
    attrMap.clear();
+   loginMap.clear();
+   loginSet = false;
 
 // Run through attribute objects, deleting each one
 //
@@ -51,4 +54,29 @@ void XrdSecEntityXtra::Reset()
 // Now clear the whole vector
 //
    attrVec.clear();
+}
+
+/******************************************************************************/
+/*                  R e s e t R e q u e s t I d e n t i t y                   */
+/******************************************************************************/
+
+void XrdSecEntityXtra::ResetRequestIdentity(const XrdSecEntity &entity)
+{
+// The attribute store of an entity is always an XrdSecEntityXtra
+//
+   auto *xtra = static_cast<XrdSecEntityXtra *>(entity.eaAPI);
+   if (!xtra) return;
+
+   XrdSysMutexHelper mHelp(xtra->xMutex);
+   for (const char *key : {"request.name", "token.subject"})
+       {if (!xtra->loginSet)
+           {auto it = xtra->attrMap.find(key);
+            if (it != xtra->attrMap.end()) xtra->loginMap[key] = it->second;
+           } else {
+            auto it = xtra->loginMap.find(key);
+            if (it != xtra->loginMap.end()) xtra->attrMap[key] = it->second;
+               else xtra->attrMap.erase(key);
+           }
+       }
+   xtra->loginSet = true;
 }

@@ -83,6 +83,8 @@
 
 #include "XrdAcc/XrdAccAuthorize.hh"
 
+#include "XrdSec/XrdSecEntityXtra.hh"
+
 /******************************************************************************/
 /*                        G l o b a l   O b j e c t s                         */
 /******************************************************************************/
@@ -109,6 +111,41 @@ extern XrdOfsTPCConfig  Cfg;
 namespace
 {
 int SetMode(const char *path, mode_t mode) {return chmod(path, mode);}
+
+// A token module sets the identity of a token on the entity of the connection.
+// Start each authorization from the login identity, so that an authorization
+// without a token does not use the identity of an earlier one.
+//
+class AuthzPerRequest : public XrdAccAuthorize
+{
+public:
+
+XrdAccPrivs Access(const XrdSecEntity *Entity, const char *path,
+                   const Access_Operation oper, XrdOucEnv *Env=0) override
+                  {if (Entity) XrdSecEntityXtra::ResetRequestIdentity(*Entity);
+                   return authz.Access(Entity, path, oper, Env);
+                  }
+
+XrdAccPrivs Access(const XrdSecEntity *Entity, const char *path,
+                   const Access_Operation oper, std::string &eInfo,
+                   XrdOucEnv *Env=0) override
+                  {if (Entity) XrdSecEntityXtra::ResetRequestIdentity(*Entity);
+                   return authz.Access(Entity, path, oper, eInfo, Env);
+                  }
+
+int         Audit(const int accok, const XrdSecEntity *Entity, const char *path,
+                  const Access_Operation oper, XrdOucEnv *Env=0) override
+                 {return authz.Audit(accok, Entity, path, oper, Env);}
+
+int         Test(const XrdAccPrivs priv, const Access_Operation oper) override
+                {return authz.Test(priv, oper);}
+
+            AuthzPerRequest(XrdAccAuthorize &auth) : authz(auth) {}
+
+private:
+
+XrdAccAuthorize &authz;
+};
 
 std::vector<std::string> csList; // Configured checksums
 }
@@ -300,6 +337,8 @@ int XrdOfs::Configure(XrdSysError &Eroute, XrdOucEnv *EnvInfo) {
                }
             if (Options & Authorize)
                {ofsConfig->Plugin(Authorization);
+                if (Authorization)
+                   Authorization = new AuthzPerRequest(*Authorization);
                 XrdOfsTPC::Init(Authorization);
                 if (xrdEnv) xrdEnv->PutPtr("XrdAccAuthorize*",Authorization);
                 FeatureSet |= XrdSfs::hasAUTZ;

@@ -210,6 +210,12 @@ int XrdXrootdProtocol::do_Auth()
 // Ignore authenticate requests if security turned off
 //
    if (!CIA) return Response.Send();
+
+// A request without credentials has no argument buffer of its own
+//
+   if (!argp || !Request.header.dlen)
+      return Response.Send(kXR_ArgMissing, "Required argument not present");
+
    cred.size   = Request.header.dlen;
    cred.buffer = argp->buff;
 

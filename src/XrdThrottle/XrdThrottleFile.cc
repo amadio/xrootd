@@ -1,4 +1,6 @@
 
+#include "XrdAcc/XrdAccAuthorize.hh"
+#include "XrdOuc/XrdOucEnv.hh"
 #include "XrdSfs/XrdSfsAio.hh"
 #include "XrdSec/XrdSecEntity.hh"
 #include "XrdSec/XrdSecEntityAttr.hh"
@@ -31,7 +33,8 @@ if (!ok) { \
 File::File(const char                     *user,
                  unique_sfs_ptr            sfs,
                  XrdThrottleManager       &throttle,
-                 XrdSysError              &eroute)
+                 XrdSysError              &eroute,
+                 XrdAccAuthorize          *authz)
    : XrdSfsFile(sfs->error), // Use underlying error object as ours
 #if __cplusplus >= 201103L
      m_sfs(std::move(sfs)), // Guaranteed to be non-null by FileSystem::newFile
@@ -41,7 +44,8 @@ File::File(const char                     *user,
      m_uid(0),
      m_connection_id(user ? user : ""),
      m_throttle(throttle),
-     m_eroute(eroute)
+     m_eroute(eroute),
+     m_authz(authz)
 {}
 
 File::~File()
@@ -58,8 +62,18 @@ File::open(const char                *fileName,
            const XrdSecEntity        *client,
            const char                *opaque)
 {
-   std::tie(m_user, m_uid) = m_throttle.GetUserInfo(client);
    m_throttle.PrepLoadShed(opaque, m_loadshed);
+
+   // The limit check must come before the wrapped open, which can create or
+   // truncate the file. A token module sets the user of a token only in an
+   // authorization, so authorize here first. The result is not used.
+   if (m_authz && client) {
+       XrdOucEnv env(opaque, 0, client);
+       const bool isRW = openMode & (SFS_O_WRONLY | SFS_O_RDWR | SFS_O_CREAT | SFS_O_TRUNC);
+       m_authz->Access(client, fileName, isRW ? AOP_Update : AOP_Read, &env);
+   }
+
+   std::tie(m_user, m_uid) = m_throttle.GetUserInfo(client);
    std::string open_error_message;
    if (!m_throttle.OpenFile(m_user, open_error_message)) {
        error.setErrInfo(EMFILE, open_error_message.c_str());

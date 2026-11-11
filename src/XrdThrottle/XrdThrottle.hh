@@ -10,6 +10,7 @@
 #include "XrdThrottle/XrdThrottleTrace.hh"
 #include "XrdThrottle/XrdThrottleManager.hh"
 
+class XrdAccAuthorize;
 class XrdSysLogger;
 class XrdOucStream;
 
@@ -117,7 +118,8 @@ public:
             XrdSfsXferSize     size) override;
 
 private:
-   File(const char *, unique_sfs_ptr, XrdThrottleManager &, XrdSysError &);
+   File(const char *, unique_sfs_ptr, XrdThrottleManager &, XrdSysError &,
+        XrdAccAuthorize *);
 
    virtual
    ~File();
@@ -130,6 +132,7 @@ private:
    std::string m_user;
    XrdThrottleManager &m_throttle;
    XrdSysError &m_eroute;
+   XrdAccAuthorize *m_authz;
 };
 
 class FileSystem final : public XrdSfsFileSystem
@@ -276,6 +279,7 @@ private:
    XrdOucTrace         m_trace;
    std::string         m_config_file;
    XrdSfsFileSystem   *m_sfs_ptr;
+   XrdAccAuthorize    *m_authz{nullptr};
    bool                m_initialized;
    XrdThrottleManager  m_throttle;
    XrdVersionInfo     *myVersion;

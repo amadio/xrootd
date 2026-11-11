@@ -136,7 +136,8 @@ XrdThrottleManager::GetUserInfo(const XrdSecEntity *client) {
     // specific to most generic.
     std::string user;
 
-    if (client->eaAPI && client->eaAPI->Get("token.subject", user)) {
+    // An empty attribute counts as no attribute.
+    if (client->eaAPI && client->eaAPI->Get("token.subject", user) && !user.empty()) {
         if (client->vorg) user = std::string(client->vorg) + ":" + user;
     } else if (client->eaAPI) {
         std::string request_name;

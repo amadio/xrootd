@@ -39,6 +39,14 @@ teardown() {
         X509_USER_PROXY="$BATS_TEST_TMPDIR/xrdgsitest.proxy" run -0 xrdgsitest
 }
 
+# Before the check of the size of the first message, the server accepted such
+# credentials as a login with the identity of the host.
+@test "credentials of only the name of the protocol fail the authentication" {
+    require_commands python3
+    run -0 python3 "$SETUP_DIR/raw-client.py" localhost "$SERVER_PORT" auth gsi
+    assert_output --partial 'error 3030'
+}
+
 @test "the client authenticates with gsi" {
     xrdfs "$SERVER_URL" query config version
     run -0 grep -F 'Authenticated with gsi' "$XRD_LOGFILE"

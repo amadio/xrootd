@@ -8,6 +8,7 @@ endif()
 # the issuer over HTTPS, with scitoken_config_set_str
 if(BUILD_SCITOKENS AND HAVE_SCITOKEN_CONFIG_SET_STR)
   add_bats_tests(scitokens.bats)
+  add_bats_tests(token-checksum.bats)
   add_bats_tests(token-reuse.bats)
   add_bats_tests(token-throttle.bats)
 endif()

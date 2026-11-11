@@ -305,6 +305,8 @@ bats-assert without a `load` of their own.
   name and the role are `server` by default. The roles are:
   - `server`: a data server with unix authentication.
   - `server-nosec`: a data server without the security library.
+  - `server-export`: a data server without `oss.localroot`, which exports
+    the absolute path of its data directory.
   - `cache`: a caching proxy in front of the server at `$ORIGIN`.
 
   A snippet ends in `.cfg`. It is a file of the directory of the test, or of

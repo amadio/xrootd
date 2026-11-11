@@ -1,0 +1,4 @@
+# Anybody may read and list, except below /private. XrdAcc applies the first
+# path of a rule which is a prefix of the request path, thus /private comes
+# before /.
+u * /private -lr / lr

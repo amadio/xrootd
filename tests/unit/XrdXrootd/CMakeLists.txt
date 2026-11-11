@@ -9,6 +9,7 @@ add_unit_tests(
   SOURCES
     XrdXrootdFileStats.cc
     XrdXrootdMonitor.cc
+    XrdXrootdNormalizePath.cc
     XrdXrootdRedirHelper.cc
   LIBRARIES
     XrdServer

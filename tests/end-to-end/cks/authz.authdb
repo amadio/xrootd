@@ -1,0 +1,4 @@
+# Anybody may read and list, except below /listed, where anybody may only
+# list. XrdAcc applies the first path of a rule which is a prefix of the
+# request path, thus /listed comes before /.
+u * /listed l / lr

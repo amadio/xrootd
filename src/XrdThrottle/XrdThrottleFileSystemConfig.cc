@@ -3,6 +3,7 @@
 
 #include "XrdVersion.hh"
 
+#include "XrdAcc/XrdAccAuthorize.hh"
 #include "XrdSys/XrdSysPlugin.hh"
 #include "XrdSys/XrdSysLogger.hh"
 #include "XrdOuc/XrdOuca2x.hh"
@@ -163,6 +164,10 @@ FileSystem::Configure(XrdSysError & log, XrdSfsFileSystem *native_fs, XrdOucEnv 
        auto gstream = reinterpret_cast<XrdXrootdGStream*>(envP->GetPtr("Throttle.gStream*"));
        log.Say("Config", "Throttle g-stream has", gstream ? "" : " NOT", " been configured via xrootd.mongstream directive");
        m_throttle.SetMonitor(gstream);
+
+       // The wrapped file system gives its authorization to the environment
+       auto xrdEnv = static_cast<XrdOucEnv*>(envP->GetPtr("xrdEnv*"));
+       if (xrdEnv) m_authz = static_cast<XrdAccAuthorize*>(xrdEnv->GetPtr("XrdAccAuthorize*"));
    }
 
    // The Feature function is not a virtual but implemented by the base class to

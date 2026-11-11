@@ -93,6 +93,7 @@ XrdNetPMark          *XrdXrootdProtocol::PMark    = 0;
 XrdXrootdRedirPI     *XrdXrootdProtocol::RedirPI  = 0;
 XrdXrootdStats       *XrdXrootdProtocol::SI;
 XrdXrootdJob         *XrdXrootdProtocol::JobCKS   = 0;
+XrdAccAuthorize      *XrdXrootdProtocol::fsAuth   = 0;
 char                 *XrdXrootdProtocol::JobCKT   = 0;
 XrdOucTList          *XrdXrootdProtocol::JobCKTLST= 0;
 XrdOucReqID          *XrdXrootdProtocol::PrepID   = 0;

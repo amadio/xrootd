@@ -36,6 +36,7 @@
 #include <sys/time.h>
 #include <vector>
 
+#include "XrdAcc/XrdAccAuthorize.hh"
 #include "XrdSfs/XrdSfsInterface.hh"
 #include "XrdSfs/XrdSfsFlags.hh"
 #include "XrdSys/XrdSysError.hh"
@@ -497,6 +498,21 @@ int XrdXrootdProtocol::do_CKsum(int canit)
 //
    if (!JobCKS)
       return Response.Send(kXR_ServerError, "Logic error computing checksum.");
+
+// The local query above authorizes the request. An external program has no
+// local query, so authorize the request here. The program reads the file, so
+// the client needs the read privilege. A token module also sets the mapped
+// name of the request in this step.
+//
+   if (!JobLCL && fsAuth && Client)
+      {XrdOucEnv cksEnv(opaque, 0, CRED);
+       if (!fsAuth->Access(CRED, argp->buff, AOP_Read, &cksEnv))
+          {char ebuf[2048];
+           snprintf(ebuf, sizeof(ebuf), "Unable to checksum %s; permission "
+                                        "denied", argp->buff);
+           return Response.Send(kXR_NotAuthorized, ebuf);
+          }
+      }
 
 // Check if multiple checksums are supported and construct right argument list
 // We make a concession to a wrongly placed setfsuid/gid plugin. Fortunately,

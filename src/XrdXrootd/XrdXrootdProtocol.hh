@@ -67,6 +67,7 @@
 /*                   x r d _ P r o t o c o l _ X R o o t d                    */
 /******************************************************************************/
 
+class XrdAccAuthorize;
 class XrdNetSocket;
 class XrdOucEnv;
 class XrdOucErrInfo;
@@ -400,6 +401,7 @@ static XrdXrootdXPath        RQList;    // Redirected paths for ENOENT
 static XrdXrootdXPath        XPList;    // Exported   paths
 static XrdSfsFileSystem     *osFS;      // The filesystem
 static XrdSfsFileSystem     *digFS;     // The filesystem (digFS)
+static XrdAccAuthorize      *fsAuth;    // The authorization of osFS
 static XrdSecService        *CIA;       // Authentication Server
 static XrdSecProtector      *DHS;       // Protection     Server
 static XrdTlsContext        *tlsCtx;    // Protection     Server TLS available

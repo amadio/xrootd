@@ -424,13 +424,11 @@ int XrdSecProtocolkrb5::Authenticate(XrdSecCredentials *cred,
    std::string cPrincipal;
    bool isCP = false;
 
-// Check if we have any credentials or if no credentials really needed.
-// In either case, use host name as client name
+// An incomplete first message is an authentication failure, not host auth.
 //
    if (cred->size <= (int)XrdSecPROTOIDLEN || !cred->buffer)
-      {strncpy(Entity.prot, "host", sizeof(Entity.prot));
-       return 0;
-      }
+      return Fatal(error, EACCES, "incomplete authentication credentials",
+                   Principal);
 
 // Check if this is a recognized protocol
 //

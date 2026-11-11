@@ -1176,10 +1176,10 @@ int XrdSecProtocolpwd::Authenticate(XrdSecCredentials *cred,
    EPNAME("Authenticate");
 
    //
-   // If cred buffer is two small or empty assume host protocol
+   // An incomplete first message is an authentication failure, not host auth.
    if (cred->size <= (int)XrdSecPROTOIDLEN || !cred->buffer) {
-      strncpy(Entity.prot, "host", sizeof(Entity.prot));
-      return 0;
+      return ErrS(String("none"), ei, 0, 0, 0, kPWErrNoCreds,
+                  "incomplete authentication credentials");
    }
 
    // Handshake vars container must be initialized at this point

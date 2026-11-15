@@ -1,9 +1,11 @@
 #undef NDEBUG
 
 #include "XrdHttp/XrdHttpUtils.hh"
+#include "XrdSec/XrdSecEntity.hh"
 
 #include <gtest/gtest.h>
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -175,3 +177,104 @@ TEST(UtilsTest, Base64DecodeHexConvertsBase64ToHexAndBack) {
     ASSERT_EQ(b64ToH.first,output);
   }
 }
+
+// calcHashes() signs the identity of a client for a redirect to cleartext
+// HTTP. The target server applies each field of the token to the identity of
+// the client, thus each field must change the hash.
+
+namespace {
+
+// The fields of an identity which a redirect token carries. An empty value
+// is a field which the identity does not have.
+struct TokenIdentity {
+  std::optional<std::string> name{"user"};
+  std::optional<std::string> vorg{"vo"};
+  std::optional<std::string> host{"client.example.org"};
+  std::optional<std::string> moninfo{"/DC=org/DC=example/CN=user"};
+  std::optional<std::string> role{"member"};
+  std::optional<std::string> grps{"/vo"};
+  std::optional<std::string> endorsements{"endorsement"};
+  std::optional<std::string> creds{"credentials"};
+};
+
+using TokenField = std::optional<std::string> TokenIdentity::*;
+
+const std::pair<const char *, TokenField> tokenFields[] {
+  {"Name", &TokenIdentity::name},
+  {"Vorg", &TokenIdentity::vorg},
+  {"Host", &TokenIdentity::host},
+  {"Moninfo", &TokenIdentity::moninfo},
+  {"Role", &TokenIdentity::role},
+  {"Grps", &TokenIdentity::grps},
+  {"Endorsements", &TokenIdentity::endorsements},
+  {"Creds", &TokenIdentity::creds},
+};
+
+char *fieldValue(std::optional<std::string> &value) {
+  return value ? value->data() : nullptr;
+}
+
+std::string tokenHash(TokenIdentity id) {
+  XrdSecEntity entity;
+  entity.name = fieldValue(id.name);
+  entity.vorg = fieldValue(id.vorg);
+  entity.host = fieldValue(id.host);
+  entity.moninfo = fieldValue(id.moninfo);
+  entity.role = fieldValue(id.role);
+  entity.grps = fieldValue(id.grps);
+  entity.endorsements = fieldValue(id.endorsements);
+  entity.creds = fieldValue(id.creds);
+  entity.credslen = id.creds ? static_cast<int>(id.creds->size()) : 0;
+
+  char hash[512];
+  calcHashes(hash, "/file", 1, &entity, 1700000000, "secret");
+  return hash;
+}
+
+// An identity with only the given field, set to the same value for each field
+TokenIdentity onlyField(TokenField field) {
+  TokenIdentity id{std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                   std::nullopt, std::nullopt, std::nullopt, std::nullopt};
+  id.*field = "value";
+  return id;
+}
+
+} // namespace
+
+TEST(UtilsTest, CalcHashesGivesTheSameHashForTheSameIdentity) {
+  const std::string hash = tokenHash({});
+  ASSERT_FALSE(hash.empty());
+  ASSERT_EQ(hash, tokenHash({}));
+}
+
+// The tests of each field of the token
+class CalcHashesFieldTest
+    : public testing::TestWithParam<std::pair<const char *, TokenField>> {};
+
+TEST_P(CalcHashesFieldTest, SignsAChangedValueOfTheField) {
+  TokenIdentity changed;
+  changed.*GetParam().second = "admin";
+  EXPECT_NE(tokenHash(changed), tokenHash({}));
+}
+
+TEST_P(CalcHashesFieldTest, SignsTheAbsenceOfTheField) {
+  TokenIdentity removed;
+  removed.*GetParam().second = std::nullopt;
+  EXPECT_NE(tokenHash(removed), tokenHash({}));
+}
+
+// The same value in another field gives another hash
+TEST_P(CalcHashesFieldTest, SignsWhichFieldHasTheValue) {
+  const TokenField field = GetParam().second;
+  for (const auto &[other, otherField] : tokenFields) {
+    if (otherField != field) {
+      EXPECT_NE(tokenHash(onlyField(field)), tokenHash(onlyField(otherField)))
+          << "the same value in " << other;
+    }
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(, CalcHashesFieldTest, testing::ValuesIn(tokenFields),
+    [](const testing::TestParamInfo<CalcHashesFieldTest::ParamType> &info) {
+      return std::string(info.param.first);
+    });

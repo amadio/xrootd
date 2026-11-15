@@ -276,6 +276,8 @@ private:
   XrdBuffer *myBuff;
   /// The circular pointers
   char *myBuffStart, *myBuffEnd;
+  /// The number of bytes consumed from the buffer since the start of the connection
+  long long m_buffConsumed{0};
   
   /// A nice var to hold the current header line
   XrdOucString tmpline;

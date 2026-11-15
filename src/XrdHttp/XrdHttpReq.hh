@@ -120,6 +120,13 @@ private:
 
   // Whether transfer encoding was requested.
   bool m_transfer_encoding_chunked{false};
+
+  // The body of the request: its start in the bytes of the connection, its
+  // Content-Length, and whether it is chunked and not read to its end. The
+  // value of length changes after the header, thus it has a copy.
+  long long m_body_start{0};
+  long long m_body_length{0};
+  bool m_body_chunked{false};
   long long m_current_chunk_offset;
   long long m_current_chunk_size;
 
@@ -227,6 +234,13 @@ public:
   virtual ~XrdHttpReq();
 
   virtual void reset();
+
+  /// Note the end of the header. The body of the request, if any, starts
+  /// after the given number of bytes of the connection.
+  void HeaderEnd(long long consumed);
+
+  /// Tell if the request has a body which the server did not read to its end
+  bool BodyPending() const;
 
   int getInitialStatusCode() { return initialStatusCode;}
   int getHttpStatusCode() { return httpStatusCode;}

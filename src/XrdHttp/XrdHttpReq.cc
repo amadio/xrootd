@@ -244,6 +244,7 @@ int XrdHttpReq::parseLine(char *line, int len) {
         return -8;
       }
       m_transfer_encoding_chunked = true;
+      m_body_chunked = true;
     } else if (!strcasecmp(key, "x-transfer-status") && strstr(val, "true")) {
       m_transfer_encoding_chunked = true;
       m_status_trailer = true;
@@ -980,11 +981,13 @@ int XrdHttpReq::ProcessHTTPReq() {
     if (exthandler) {
       XrdHttpExtReq xreq(this, prot);
       int r = exthandler->ProcessReq(xreq);
+      // The rest of a body which the handler did not read must not run as a
+      // request, thus close the connection
+      const bool bodyPending = BodyPending();
       reset();
-      if (!r) return 1; // All went fine, response sent
-      if (r < 0) return -1; // There was a hard error... close the connection
+      if (r < 0 || bodyPending) return -1; // A hard error, or an unread body
 
-      return 1; // There was an error and a response was sent
+      return 1; // A response was sent, after a success or an error
     }
   }
 
@@ -1367,6 +1370,7 @@ int XrdHttpReq::ProcessHTTPReq() {
               // set the bytes written and length appropriately; on next callback,
               // we will hit the close() block below.
               m_transfer_encoding_chunked = false;
+              m_body_chunked = false;
               length = writtenbytes;
               return ProcessHTTPReq();
             }
@@ -2089,6 +2093,17 @@ void XrdHttpReq::setTransferStatusHeader(std::string &header) {
 }
 
 // This is invoked by the callbacks, after something has happened in the bridge
+
+void XrdHttpReq::HeaderEnd(long long consumed) {
+  headerok = true;
+  m_body_start = consumed;
+  m_body_length = length;
+}
+
+bool XrdHttpReq::BodyPending() const {
+  if (!headerok) return false;
+  return m_body_chunked || prot->m_buffConsumed - m_body_start < m_body_length;
+}
 
 int XrdHttpReq::LastBridgeRequest() const {
   return prot->BuffUsed() > 0 ? 0 : 1;
@@ -2815,6 +2830,9 @@ void XrdHttpReq::reset() {
   sendcontinue = false;
 
   m_transfer_encoding_chunked = false;
+  m_body_start = 0;
+  m_body_length = 0;
+  m_body_chunked = false;
   m_current_chunk_size = -1;
   m_current_chunk_offset = 0;
 

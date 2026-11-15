@@ -478,6 +478,28 @@ int XrdXrootdProtocol::Process2()
                                 return Link->setEtext("request without login");
             }
 
+// Now select the requests that do not need authentication
+//
+   switch(Request.header.requestid)
+         {case kXR_protocol: return do_Protocol();   // dlen ignored
+          case kXR_ping:     return do_Ping();       // dlen ignored
+          default:           break;
+         }
+
+// Force authentication at this point, if need be. A client which did not
+// authenticate has no open file, thus this comes before the file requests.
+//
+   if (Status & XRD_NEED_AUTH)
+      {int rc;
+       if (Request.header.requestid == kXR_auth) rc = do_Auth();
+          else {Response.Send(kXR_InvalidRequest,
+                              "Invalid request; user not authenticated");
+                rc = -1;
+               }
+       if (tlsCtx) XrdTls::ClearErrorQueue();
+       return rc;
+      }
+
 // Help the compiler, select the the high activity requests (the ones with
 // file handles) in a separate switch statement. A special case exists for
 // sync() which return with a callback, so handle it here. Note that stat(fh)
@@ -509,27 +531,6 @@ int XrdXrootdProtocol::Process2()
           case kXR_clone:    return do_Clone();
           default:           break;
          }
-
-// Now select the requests that do not need authentication
-//
-   switch(Request.header.requestid)
-         {case kXR_protocol: return do_Protocol();   // dlen ignored
-          case kXR_ping:     return do_Ping();       // dlen ignored
-          default:           break;
-         }
-
-// Force authentication at this point, if need be
-//
-   if (Status & XRD_NEED_AUTH)
-      {int rc;
-       if (Request.header.requestid == kXR_auth) rc = do_Auth();
-          else {Response.Send(kXR_InvalidRequest,
-                              "Invalid request; user not authenticated");
-                rc = -1;
-               }
-       if (tlsCtx) XrdTls::ClearErrorQueue();
-       return rc;
-      }
 
 // Construct request ID as the following functions are async eligible
 //

@@ -718,79 +718,31 @@ int XrdHttpProtocol::ProcessRequest(XrdLink *lp)
           return -1;
         }
 
-        // Fill the Secentity from the fields in the URL:name, vo, host
-        char *nfo;
+        // Fill the Secentity from the fields in the URL. The token signs each
+        // of them, and a field which the URL does not have stays as it is.
+        auto setField = [this](const char *key, char *&field, bool secret = false) {
+          const char *nfo = CurrentReq.opaque->Get(key);
+          if (!nfo) return;
+          free(field);
+          field = strdup(decode_str(nfo).c_str());
+          TRACEI(REQ, " Setting " << key << ": " << (secret ? "(hidden)" : field));
+        };
 
-        nfo = CurrentReq.opaque->Get("xrdhttpvorg");
-        if (nfo) {
-          TRACEI(DEBUG, " Setting vorg: " << nfo);
-          SecEntity.vorg = strdup(nfo);
-          TRACEI(REQ, " Setting vorg: " << SecEntity.vorg);
-        }
+        setField("xrdhttpvorg", SecEntity.vorg);
+        setField("xrdhttpname", SecEntity.name);
+        setField("xrdhttphost", SecEntity.host);
+        setField("xrdhttpdn", SecEntity.moninfo);
+        setField("xrdhttprole", SecEntity.role);
+        setField("xrdhttpgrps", SecEntity.grps);
+        setField("xrdhttpendorsements", SecEntity.endorsements);
 
-        nfo = CurrentReq.opaque->Get("xrdhttpname");
-        if (nfo) {
-          TRACEI(DEBUG, " Setting name: " << nfo);
-          SecEntity.name = strdup(decode_str(nfo).c_str());
-          TRACEI(REQ, " Setting name: " << SecEntity.name);
-        }
-        
-        nfo = CurrentReq.opaque->Get("xrdhttphost");
-        if (nfo) {
-          TRACEI(DEBUG, " Setting host: " << nfo);
-          if (SecEntity.host) free(SecEntity.host);
-          SecEntity.host = strdup(decode_str(nfo).c_str());
-          TRACEI(REQ, " Setting host: " << SecEntity.host);
-        }
-        
-        nfo = CurrentReq.opaque->Get("xrdhttpdn");
-        if (nfo) {
-          TRACEI(DEBUG, " Setting dn: " << nfo);
-          SecEntity.moninfo = strdup(decode_str(nfo).c_str());
-          TRACEI(REQ, " Setting dn: " << SecEntity.moninfo);
+        // The length of the credentials is the length of their text, which
+        // the token signs, not a value of the URL
+        if (CurrentReq.opaque->Get("xrdhttpcreds")) {
+          setField("xrdhttpcreds", SecEntity.creds, true);
+          SecEntity.credslen = strlen(SecEntity.creds);
         }
 
-        nfo = CurrentReq.opaque->Get("xrdhttprole");
-        if (nfo) {
-          TRACEI(DEBUG, " Setting role: " << nfo);
-          SecEntity.role = strdup(decode_str(nfo).c_str());
-          TRACEI(REQ, " Setting role: " << SecEntity.role);
-        }
-
-        nfo = CurrentReq.opaque->Get("xrdhttpgrps");
-        if (nfo) {
-          TRACEI(DEBUG, " Setting grps: " << nfo);
-          SecEntity.grps = strdup(decode_str(nfo).c_str());
-          TRACEI(REQ, " Setting grps: " << SecEntity.grps);
-        }
-        
-        nfo = CurrentReq.opaque->Get("xrdhttpendorsements");
-        if (nfo) {
-          TRACEI(DEBUG, " Setting endorsements: " << nfo);
-          SecEntity.endorsements = strdup(decode_str(nfo).c_str());
-          TRACEI(REQ, " Setting endorsements: " << SecEntity.endorsements);
-        }
-        
-        nfo = CurrentReq.opaque->Get("xrdhttpcredslen");
-        if (nfo) {
-          TRACEI(DEBUG, " Setting credslen: " << nfo);
-          char *s1 = strdup(decode_str(nfo).c_str());
-          if (s1 && s1[0]) {
-            SecEntity.credslen = atoi(s1);
-            TRACEI(REQ, " Setting credslen: " << SecEntity.credslen);
-          }
-          if (s1) free(s1);
-        }
-        
-        if (SecEntity.credslen) {
-          nfo = CurrentReq.opaque->Get("xrdhttpcreds");
-          if (nfo) {
-            TRACEI(DEBUG, " Setting creds: " << nfo);
-            SecEntity.creds = strdup(decode_str(nfo).c_str());
-            TRACEI(REQ, " Setting creds: " << SecEntity.creds);
-          }
-        }
-        
         char hash[512];
 
         calcHashes(hash, CurrentReq.resource.c_str(), (kXR_int16) CurrentReq.request,

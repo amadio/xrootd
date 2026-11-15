@@ -781,13 +781,7 @@ void XrdHttpReq::appendOpaque(XrdOucString &s, XrdSecEntity *secent, char *hash,
         s += encode_str(secent->endorsements).c_str();
       }
 
-      if (secent->credslen) {
-        s += "&xrdhttpcredslen=";
-        char buf[16];
-        sprintf(buf, "%d", secent->credslen);
-        s += encode_str(buf).c_str();
-      }
-
+      // The target takes the length of the credentials from their text
       if (secent->credslen) {
         if (secent->creds) {
           s += "&xrdhttpcreds=";

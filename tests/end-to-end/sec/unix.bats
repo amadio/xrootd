@@ -30,3 +30,16 @@ teardown() {
     python3 "$SETUP_DIR/raw-client.py" localhost "$SERVER_PORT" auth-empty unix
     run -0 xrdfs "$SERVER_URL" query config version
 }
+
+# The server checked the authentication only after the requests with a file
+# handle. A checkpoint request without data then read the request that it
+# carries through a null pointer.
+@test "a checkpoint request before authentication gets kXR_InvalidRequest" {
+    run -0 python3 "$SETUP_DIR/raw-client.py" localhost "$SERVER_PORT" chkpoint-xeq
+    assert_output --partial 'error 3006'
+}
+
+@test "the server stays up after a checkpoint request before authentication" {
+    python3 "$SETUP_DIR/raw-client.py" localhost "$SERVER_PORT" chkpoint-xeq
+    run -0 xrdfs "$SERVER_URL" query config version
+}

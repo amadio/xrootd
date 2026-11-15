@@ -11,6 +11,9 @@
 #   raw-client.py HOST PORT statx PATH...
 #       Log in with the unix protocol, then send one kXR_statx request for
 #       all the paths.
+#   raw-client.py HOST PORT chkpoint-xeq
+#       Log in, then send a kXR_chkpoint request with the subcode kXR_ckpXeq
+#       and without the request that it must carry.
 #
 # Print the response of the server to the last request: "ok" and the bytes of
 # the body as numbers, "authmore", or "error <code> <text>".
@@ -21,11 +24,14 @@ import struct
 import sys
 
 KXR_AUTH = 3000
+KXR_CHKPOINT = 3012
 KXR_LOGIN = 3007
 KXR_STATX = 3022
 KXR_OK = 0
 KXR_AUTHMORE = 4002
 KXR_ERROR = 4003
+
+KXR_CKPXEQ = 4
 
 STREAM = b"\0\1"
 
@@ -55,9 +61,10 @@ def auth(sock, protocol, credentials):
 
 
 def main():
-    if len(sys.argv) < 5:
+    if len(sys.argv) < 4 or (sys.argv[3] != "chkpoint-xeq" and len(sys.argv) < 5):
         print(f"usage: {sys.argv[0]} HOST PORT auth|auth-empty|statx ARGUMENT...",
               file=sys.stderr)
+        print(f"       {sys.argv[0]} HOST PORT chkpoint-xeq", file=sys.stderr)
         return 2
 
     host, port, command = sys.argv[1], int(sys.argv[2]), sys.argv[3]
@@ -86,6 +93,9 @@ def main():
                 print(f"authentication failed with status {status}", file=sys.stderr)
                 return 1
             status, body = request(sock, KXR_STATX, b"", b"\n".join(arguments))
+        elif command == "chkpoint-xeq":
+            # File handle 0, then the reserved bytes and the subcode
+            status, body = request(sock, KXR_CHKPOINT, struct.pack("!4s11sB", b"", b"", KXR_CKPXEQ))
         else:
             print(f"unknown command {command}", file=sys.stderr)
             return 2

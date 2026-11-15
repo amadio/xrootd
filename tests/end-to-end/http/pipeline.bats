@@ -49,6 +49,17 @@ pipeline() {
     exec 3<&-
 }
 
+# headers <port>
+#
+# Send $requests in one write and print the responses without the carriage
+# returns, until the server closes the connection or a timeout
+headers() {
+    exec 3<>"/dev/tcp/localhost/$1"
+    printf '%s' "$requests" >&3
+    timeout 10 cat <&3 | tr -d '\r' || true
+    exec 3<&-
+}
+
 @test "two pipelined GET requests get two responses" {
     request GET /file 'Range: bytes=0-4\r\n'
     request GET /file 'Range: bytes=5-9\r\nConnection: close\r\n'
@@ -118,4 +129,38 @@ pipeline() {
     request HEAD /file 'Connection: close\r\n'
     run -0 pipeline "$RDR_PORT"
     assert_output $'307\n307\n307'
+}
+
+# A body which the server does not read must not run as the next request of
+# the pipeline (RFC 9112 section 9.3). Each body is the text of a request.
+
+@test "a redirector does not run the body of a redirected PUT as a request" {
+    local inner
+    printf -v inner 'GET /file HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'
+    request PUT /put-body "Content-Length: ${#inner}\r\n" "$inner"
+    run -0 pipeline "$RDR_PORT"
+    assert_output '307'
+}
+
+# A client may send the body after a redirect, without a 100 Continue
+@test "a redirector does not run the body of a PUT with Expect: 100-continue as a request" {
+    local inner
+    printf -v inner 'GET /file HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'
+    request PUT /put-expect "Content-Length: ${#inner}\r\nExpect: 100-continue\r\n" "$inner"
+    run -0 pipeline "$RDR_PORT"
+    assert_output '307'
+}
+
+@test "a server does not run the body of a GET as a request" {
+    local inner
+    printf -v inner 'PUT /get-body HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx'
+    request GET /file "Content-Length: ${#inner}\r\n" "$inner"
+    run -0 pipeline "$SERVER_PORT"
+    assert_output '200'
+}
+
+@test "the redirect of a PUT with an unread body says that the connection closes" {
+    request PUT /put-close 'Content-Length: 5\r\n' abcde
+    run -0 headers "$RDR_PORT"
+    assert_line --regexp '^Connection: [Cc]lose$'
 }

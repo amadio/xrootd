@@ -40,6 +40,7 @@
 #include "XrdHttpUtils.hh"
 
 #include <cstring>
+#include <openssl/crypto.h>
 #include <openssl/hmac.h>
 #include <openssl/bio.h>
 #include <openssl/buffer.h>
@@ -49,6 +50,7 @@
 
 #include <pthread.h>
 #include <memory>
+#include <string>
 #include <vector>
 #include <algorithm>
 
@@ -213,20 +215,71 @@ char *mystrchrnul(const char *s, int c) {
 
 
 
-// Calculates the opaque arguments hash, needed for a secure redirection
+// Calculates the hash of the token of a redirect to cleartext HTTP. The
+// target server applies each field of the token to the identity of the
+// client, thus the hash covers each of them.
 //
-// - hash is a string that will be filled with the hash
+// - hash: filled with the hash in base64, or empty after an error
+// - fn: the path of the request
+// - request: the type of the request
+// - secent: the identity of the client
+// - tim: the time at which the token is made
+// - key: the secret which the servers share
 //
-// - fn: the original filename that was requested
-// - dhost: target redirection hostname
-// - client: address:port of the client
-// - tim: creation time of the url
-// - tim_grace: validity time before and after creation time
-//
-// Input for the key (simple shared secret)
-// - key
-// - key length
-//
+// Each field goes into the digest with a tag and its length. Thus a value
+// cannot move to another field, and a field which is not there is different
+// from an empty field. The first bytes give the version of the format, so a
+// token of an earlier format does not validate.
+
+namespace {
+
+// The bytes of the credentials which XrdHttpReq::appendOpaque() sends: up to
+// the length of the credentials, or up to the first null byte
+size_t tokenCredsSize(const XrdSecEntity &secent) {
+  if (!secent.creds || secent.credslen <= 0) return 0;
+  return strnlen(secent.creds, secent.credslen);
+}
+
+template <typename Update>
+void hashTokenFields(Update update, const char *fn, kXR_int16 request,
+                     const XrdSecEntity &secent, time_t tim) {
+  static const char version[] = "xrdhttptk2";
+  update(version, sizeof(version));
+
+  auto field = [&update](char tag, const void *value, size_t size) {
+    const unsigned char header[] = {
+      static_cast<unsigned char>(tag),
+      static_cast<unsigned char>(size >> 24), static_cast<unsigned char>(size >> 16),
+      static_cast<unsigned char>(size >> 8), static_cast<unsigned char>(size)
+    };
+    update(header, sizeof(header));
+    update(value, size);
+  };
+
+  auto text = [&field](char tag, const char *value) {
+    if (value) field(tag, value, strlen(value));
+  };
+
+  const unsigned char req[] = {
+    static_cast<unsigned char>(static_cast<uint16_t>(request) >> 8),
+    static_cast<unsigned char>(request)
+  };
+  const std::string time = std::to_string(static_cast<long long>(tim));
+
+  text('p', fn);
+  field('q', req, sizeof(req));
+  text('n', secent.name);
+  text('v', secent.vorg);
+  text('h', secent.host);
+  text('m', secent.moninfo);
+  text('r', secent.role);
+  text('g', secent.grps);
+  text('e', secent.endorsements);
+  if (const size_t size = tokenCredsSize(secent)) field('c', secent.creds, size);
+  field('t', time.data(), time.size());
+}
+
+} // namespace
 
 void calcHashes(
         char *hash,
@@ -241,40 +294,25 @@ void calcHashes(
 
         const char *key) {
 
-
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-  EVP_MAC *mac;
-  EVP_MAC_CTX *ctx;
-  size_t len;
-#else
-  HMAC_CTX *ctx;
-  unsigned int len;
-#endif
   unsigned char mdbuf[EVP_MAX_MD_SIZE];
-  char buf[64];
-  struct tm tms;
-
 
   if (!hash) {
     return;
   }
   hash[0] = '\0';
-  
-  if (!key) {
-    return;
-  }
 
-  if (!fn || !secent) {
+  if (!key || !fn || !secent) {
     return;
   }
 
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
-
-  if (!(mac = EVP_MAC_fetch(nullptr, "HMAC", nullptr))) {
+  EVP_MAC *mac = EVP_MAC_fetch(nullptr, "HMAC", nullptr);
+  if (!mac) {
     return;
   }
 
-  if (!(ctx = EVP_MAC_CTX_new(mac))) {
+  EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+  if (!ctx) {
     EVP_MAC_free(mac);
     return;
   }
@@ -284,106 +322,54 @@ void calcHashes(
     OSSL_PARAM_construct_end()
   };
 
-  if (!EVP_MAC_init(ctx, (const unsigned char *) key, strlen(key), params)) {
-    EVP_MAC_CTX_free(ctx);
-    EVP_MAC_free(mac);
-    return;
+  size_t len = 0;
+  bool ok = EVP_MAC_init(ctx, (const unsigned char *) key, strlen(key), params);
+  if (ok) {
+    hashTokenFields([ctx](const void *data, size_t size) {
+      EVP_MAC_update(ctx, static_cast<const unsigned char *>(data), size);
+    }, fn, request, *secent, tim);
+    ok = EVP_MAC_final(ctx, mdbuf, &len, EVP_MAX_MD_SIZE);
   }
-
-  if (fn)
-    EVP_MAC_update(ctx, (const unsigned char *) fn,
-          strlen(fn) + 1);
-
-  EVP_MAC_update(ctx, (const unsigned char *) &request,
-          sizeof (request));
-
-  if (secent->name)
-    EVP_MAC_update(ctx, (const unsigned char *) secent->name,
-          strlen(secent->name) + 1);
-
-  if (secent->vorg)
-    EVP_MAC_update(ctx, (const unsigned char *) secent->vorg,
-          strlen(secent->vorg) + 1);
-
-  if (secent->host)
-    EVP_MAC_update(ctx, (const unsigned char *) secent->host,
-          strlen(secent->host) + 1);
-
-  if (secent->moninfo)
-    EVP_MAC_update(ctx, (const unsigned char *) secent->moninfo,
-          strlen(secent->moninfo) + 1);
-
-  localtime_r(&tim, &tms);
-  strftime(buf, sizeof (buf), "%s", &tms);
-  EVP_MAC_update(ctx, (const unsigned char *) buf,
-          strlen(buf) + 1);
-
-  EVP_MAC_final(ctx, mdbuf, &len, EVP_MAX_MD_SIZE);
 
   EVP_MAC_CTX_free(ctx);
   EVP_MAC_free(mac);
-
 #else
-
-  ctx = HMAC_CTX_new();
-
+  HMAC_CTX *ctx = HMAC_CTX_new();
   if (!ctx) {
     return;
   }
 
-
-
-  HMAC_Init_ex(ctx, (const void *) key, strlen(key), EVP_sha256(), 0);
-
-
-  if (fn)
-    HMAC_Update(ctx, (const unsigned char *) fn,
-          strlen(fn) + 1);
-
-  HMAC_Update(ctx, (const unsigned char *) &request,
-          sizeof (request));
-
-  if (secent->name)
-    HMAC_Update(ctx, (const unsigned char *) secent->name,
-          strlen(secent->name) + 1);
-
-  if (secent->vorg)
-    HMAC_Update(ctx, (const unsigned char *) secent->vorg,
-          strlen(secent->vorg) + 1);
-
-  if (secent->host)
-    HMAC_Update(ctx, (const unsigned char *) secent->host,
-          strlen(secent->host) + 1);
-
-  if (secent->moninfo)
-    HMAC_Update(ctx, (const unsigned char *) secent->moninfo,
-          strlen(secent->moninfo) + 1);
-
-  localtime_r(&tim, &tms);
-  strftime(buf, sizeof (buf), "%s", &tms);
-  HMAC_Update(ctx, (const unsigned char *) buf,
-          strlen(buf) + 1);
-
-  HMAC_Final(ctx, mdbuf, &len);
+  unsigned int len = 0;
+  bool ok = HMAC_Init_ex(ctx, (const void *) key, strlen(key), EVP_sha256(), 0);
+  if (ok) {
+    hashTokenFields([ctx](const void *data, size_t size) {
+      HMAC_Update(ctx, static_cast<const unsigned char *>(data), size);
+    }, fn, request, *secent, tim);
+    ok = HMAC_Final(ctx, mdbuf, &len);
+  }
 
   HMAC_CTX_free(ctx);
-
 #endif
 
-  Tobase64(mdbuf, len / 2, hash);
+  if (ok) {
+    Tobase64(mdbuf, len / 2, hash);
+  }
 }
 
 int compareHash(
         const char *h1,
         const char *h2) {
 
-  if (h1 == h2) return 0;
-
-  if (!h1 || !h2)
+  // An empty hash is the result of an error, thus it matches nothing
+  if (!h1 || !h2 || !*h1)
     return 1;
 
-  return strcmp(h1, h2);
+  const size_t len = strlen(h1);
+  if (len != strlen(h2))
+    return 1;
 
+  // The time of the comparison must not tell how much of a guess is right
+  return CRYPTO_memcmp(h1, h2, len) ? 1 : 0;
 }
 
 // unquote a string and return a new one

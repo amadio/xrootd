@@ -1,9 +1,11 @@
 #undef NDEBUG
 
 #include "XrdHttp/XrdHttpUtils.hh"
+#include "XrdSec/XrdSecEntity.hh"
 
 #include <gtest/gtest.h>
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -173,5 +175,98 @@ TEST(UtilsTest, Base64DecodeHexConvertsBase64ToHexAndBack) {
     Fromhexdigest(output,bytes);
     Tobase64(bytes,output);
     ASSERT_EQ(b64ToH.first,output);
+  }
+}
+
+// calcHashes() signs the identity of a client for a redirect to cleartext
+// HTTP. The target server applies each field of the token to the identity of
+// the client, thus each field must change the hash.
+
+namespace {
+
+// The fields of an identity which a redirect token carries. An empty value
+// is a field which the identity does not have.
+struct TokenIdentity {
+  std::optional<std::string> name{"user"};
+  std::optional<std::string> vorg{"vo"};
+  std::optional<std::string> host{"client.example.org"};
+  std::optional<std::string> moninfo{"/DC=org/DC=example/CN=user"};
+  std::optional<std::string> role{"member"};
+  std::optional<std::string> grps{"/vo"};
+  std::optional<std::string> endorsements{"endorsement"};
+  std::optional<std::string> creds{"credentials"};
+};
+
+using TokenField = std::optional<std::string> TokenIdentity::*;
+
+const std::pair<const char *, TokenField> tokenFields[] {
+  {"name", &TokenIdentity::name},
+  {"vorg", &TokenIdentity::vorg},
+  {"host", &TokenIdentity::host},
+  {"moninfo", &TokenIdentity::moninfo},
+  {"role", &TokenIdentity::role},
+  {"grps", &TokenIdentity::grps},
+  {"endorsements", &TokenIdentity::endorsements},
+  {"creds", &TokenIdentity::creds},
+};
+
+char *fieldValue(std::optional<std::string> &value) {
+  return value ? value->data() : nullptr;
+}
+
+std::string tokenHash(TokenIdentity id) {
+  XrdSecEntity entity;
+  entity.name = fieldValue(id.name);
+  entity.vorg = fieldValue(id.vorg);
+  entity.host = fieldValue(id.host);
+  entity.moninfo = fieldValue(id.moninfo);
+  entity.role = fieldValue(id.role);
+  entity.grps = fieldValue(id.grps);
+  entity.endorsements = fieldValue(id.endorsements);
+  entity.creds = fieldValue(id.creds);
+  entity.credslen = id.creds ? static_cast<int>(id.creds->size()) : 0;
+
+  char hash[512];
+  calcHashes(hash, "/file", 1, &entity, 1700000000, "secret");
+  return hash;
+}
+
+// An identity with only the given field, set to the same value for each field
+TokenIdentity onlyField(TokenField field) {
+  TokenIdentity id{std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                   std::nullopt, std::nullopt, std::nullopt, std::nullopt};
+  id.*field = "value";
+  return id;
+}
+
+} // namespace
+
+TEST(UtilsTest, CalcHashesGivesTheSameHashForTheSameIdentity) {
+  const std::string hash = tokenHash({});
+  ASSERT_FALSE(hash.empty());
+  ASSERT_EQ(hash, tokenHash({}));
+}
+
+TEST(UtilsTest, CalcHashesSignsEachFieldOfTheIdentity) {
+  const std::string hash = tokenHash({});
+  for (const auto &[name, field] : tokenFields) {
+    TokenIdentity changed;
+    changed.*field = "admin";
+    EXPECT_NE(tokenHash(changed), hash) << "a change of " << name;
+
+    TokenIdentity removed;
+    removed.*field = std::nullopt;
+    EXPECT_NE(tokenHash(removed), hash) << "no " << name;
+  }
+}
+
+TEST(UtilsTest, CalcHashesSignsWhichFieldHasTheValue) {
+  for (const auto &[name, field] : tokenFields) {
+    for (const auto &[other, otherField] : tokenFields) {
+      if (field != otherField) {
+        EXPECT_NE(tokenHash(onlyField(field)), tokenHash(onlyField(otherField)))
+            << "the value in " << name << " or in " << other;
+      }
+    }
   }
 }

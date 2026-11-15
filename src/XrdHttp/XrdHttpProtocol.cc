@@ -564,7 +564,7 @@ int XrdHttpProtocol::ProcessRequest(XrdLink *lp)
       TRACE(DEBUG, " rc:" << rc << " got hdr line: " << traceLine);
       if ((rc == 2) && (tmpline.length() == 2) && (tmpline[0] == '\r') && (tmpline[1] == '\n')) {
         if (CurrentReq.request != CurrentReq.rtUnset) {
-          CurrentReq.headerok = true;
+          CurrentReq.HeaderEnd(m_buffConsumed);
           TRACE(DEBUG, " rc:" << rc << " detected header end.");
           break;
         }
@@ -1456,6 +1456,7 @@ void XrdHttpProtocol::BuffConsume(int blen) {
   }
 
   myBuffStart = myBuffStart + blen;
+  m_buffConsumed += blen;
 
   if (myBuffStart >= myBuff->buff + myBuff->bsize)
     myBuffStart -= myBuff->bsize;
@@ -1563,6 +1564,14 @@ int XrdHttpProtocol::StartSimpleResp(int code, const char *desc,
     ss << httpStatusToString(code);
   }
   ss << crlf;
+
+  // A final response before the end of the body of the request closes the
+  // connection, else the rest of the body would run as the next request
+  // (RFC 9112 section 9.3)
+  if (code >= 200 && CurrentReq.BodyPending()) {
+    keepalive = false;
+    CurrentReq.keepalive = false;
+  }
 
   if (keepalive && (code != 100))
     ss << "Connection: Keep-Alive" << crlf;
@@ -1984,6 +1993,7 @@ void XrdHttpProtocol::Reset() {
     myBuff = 0;
   }
   myBuffStart = myBuffEnd = 0;
+  m_buffConsumed = 0;
 
   DoingLogin = false;
   DoneSetInfo = false;

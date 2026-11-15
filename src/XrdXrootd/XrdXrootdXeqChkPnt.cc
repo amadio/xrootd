@@ -137,13 +137,15 @@ int XrdXrootdProtocol::do_ChkPntXeq()
 // an additional fetch of data which may cause re-entry as pass2.
 //
    if (Request.header.requestid == kXR_chkpoint)
-      {ClientRequestHdr *Subject = (ClientRequestHdr *)(argp->buff);
-       if (memcmp(Request.header.streamid, Subject->streamid, sidSZ))
-          {Response.Send(kXR_ArgInvalid, "Request streamid mismatch");
+      {// Check the length before the buffer: without data the request has no
+       // buffer of its own, and argp is null or holds an earlier request.
+       if (Request.header.dlen != sizeof(Request.header) || !argp)
+          {Response.Send(kXR_ArgInvalid, "Request length invalid");
            return -1;
           }
-       if (Request.header.dlen != sizeof(Request.header))
-          {Response.Send(kXR_ArgInvalid, "Request length invalid");
+       ClientRequestHdr *Subject = (ClientRequestHdr *)(argp->buff);
+       if (memcmp(Request.header.streamid, Subject->streamid, sidSZ))
+          {Response.Send(kXR_ArgInvalid, "Request streamid mismatch");
            return -1;
           }
 

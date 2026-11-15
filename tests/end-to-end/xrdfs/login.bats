@@ -42,3 +42,17 @@ teardown() {
     xrdfs "$UNIX_URL" query config version
     run -0 grep -F 'Authenticated with unix' "$XRD_LOGFILE"
 }
+
+# A checkpoint request of kXR_ckpXeq carries a request as its data. Without
+# data, the server read the request through a null pointer.
+@test "a checkpoint request without the request that it carries gets kXR_ArgInvalid" {
+    require_commands python3
+    run -0 python3 "$SETUP_DIR/raw-client.py" localhost "$NOSEC_PORT" chkpoint-xeq
+    assert_output --partial 'error 3000'
+}
+
+@test "a server without security stays up after a checkpoint request without data" {
+    require_commands python3
+    python3 "$SETUP_DIR/raw-client.py" localhost "$NOSEC_PORT" chkpoint-xeq
+    run -0 xrdfs "$NOSEC_URL" query config version
+}

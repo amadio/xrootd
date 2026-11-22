@@ -11,3 +11,12 @@ add_unit_tests(
   LIBRARIES
     XrdClS3Obj
 )
+
+# The factory reads its options only once in a process, thus the tests of the
+# options have their own executable
+add_unit_tests(config
+  SOURCES
+    XrdClS3FactoryConfig.cc
+  LIBRARIES
+    XrdClS3Obj
+)

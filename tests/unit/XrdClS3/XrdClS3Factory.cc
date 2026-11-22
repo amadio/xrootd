@@ -28,6 +28,7 @@
 #include <XrdCl/XrdClStatus.hh>
 
 #include <filesystem>
+#include <map>
 
 #include <fcntl.h>
 
@@ -340,4 +341,200 @@ TEST_F(FactoryCredentialsTest, GenerateV4SignatureOfAPlusIsTheOneOfASpace) {
     Factory::SetDefaultCredentials(GetTempLocation("access_key.txt"), GetTempLocation("secret_key.txt"));
 
     ASSERT_EQ(SignQuery("prefix=a+b"), SignQuery("prefix=a%20b"));
+}
+
+TEST(FactoryTest, GenerateHttpUrlRejectsAUrlWhichIsNotS3) {
+    std::string https_url;
+    auto st = Factory::GenerateHttpUrl("https://localhost/bucket/object", https_url, nullptr);
+    ASSERT_FALSE(st.IsOK());
+    ASSERT_FALSE(st.GetErrorMessage().empty());
+}
+
+TEST(FactoryTest, GenerateHttpUrlRejectsAUrlWithoutABucket) {
+    Factory::SetEndpoint("");
+    Factory::SetRegion("");
+    Factory::SetUrlStyle("path");
+    std::string https_url;
+    ASSERT_FALSE(Factory::GenerateHttpUrl("s3://localhost:9000", https_url, nullptr).IsOK());
+    auto st = Factory::GenerateHttpUrl("s3://localhost:9000/?versionId=1", https_url, nullptr);
+    ASSERT_FALSE(st.IsOK());
+    ASSERT_FALSE(st.GetErrorMessage().empty());
+}
+
+TEST(FactoryTest, GenerateHttpUrlKeepsOnlyTheHostOfTheAuthorityForThePath) {
+    Factory::SetEndpoint("");
+    Factory::SetRegion("");
+    Factory::SetUrlStyle("path");
+    std::string https_url, obj;
+    ASSERT_TRUE(Factory::GenerateHttpUrl("s3://user@localhost:9000/bucket/dir/object", https_url, nullptr).IsOK());
+    ASSERT_EQ(https_url, "https://localhost:9000/bucket/dir/object");
+
+    ASSERT_TRUE(Factory::GenerateHttpUrl("s3://localhost:9000/bucket/dir/object", https_url, &obj).IsOK());
+    ASSERT_EQ(https_url, "https://localhost:9000/bucket");
+    ASSERT_EQ(obj, "dir/object");
+}
+
+TEST(FactoryTest, GenerateHttpUrlFindsTheBucketInAVirtualHostAuthority) {
+    Factory::SetEndpoint("s3.example.org");
+    Factory::SetUrlStyle("virtual");
+    std::string https_url;
+
+    // the authority has the region, or not
+    Factory::SetRegion("region-1");
+    ASSERT_TRUE(Factory::GenerateHttpUrl("s3://mybucket.region-1.s3.example.org/key", https_url, nullptr).IsOK());
+    ASSERT_EQ(https_url, "https://mybucket.region-1.s3.example.org/key");
+    ASSERT_TRUE(Factory::GenerateHttpUrl("s3://mybucket.s3.example.org/key", https_url, nullptr).IsOK());
+    ASSERT_EQ(https_url, "https://mybucket.region-1.s3.example.org/key");
+    Factory::SetRegion("");
+}
+
+// Without a region, the host of a virtual-host URL is <bucket>.<endpoint>
+TEST(FactoryTest, GenerateHttpUrlBuildsAVirtualHostUrlWithoutARegion) {
+    Factory::SetEndpoint("s3.example.org");
+    Factory::SetRegion("");
+    Factory::SetUrlStyle("virtual");
+    std::string https_url;
+    ASSERT_TRUE(Factory::GenerateHttpUrl("s3://mybucket.s3.example.org/key", https_url, nullptr).IsOK());
+    ASSERT_EQ(https_url, "https://mybucket.s3.example.org/key");
+    ASSERT_EQ(Factory::GetBucketFromHttpsUrl(https_url), "mybucket");
+    Factory::SetUrlStyle("path");
+}
+
+TEST(FactoryTest, GenerateHttpUrlRejectsAnUnknownUrlStyle) {
+    Factory::SetEndpoint("");
+    Factory::SetRegion("");
+    Factory::SetUrlStyle("other");
+    std::string https_url;
+    auto st = Factory::GenerateHttpUrl("s3://localhost:9000/bucket/object", https_url, nullptr);
+    ASSERT_FALSE(st.IsOK());
+    ASSERT_EQ(st.code, XrdCl::errConfig);
+    ASSERT_FALSE(st.GetErrorMessage().empty());
+    ASSERT_EQ(Factory::GetBucketFromHttpsUrl("https://localhost:9000/bucket/object"), "");
+    Factory::SetUrlStyle("path");
+}
+
+TEST(FactoryTest, GetBucketFromHttpsUrlFindsNoBucketInAnUnknownHost) {
+    Factory::SetEndpoint("s3.example.org");
+    Factory::SetRegion("region-1");
+    Factory::SetUrlStyle("virtual");
+    ASSERT_EQ(Factory::GetBucketFromHttpsUrl("https://mybucket.s3.example.org/key"), "mybucket");
+    ASSERT_EQ(Factory::GetBucketFromHttpsUrl("https://mybucket.other.org/key"), "");
+    ASSERT_EQ(Factory::GetBucketFromHttpsUrl("not a url"), "");
+    Factory::SetRegion("");
+    Factory::SetUrlStyle("path");
+    ASSERT_EQ(Factory::GetBucketFromHttpsUrl("https://localhost:9000/bucket"), "bucket");
+    ASSERT_EQ(Factory::GetBucketFromHttpsUrl("https://localhost:9000"), "");
+    ASSERT_EQ(Factory::GetBucketFromHttpsUrl("localhost:9000/bucket"), "");
+}
+
+TEST(FactoryTest, PathEncodeOfAUrlWithOnlyAQueryIsTheRoot) {
+    ASSERT_EQ(Factory::PathEncode("https://localhost:9000?list-type=2"), "/");
+    ASSERT_EQ(Factory::PathEncode("localhost"), "");
+}
+
+TEST(FactoryTest, TrimViewOfOnlySpacesIsEmpty) {
+    ASSERT_EQ(Factory::TrimView(" \t\n "), "");
+    ASSERT_EQ(Factory::TrimView(" key \n"), "key");
+}
+
+// A byte above 127 is negative in a signed char, which isspace must not get
+TEST(FactoryTest, TrimViewKeepsANonAsciiByte) {
+    ASSERT_EQ(Factory::TrimView(" \xff "), "\xff");
+}
+
+TEST_F(FactoryCredentialsTest, GetCredentialsForBucketOfAPublicBucketAreEmpty) {
+    Factory::ResetCredCache();
+    Factory::SetBucketCredentials("public-bucket", "", "");
+    std::string err_msg;
+    auto [access, secret, ok] = Factory::GetCredentialsForBucket("public-bucket", err_msg);
+    ASSERT_TRUE(ok) << err_msg;
+    ASSERT_EQ(access, "");
+    ASSERT_EQ(secret, "");
+}
+
+TEST_F(FactoryCredentialsTest, GetCredentialsForBucketWithOnlyOneKeyFails) {
+    Factory::ResetCredCache();
+    WriteFile("access_key.half.txt", "my_access_key");
+    Factory::SetBucketCredentials("half-bucket", GetTempLocation("access_key.half.txt"), "");
+    std::string err_msg;
+    auto [access, secret, ok] = Factory::GetCredentialsForBucket("half-bucket", err_msg);
+    ASSERT_FALSE(ok);
+    ASSERT_FALSE(err_msg.empty());
+}
+
+TEST_F(FactoryCredentialsTest, GetCredentialsForBucketWithEmptyKeyFilesFails) {
+    Factory::ResetCredCache();
+    WriteCreds("access_key.empty.txt", " \n", "secret_key.empty.txt", "my_secret_key");
+    Factory::SetBucketCredentials("empty-bucket", GetTempLocation("access_key.empty.txt"), GetTempLocation("secret_key.empty.txt"));
+    std::string err_msg;
+    auto [access, secret, ok] = Factory::GetCredentialsForBucket("empty-bucket", err_msg);
+    ASSERT_FALSE(ok);
+    ASSERT_FALSE(err_msg.empty());
+}
+
+TEST_F(FactoryCredentialsTest, GetCredentialsForBucketWithoutTheSecretKeyFileFails) {
+    Factory::ResetCredCache();
+    WriteFile("access_key.nosecret.txt", "my_access_key");
+    Factory::SetBucketCredentials("nosecret-bucket", GetTempLocation("access_key.nosecret.txt"), GetTempLocation("missing.txt"));
+    std::string err_msg;
+    auto [access, secret, ok] = Factory::GetCredentialsForBucket("nosecret-bucket", err_msg);
+    ASSERT_FALSE(ok);
+    ASSERT_FALSE(err_msg.empty());
+}
+
+TEST_F(FactoryCredentialsTest, GenerateV4SignatureOfAPublicBucketIsEmpty) {
+    Factory::ResetCredCache();
+    Factory::SetEndpoint("");
+    Factory::SetRegion("");
+    Factory::SetUrlStyle("path");
+    Factory::SetBucketCredentials("signature-public", "", "");
+    std::vector<std::pair<std::string, std::string>> headers;
+    std::string auth_token = "unset", err_msg;
+    ASSERT_TRUE(Factory::GenerateV4Signature("https://localhost:9000/signature-public/key", "GET", headers, auth_token, err_msg));
+    ASSERT_EQ(auth_token, "");
+    ASSERT_TRUE(headers.empty());
+}
+
+TEST_F(FactoryCredentialsTest, GenerateV4SignatureAddsTheHostTheDateAndThePayloadHash) {
+    Factory::ResetCredCache();
+    Factory::SetEndpoint("");
+    Factory::SetRegion("us-east-1");
+    Factory::SetUrlStyle("path");
+    WriteCreds("access_key.sig.txt", "AKIAIOSFODNN7EXAMPLE", "secret_key.sig.txt", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
+    Factory::SetBucketCredentials("signature-bucket", GetTempLocation("access_key.sig.txt"), GetTempLocation("secret_key.sig.txt"));
+    std::vector<std::pair<std::string, std::string>> headers;
+    std::string auth_token, err_msg;
+    ASSERT_TRUE(Factory::GenerateV4Signature("https://localhost:9000/signature-bucket/key", "GET", headers, auth_token, err_msg)) << err_msg;
+    std::map<std::string, std::string> added(headers.begin(), headers.end());
+    ASSERT_EQ(added["Host"], "localhost");
+    ASSERT_EQ(added["X-Amz-Content-Sha256"], "UNSIGNED-PAYLOAD");
+    ASSERT_EQ(added["X-Amz-Date"].size(), 16u);
+    ASSERT_EQ(added["X-Amz-Date"][8], 'T');
+    ASSERT_EQ(auth_token.rfind("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/" + added["X-Amz-Date"].substr(0, 8) + "/us-east-1/s3/aws4_request,", 0), 0u);
+    Factory::SetRegion("");
+}
+
+TEST_F(FactoryCredentialsTest, GenerateV4SignatureRejectsAnInvalidDate) {
+    Factory::ResetCredCache();
+    Factory::SetEndpoint("");
+    Factory::SetRegion("");
+    Factory::SetUrlStyle("path");
+    WriteCreds("access_key.date.txt", "my_access_key", "secret_key.date.txt", "my_secret_key");
+    Factory::SetBucketCredentials("date-bucket", GetTempLocation("access_key.date.txt"), GetTempLocation("secret_key.date.txt"));
+    std::vector<std::pair<std::string, std::string>> headers = {{"x-amz-date", "2013-05-24T00:00:00Z"}};
+    std::string auth_token, err_msg;
+    ASSERT_FALSE(Factory::GenerateV4Signature("https://localhost:9000/date-bucket/key", "GET", headers, auth_token, err_msg));
+    ASSERT_FALSE(err_msg.empty());
+}
+
+TEST_F(FactoryCredentialsTest, GenerateV4SignatureFailsWithoutTheKeyFiles) {
+    Factory::ResetCredCache();
+    Factory::SetEndpoint("");
+    Factory::SetRegion("");
+    Factory::SetUrlStyle("path");
+    Factory::SetBucketCredentials("nokeys-bucket", GetTempLocation("missing_access.txt"), GetTempLocation("missing_secret.txt"));
+    std::vector<std::pair<std::string, std::string>> headers;
+    std::string auth_token, err_msg;
+    ASSERT_FALSE(Factory::GenerateV4Signature("https://localhost:9000/nokeys-bucket/key", "GET", headers, auth_token, err_msg));
+    ASSERT_FALSE(err_msg.empty());
 }

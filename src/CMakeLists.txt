@@ -118,6 +118,7 @@ if( NOT XRDCL_ONLY )
   add_subdirectory( XrdThrottle )
 
   add_subdirectory( XrdHttp )
+  add_subdirectory( XrdHttpS3 )
   add_subdirectory( XrdHttpTapeApi )
   add_subdirectory( XrdHttpTpc )
 

@@ -4,9 +4,9 @@
 # proxy or a cache serves the objects of an S3 origin, which it reads and
 # writes with XrdClS3. The origin of the tests is a server with XrdHttp over
 # HTTPS. Its data directory has the bucket $BUCKET, as a path-style S3 service
-# has. XrdHttp does not check the SigV4 signature which XrdClS3 sends, and it
-# answers no request which only S3 has, such as a listing. Thus a listing, and
-# a stat of a missing object, which XrdClS3 checks with a listing, fail.
+# has. XrdHttp answers the GET, PUT, HEAD and DELETE of an object, and the
+# handler XrdHttpS3 answers a listing. Neither checks the SigV4 signature which
+# XrdClS3 sends.
 
 load ../setup/server.bash
 
@@ -20,7 +20,8 @@ export XRDCLS3_URLSTYLE=path
 
 # start_s3_origin <name> [snippet.cfg...]
 #
-# Start an HTTPS origin with XrdHttp, and make its bucket. Export S3_ORIGIN,
+# Start an HTTPS origin with XrdHttp, which answers the S3 listings of the
+# bucket with the handler XrdHttpS3, and make its bucket. Export S3_ORIGIN,
 # the s3:// URL of the origin. XrdClHttp presents a grid proxy of the user,
 # which the test CA cannot verify, thus the servers get the path of a proxy
 # which cannot exist.
@@ -29,7 +30,8 @@ start_s3_origin() {
     shift
 
     require_plugin libXrdHttp
-    X509_USER_PROXY=/dev/null/x509 start_server "$name" http.cfg tls.cfg "$@" || return 1
+    require_plugin libXrdHttpS3
+    X509_USER_PROXY=/dev/null/x509 start_server "$name" http.cfg tls.cfg s3.cfg "$@" || return 1
     data="$(_setup_var "$name")_DATA"
     port="$(_setup_var "$name")_PORT"
     mkdir -p "${!data}/$BUCKET"

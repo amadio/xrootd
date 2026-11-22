@@ -65,6 +65,18 @@ setup() {
     assert_line --index 0 '234567'
 }
 
+@test "a listing through the cache has the objects of the origin" {
+    mkdir "$ORIGIN_DATA$OBJ"
+    printf '12345' > "$ORIGIN_DATA$OBJ/obj"
+    run -0 xrdfs "$CACHE_URL" ls "$OBJ"
+    assert_output "$OBJ/obj"
+}
+
+@test "a stat through the cache of an object which does not exist fails" {
+    run ! xrdfs "$CACHE_URL" stat "$OBJ"
+    assert_output --partial '[3011]'
+}
+
 # A query without a type gets the checksum of the default type of the origin,
 # with the name of the default type of the cache, thus the test names the type
 @test "a checksum query through the cache returns the checksum of the origin" {

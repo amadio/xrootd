@@ -171,7 +171,7 @@ void SetDefault(XrdCl::Env *env, const std::string &optName, const std::string &
 // Trim the left side of a string_view for space
 std::string_view ltrim_view(const std::string_view input_view) {
     for (size_t idx = 0; idx < input_view.size(); idx++) {
-        if (!isspace(input_view[idx])) {
+        if (!isspace(static_cast<unsigned char>(input_view[idx]))) {
             return input_view.substr(idx);
         }
     }
@@ -832,8 +832,8 @@ Factory::PathEncode(const std::string_view url) {
 std::string_view
 Factory::TrimView(const std::string_view input_view) {
     auto view = ltrim_view(input_view);
-    for (size_t idx = 0; idx < input_view.size(); idx++) {
-        if (!isspace(view[view.size() - 1 - idx])) {
+    for (size_t idx = 0; idx < view.size(); idx++) {
+        if (!isspace(static_cast<unsigned char>(view[view.size() - 1 - idx]))) {
             return view.substr(0, view.size() - idx);
         }
     }

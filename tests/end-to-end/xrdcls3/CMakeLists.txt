@@ -5,4 +5,5 @@ if(NOT BUILD_HTTP OR NOT TARGET XrdClS3Obj)
 endif()
 
 add_bats_tests(cache.bats)
+add_bats_tests(errors.bats)
 add_bats_tests(proxy.bats)

@@ -44,6 +44,27 @@
   
 const char *XrdCpFile::mPfx = 0;
 
+namespace
+{
+// The xroot protocol sends the path after the slash which ends the host, thus
+// the path of root://host/dir/file is the relative path dir/file, which the
+// server refuses. Make it root://host//dir/file, as xrdfs does.
+
+void AbsolutePath(char *&Path, int hdrLen)
+{
+   char *slash = index(Path + hdrLen, '/');
+   if (!slash || slash[1] == '/') return;
+
+   int   off = slash - Path + 1;
+   char *nP  = (char *)malloc(strlen(Path) + 2);
+   memcpy(nP, Path, off);
+   nP[off] = '/';
+   strcpy(nP + off + 1, Path + off);
+   free(Path);
+   Path = nP;
+}
+}
+
 /******************************************************************************/
 /*                           C o n s t r u c t o r                            */
 /******************************************************************************/
@@ -95,6 +116,8 @@ XrdCpFile::XrdCpFile(const char *FSpec, int &badURL)
        {if (!strncmp(FSpec, pTab[i].pHdr, pTab[i].pHsz))
            {Protocol = pTab[i].pVal;
             memcpy(ProtName, pTab[i].pHdr, pTab[i].pHsz-3);
+            if (Protocol == isXroot || Protocol == isXroots)
+               AbsolutePath(Path, pTab[i].pHsz);
             return;
            }
        }

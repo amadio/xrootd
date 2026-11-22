@@ -451,7 +451,9 @@ Factory::GenerateHttpUrl(const std::string &s3_url,
         *obj_result = obj;
     }
     if (m_url_style == "virtual" || m_url_style.empty()) {
-        https_url = "https://" + bucket + "." + m_region + "." + endpoint + (obj_result ? "" : ("/" + obj));
+        // Without a region, the host is <bucket>.<endpoint>
+        const std::string region = m_region.empty() ? "" : m_region + ".";
+        https_url = "https://" + bucket + "." + region + endpoint + (obj_result ? "" : ("/" + obj));
         return XrdCl::XRootDStatus();
     } else if (m_url_style == "path") {
         if (!m_region.empty()) {

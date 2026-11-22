@@ -93,3 +93,28 @@ setup() {
     run -0 xrdfs "$PROXY_URL" ls "$DIR/new"
     assert_output "$DIR/new/obj"
 }
+
+# S3 has no directories: the removal of the sentinel does not remove the other
+# keys of the directory. XrdClS3 refuses it, as POSIX does (issue #3020).
+@test "a rmdir of a directory with an object fails, and keeps the directory" {
+    run -0 xrdfs "$PROXY_URL" mkdir "$DIR/new"
+    printf 'x' > "$ORIGIN_DATA$DIR/new/obj"
+    run ! xrdfs "$PROXY_URL" rmdir "$DIR/new"
+    assert_output --partial '[3018]'
+    assert [ -f "$ORIGIN_DATA$DIR/new/.xrdcls3.dirsentinel" ]
+    run -0 xrdfs "$PROXY_URL" ls "$DIR/new"
+    assert_output "$DIR/new/obj"
+}
+
+@test "a rmdir of a directory with a directory fails" {
+    run -0 xrdfs "$PROXY_URL" mkdir "$DIR/new"
+    run -0 xrdfs "$PROXY_URL" mkdir "$DIR/new/sub"
+    run ! xrdfs "$PROXY_URL" rmdir "$DIR/new"
+    assert_output --partial '[3018]'
+    assert [ -f "$ORIGIN_DATA$DIR/new/.xrdcls3.dirsentinel" ]
+}
+
+@test "a rmdir of a directory which does not exist fails" {
+    run ! xrdfs "$PROXY_URL" rmdir "$DIR/missing"
+    assert_output --partial '[3011]'
+}

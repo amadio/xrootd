@@ -61,6 +61,51 @@ private:
 // an object at the given path. However, it could be a directory, so we
 // issue a directory listing request to see if it is a directory.
 // This is the response handler for that directory listing request.
+class StatHandlerDirectory;
+
+// Response handler for the listing of RmDir. S3 has no directories, and the
+// removal of the sentinel does not remove the other keys of the directory.
+// Thus, as POSIX does, refuse to remove a directory which has entries. The
+// listing does not have the sentinel.
+class RmDirHandler : public XrdCl::ResponseHandler {
+public:
+    RmDirHandler(XrdCl::FileSystem *fs, const std::string &sentinel_path,
+                 XrdCl::ResponseHandler *handler, time_t timeout) :
+        m_fs(fs), m_sentinel_path(sentinel_path), m_handler(handler), m_timeout(timeout)
+    {}
+
+    virtual void HandleResponse(XrdCl::XRootDStatus *status, XrdCl::AnyObject *response) override
+    {
+        std::unique_ptr<RmDirHandler> self(this);
+        std::unique_ptr<XrdCl::XRootDStatus> status_holder(status);
+        std::unique_ptr<XrdCl::AnyObject> response_holder(response);
+
+        if (!status || !status->IsOK()) {
+            return Done(status_holder.release());
+        }
+        XrdCl::DirectoryList *list = nullptr;
+        if (response) response->Get(list);
+        if (list && list->GetSize()) {
+            return Done(new XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errErrorResponse,
+                                                kXR_ItExists, "Directory is not empty"));
+        }
+        auto st = m_fs->Rm(m_sentinel_path, m_handler, m_timeout);
+        if (!st.IsOK()) Done(new XrdCl::XRootDStatus(st));
+    }
+
+private:
+    void Done(XrdCl::XRootDStatus *status)
+    {
+        if (m_handler) m_handler->HandleResponse(status, nullptr);
+        else delete status;
+    }
+
+    XrdCl::FileSystem *m_fs;
+    std::string m_sentinel_path;
+    XrdCl::ResponseHandler *m_handler;
+    time_t m_timeout;
+};
+
 class StatHandlerDirectory : public XrdCl::ResponseHandler {
 public:
     StatHandlerDirectory(XrdCl::ResponseHandler *handler) :
@@ -711,7 +756,16 @@ Filesystem::RmDir(const std::string      &input_path,
     if (loc != std::string::npos) {
         path += input_path.substr(loc);
     }
-    return Rm(path, handler, timeout);
+    auto cleaned_path = Factory::CleanObjectName(path);
+    auto [st, fs] = GetFSHandle(cleaned_path);
+    if (!st.IsOK()) {
+        return st;
+    }
+    auto rmdir_handler = new RmDirHandler(fs, cleaned_path, handler, timeout);
+    auto list_st = DirList(input_path, XrdCl::DirListFlags::None, rmdir_handler, timeout);
+    // A failure to start the listing does not call the handler
+    if (!list_st.IsOK()) delete rmdir_handler;
+    return list_st;
 }
 
 

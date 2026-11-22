@@ -155,12 +155,14 @@ Factory::CreateFileSystem(const std::string & url) {
 
 namespace {
 
+// A setting of the environment of XrdCl, for example of client.conf. The
+// variable of the shell takes its place, as for the settings of XrdCl.
 void SetDefault(XrdCl::Env *env, const std::string &optName, const std::string &envName, std::string &location, const std::string &def) {
     std::string val;
-    if (!env->GetString(optName, val) || val.empty()) {
+    if (!env->GetString(optName, val)) {
         env->PutString(optName, "");
-        env->ImportString(optName, envName);
     }
+    env->ImportString(optName, envName);
     if (env->GetString(optName, val) && !val.empty()) {
         location = val;
     } else {

@@ -18,6 +18,5 @@ endif()
 add_subdirectory(end-to-end)
 
 add_subdirectory(XrdClHttpCommon)
-add_subdirectory(XrdClS3)
 
 add_subdirectory( XrdOssTests )

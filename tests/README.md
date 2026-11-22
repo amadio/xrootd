@@ -61,7 +61,6 @@ sets of tests which have not yet been migrated to use the latest conventions:
 - `tests/common`: the library `XrdTestUtils` with helpers for GoogleTest tests.
 - `tests/XrdClHttpCommon` and `tests/XrdOssTests`: a transfer test library of
   XrdClHttp, and OSS plugins which inject faults. The end-to-end tests load them.
-- `tests/XrdClS3`: the S3 tests of XrdClS3, with their own MinIO server (see #2977).
 - `tests/XrdSsiTests`: the program `xrdshmap`, a manual test of the shared
   memory map of XrdSsi. CTest does not run it.
 

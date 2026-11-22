@@ -1,5 +1,5 @@
-# The XrdClHttp and XrdClS3 tests use the fixture TransferTest; the XrdClHttp
-# tests use the tokens of the end-to-end setup.
+# The tests of XrdClHttp use the fixture TransferTest, and the tokens of the
+# end-to-end setup.
 if(NOT BUILD_SCITOKENS)
   return()
 endif()

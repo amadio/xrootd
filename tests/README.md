@@ -306,6 +306,8 @@ bats-assert without a `load` of their own.
   - `server`: a data server with unix authentication.
   - `server-nosec`: a data server without the security library.
   - `cache`: a caching proxy in front of the server at `$ORIGIN`.
+  - `proxy`: a proxy without a cache in front of the server at `$ORIGIN`,
+    which lets the clients write.
 
   A snippet ends in `.cfg`. It is a file of the directory of the test, or of
   `setup/`, for example `http.cfg`, `tls.cfg`, `tpc.cfg`, `ztn.cfg`,

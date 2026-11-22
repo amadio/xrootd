@@ -37,6 +37,7 @@
 #include <libgen.h>
 #include <cstring>
 #include <map>
+#include <set>
 #include <vector>
 #include <algorithm>
 #include <cctype>
@@ -435,6 +436,24 @@ namespace XrdCl
       std::transform( name.begin(), name.end(), name.begin(), ::toupper );
       ImportString( varsStr[i].name, name );
     }
+
+    //--------------------------------------------------------------------------
+    // The plug-ins, for example XrdClS3, read their settings from the
+    // environment, thus put there also the strings of the configuration files
+    // which are not settings of XrdCl
+    //--------------------------------------------------------------------------
+    auto lower = []( std::string name )
+    {
+      std::transform( name.begin(), name.end(), name.begin(), ::tolower );
+      return name;
+    };
+    std::set<std::string> known = { "appname", "moninfo", "clientsite" };
+    for( auto &var : varsInt ) known.insert( lower( var.name ) );
+    for( auto &var : varsStr ) known.insert( lower( var.name ) );
+
+    for( it = config.begin(); it != config.end(); ++it )
+      if( !known.count( lower( it->first ) ) )
+        PutString( it->first, it->second );
 
     //--------------------------------------------------------------------------
     // Register fork handlers

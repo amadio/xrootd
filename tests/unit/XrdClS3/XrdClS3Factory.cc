@@ -25,6 +25,8 @@
 #include <XrdCl/XrdClDefaultEnv.hh>
 #include <XProtocol/XProtocol.hh>
 
+#include <XrdCl/XrdClStatus.hh>
+
 #include <filesystem>
 
 #include <fcntl.h>
@@ -126,66 +128,55 @@ TEST(FactoryTest, GenerateHttpUrlBuildsUrlsForVirtualAndPathStyles) {
     Factory::SetUrlStyle("virtual");
 
     std::string s3_url = "s3://bucket-name/path/to/object";
-    std::string err_msg;
     std::string https_url;
-    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, nullptr, err_msg));
-    ASSERT_TRUE(err_msg.empty());
+    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, nullptr).IsOK());
     ASSERT_EQ(https_url, "https://bucket-name.us-east-1.s3.amazonaws.com/path/to/object");
 
     Factory::SetEndpoint("");
     s3_url = "s3://p0@localhost:55708/bucket-name/object";
-    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, nullptr, err_msg));
-    ASSERT_TRUE(err_msg.empty());
+    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, nullptr).IsOK());
     ASSERT_EQ(https_url, "https://bucket-name.us-east-1.localhost:55708/object");
 
     Factory::SetEndpoint("s3.amazonaws.com");
     s3_url = "s3://bucket-name/path/to/object?versionId=12345";
-    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, nullptr, err_msg));
-    ASSERT_TRUE(err_msg.empty());
+    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, nullptr).IsOK());
     ASSERT_EQ(https_url, "https://bucket-name.us-east-1.s3.amazonaws.com/path/to/object?versionId=12345");
 
     s3_url = "s3://bucket-name.us-east-1.s3.amazonaws.com/path/to/object";
-    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, nullptr, err_msg));
-    ASSERT_TRUE(err_msg.empty());
+    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, nullptr).IsOK());
     ASSERT_EQ(https_url, "https://bucket-name.us-east-1.s3.amazonaws.com/path/to/object");
     
     s3_url = "s3://s3.amazonaws.com/bucket-name/path/to/object";
-    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, nullptr, err_msg));
-    ASSERT_TRUE(err_msg.empty());
+    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, nullptr).IsOK());
     ASSERT_EQ(https_url, "https://bucket-name.us-east-1.s3.amazonaws.com/path/to/object");
 
     Factory::SetEndpoint("");
     s3_url = "s3://s3.amazonaws.com/bucket-name/path";
-    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, nullptr, err_msg));
-    ASSERT_TRUE(err_msg.empty());
+    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, nullptr).IsOK());
     ASSERT_EQ(https_url, "https://bucket-name.us-east-1.s3.amazonaws.com/path");
 
     Factory::SetUrlStyle("path");
     s3_url = "s3://s3.amazonaws.com/bucket-name/path";
-    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, nullptr, err_msg));
-    ASSERT_TRUE(err_msg.empty());
+    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, nullptr).IsOK());
     ASSERT_EQ(https_url, "https://us-east-1.s3.amazonaws.com/bucket-name/path");
 
     Factory::SetRegion("");
-    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, nullptr, err_msg));
-    ASSERT_TRUE(err_msg.empty());
+    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, nullptr).IsOK());
     ASSERT_EQ(https_url, "https://s3.amazonaws.com/bucket-name/path");
 
     std::string obj;
     s3_url = "s3://localhost:9000/mybucket";
-    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, &obj, err_msg));
-    ASSERT_TRUE(err_msg.empty());
+    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, &obj).IsOK());
     ASSERT_EQ(https_url, "https://localhost:9000/mybucket");
     ASSERT_TRUE(obj.empty());
 
     s3_url = "s3://localhost:9000/mybucket/";
-    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, &obj, err_msg));
-    ASSERT_TRUE(err_msg.empty());
+    ASSERT_TRUE(Factory::GenerateHttpUrl(s3_url, https_url, &obj).IsOK());
     ASSERT_EQ(https_url, "https://localhost:9000/mybucket");
     ASSERT_TRUE(obj.empty());
 
     s3_url = "s3://localhost:9000/";
-    ASSERT_FALSE(Factory::GenerateHttpUrl(s3_url, https_url, &obj, err_msg));
+    ASSERT_FALSE(Factory::GenerateHttpUrl(s3_url, https_url, &obj).IsOK());
 }
 
 TEST(FactoryTest, GetBucketFromHttpsUrlFindsTheBucketInBothUrlStyles) {
